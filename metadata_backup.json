@@ -1,0 +1,7 @@
+{
+  "name": "Blackout Business Studio - ImageLab",
+  "description": "Professional e-commerce product photography studio. Upload your product shots and use AI to create stunning, high-converting backgrounds for web and marketing.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Unreal>ille Studio - ImageLab",
+  "description": "Professional media and e-commerce product photography studio. Upload your product shots and use AI to create stunning, high-converting backgrounds for web and marketing.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

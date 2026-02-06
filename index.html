@@ -1,0 +1,63 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UnrealVille ImageLab | Professional UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Anton&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+      body {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background-color: #050505;
+        overflow-x: hidden;
+      }
+      .brand-name {
+        font-family: 'Anton', sans-serif;
+        color: #FFAB00;
+        letter-spacing: -0.02em;
+      }
+      .topaz-gradient {
+        background: linear-gradient(135deg, #FFAB00 0%, #FFD77A 100%);
+      }
+      .bg-checkered {
+        background-image: 
+          linear-gradient(45deg, #090909 25%, transparent 25%), 
+          linear-gradient(-45deg, #090909 25%, transparent 25%), 
+          linear-gradient(45deg, transparent 75%, #090909 75%), 
+          linear-gradient(-45deg, transparent 75%, #090909 75%);
+        background-size: 32px 32px;
+        background-position: 0 0, 0 16px, 16px -16px, -16px 0px;
+        background-color: #050505;
+      }
+      .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+      .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+      .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 171, 0, 0.1); border-radius: 10px; }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 171, 0, 0.3); }
+      
+      .cursor-grab { cursor: grab; }
+      .cursor-grabbing { cursor: grabbing; }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "jszip": "https://esm.sh/jszip@^3.10.1",
+    "path": "https://esm.sh/path@^0.12.7",
+    "vite": "https://esm.sh/vite@^7.3.1",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+    "url": "https://esm.sh/url@^0.11.4"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-[#050505]">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

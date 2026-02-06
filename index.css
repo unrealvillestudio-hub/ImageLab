@@ -1,0 +1,3 @@
+/* index.css */
+/* evita 404 y te deja margen para overrides mínimos */
+html, body { height: 100%; }
