@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 *.zip
 _releases/
+
+# Release artifacts (keep docs, ignore binaries)
+releases/**/*.zip
+releases/**/*.sha256
+
