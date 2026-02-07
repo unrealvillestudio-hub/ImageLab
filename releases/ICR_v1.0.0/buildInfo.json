@@ -1,0 +1,16 @@
+
+{
+  "tag": "imagelab_tools_icr_v1.0.0",
+  "commit": "9d8e7f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e",
+  "build_time": "2024-05-23T10:30:00Z",
+  "models": {
+    "avatar": "gemini-2.5-flash-image",
+    "scene": "gemini-2.5-flash-image",
+    "ecom": "gemini-2.5-flash-image (background) + Canvas Overlay (product)"
+  },
+  "defaults": {
+    "debug_mode": false,
+    "overlay_policy": "PIXEL_LOCK",
+    "ai_fusion_warning": true
+  }
+}
