@@ -1,0 +1,23 @@
+.uv-h1{
+  font-size: 34px;
+  line-height: 1.05;
+  font-weight: 950;
+  text-transform: uppercase;
+  letter-spacing: .10em;
+}
+.uv-h2{
+  font-size: 22px;
+  line-height: 1.1;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .09em;
+}
+.uv-title{
+  font-size: 18px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .09em;
+}
+.uv-body{ font-size: 14px; line-height: 1.45; color: var(--uv-text); }
+.uv-small{ font-size: 12px; line-height: 1.35; color: var(--uv-muted); }
+.uv-mono{ font-family: var(--uv-font-mono); font-size: 12px; color: var(--uv-muted); }

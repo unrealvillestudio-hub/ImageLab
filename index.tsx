@@ -1,7 +1,8 @@
-
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
+import App from './src/App.tsx';
+import './src/styles/uv_theme.css';
+import './src/styles/uv_typography.css';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

@@ -1,0 +1,181 @@
+:root {
+  color-scheme: dark;
+  --uv-bg: #050505;
+  --uv-panel: rgba(255, 255, 255, 0.04);
+  --uv-border: rgba(255, 255, 255, 0.10);
+  --uv-border-strong: rgba(255, 255, 255, 0.16);
+  
+  --uv-amber: #FFAB00;
+  --uv-amber-2: #FFD77A;
+  --uv-amber-bg: rgba(255, 171, 0, 0.14);
+  --uv-amber-bd: rgba(255, 171, 0, 0.30);
+
+  --uv-green: #10B981;
+  --uv-green-bg: rgba(16, 185, 129, 0.22);
+  --uv-green-bd: rgba(16, 185, 129, 0.35);
+
+  --uv-bad: #EF4444;
+  --uv-text: #EBEBEB;
+  --uv-muted: rgba(235, 235, 235, 0.62);
+
+  /* Typography */
+  --uv-font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
+  --uv-h1: 28px;
+  --uv-h2: 16px;
+  --uv-h3: 12px;
+  --uv-label: 10px;
+  --uv-body: 13px;
+  --uv-track-wide: 0.32em;
+  --uv-track: 0.10em;
+  --uv-radius-lg: 18px;
+  --uv-radius-md: 12px;
+}
+
+body {
+  font-family: var(--uv-font);
+  background-color: var(--uv-bg);
+  color: var(--uv-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Typography Classes */
+.uv-h1 { font-size: var(--uv-h1); font-weight: 900; letter-spacing: 0.02em; text-transform: uppercase; color: #FFF8E7; }
+.uv-h1 span { color: var(--uv-muted); font-weight: 400; }
+.uv-h2 { font-size: var(--uv-h2); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+.uv-h3 { font-size: var(--uv-h3); font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+
+.uv-title {
+  color: var(--uv-amber);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-size: 12px;
+}
+
+.uv-label { font-size: var(--uv-label); font-weight: 900; letter-spacing: var(--uv-track-wide); text-transform: uppercase; color: var(--uv-muted); }
+.uv-body { font-size: var(--uv-body); font-weight: 500; line-height: 1.5; }
+.uv-muted { color: var(--uv-muted); }
+.uv-accent { color: var(--uv-amber); }
+
+/* Layout Classes */
+.uv-panel { background: var(--uv-panel); border: 1px solid var(--uv-border); border-radius: var(--uv-radius-lg); backdrop-blur-xl; }
+.uv-panel-strong { border-color: var(--uv-border-strong); }
+.uv-pill { border-radius: 999px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08); }
+
+.uv-chip {
+  border: 1px solid var(--uv-border);
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.45);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  transition: all 200ms ease;
+}
+
+.uv-chip--active {
+  background: var(--uv-amber-bg);
+  border-color: var(--uv-amber-bd);
+  color: var(--uv-amber);
+  box-shadow: 0 0 15px rgba(255, 171, 0, 0.05);
+}
+
+/* Button Bases */
+.uv-btn { border-radius: 999px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; transition: all 200ms ease; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.uv-btn-primary { background: var(--uv-amber); color: #0A0A0A; }
+.uv-btn-primary:hover { transform: scale(1.02); box-shadow: 0 0 20px var(--uv-amber-bg); }
+.uv-btn-ghost { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.10); color: var(--uv-text); }
+.uv-btn-ghost:hover { background: rgba(255, 255, 255, 0.08); }
+.uv-btn-danger { background: rgba(239, 68, 68, 0.10); border: 1px solid rgba(239, 68, 68, 0.30); color: #FFB4B4; }
+.uv-btn-danger:hover { background: rgba(239, 68, 68, 0.15); }
+
+.uv-btn-text-amber {
+  color: var(--uv-amber);
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.uv-drawer-tab {
+  color: var(--uv-amber) !important;
+}
+
+/* Nav Tabs */
+.uv-tab {
+  padding: 8px 16px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--uv-muted);
+  border: 1px solid transparent;
+  transition: all 200ms ease;
+  background: transparent;
+}
+.uv-tab:hover { color: var(--uv-text); background: rgba(255, 255, 255, 0.05); }
+.uv-tab--active {
+  color: var(--uv-amber);
+  background: var(--uv-amber-bg);
+  border-color: var(--uv-amber-bd);
+  box-shadow: 0 0 15px rgba(255, 171, 0, 0.05);
+}
+
+/* Forms */
+.uv-select, .uv-input {
+  width: 100%;
+  background-color: #0B0B0B;
+  border: 1px solid var(--uv-border);
+  border-radius: var(--uv-radius-md);
+  padding: 12px 16px;
+  font-size: 12px;
+  color: white;
+  outline: none;
+  transition: border-color 200ms ease;
+  appearance: none;
+  color-scheme: dark;
+}
+.uv-select:focus, .uv-input:focus { 
+  border-color: var(--uv-amber-bd); 
+  box-shadow: 0 0 0 2px rgba(255,171,0,0.1);
+}
+
+/* Standard Dropdown Options */
+select option {
+  background-color: #0B0B0B;
+  color: var(--uv-text);
+  padding: 10px;
+}
+
+/* Best effort for native select styling */
+select option:checked,
+select option:hover,
+select option:focus {
+  background-color: rgba(255, 171, 0, 0.22) !important;
+  color: var(--uv-amber) !important;
+}
+
+/* Custom Highlight for Listbox/Menu components */
+.uv-option:hover,
+[role="option"]:hover,
+[data-option]:hover {
+  background: rgba(255, 171, 0, 0.18) !important;
+  color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.uv-option--active,
+[role="option"][aria-selected="true"],
+[data-option][data-selected="true"] {
+  background: rgba(255, 171, 0, 0.22) !important;
+  color: #FFFFFF !important;
+}
+
+/* Custom Overrides */
+.uv-warning {
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.05);
+  color: #FCA5A5;
+  border-radius: var(--uv-radius-md);
+  padding: 12px 16px;
+}
