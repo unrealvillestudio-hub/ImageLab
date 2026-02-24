@@ -1,3 +1,4 @@
+
 import React, { useMemo, useState, useEffect } from "react";
 import { 
     Label, SubToolButton, ResetButton, ToggleFilter, WarningBanner 
@@ -6,6 +7,7 @@ import { RunControlButton } from "../../ui/RunControlButton.tsx";
 import { 
     AspectRatio, DebugMetadata, ToolId, SceneNegativeSpace, ModelStage, VARIANT_OPTIONS, PlacementHint, LibraryAssetKind, ASPECT_RATIOS, BrandProfile 
 } from "../../core/types.ts";
+import { BlueprintInputPanel, ParsedBlueprint } from "../../components/blueprint/BlueprintInputPanel.tsx";
 import { SCENE_ARCHETYPES, buildSceneVariantPrompts } from "../../config/sceneArchetypes.ts";
 import { AVATAR_CATALOG } from "../../config/avatarCatalog.ts";
 import { ECOM_PRESETS } from "../../config/presets.ts";
@@ -72,6 +74,11 @@ export function ToolsModule({
     const [avatarBatchSize, setAvatarBatchSize] = useState<number>(3);
     const [avatarAR, setAvatarAR] = useState<AspectRatio>(ASPECT_RATIOS.PORTRAIT);
 
+    // Blueprint State
+    const [sceneActiveBlueprint, setSceneActiveBlueprint] = useState<ParsedBlueprint | null>(null);
+    const [avatarActiveBlueprint, setAvatarActiveBlueprint] = useState<ParsedBlueprint | null>(null);
+    const [vpActiveBlueprint, setVpActiveBlueprint] = useState<ParsedBlueprint | null>(null);
+
     // VideoPodcast State
     const [vpStep, setVpStep] = useState(1);
     const [vpArchetype, setVpArchetype] = useState<ArchetypeId>("studio_setup");
@@ -81,6 +88,46 @@ export function ToolsModule({
     const [vpLocationId, setVpLocationId] = useState<string>("");
     const [vpSelectedAngles, setVpSelectedAngles] = useState<string[]>([]);
     const [vpVariants, setVpVariants] = useState<number>(1);
+
+    // ─── BRAND CHANGE: explicit manual handler ────────────────────────────────
+    // ONLY called when user manually changes brand via dropdown.
+    // Blueprint loading bypasses this — it sets values directly.
+    const handleBrandChange = (newBrandId: string) => {
+        setVpBrandId(newBrandId);
+        setVpActiveBlueprint(null); // clear blueprint when brand changes manually
+        setVpPersonA("");
+        setVpPersonB("");
+        setVpLocationId("");
+        setVpSelectedAngles([]);
+    };
+
+    // ─── BLUEPRINT SYNC: fires when a blueprint is loaded ────────────────────
+    // Sets brand + person/location directly. No race conditions, no flags.
+    useEffect(() => {
+        if (!vpActiveBlueprint) return;
+
+        const raw = vpActiveBlueprint.raw as any;
+        const bpBrandId = raw.brandId as string;
+
+        if (vpActiveBlueprint.type === 'person') {
+            setVpBrandId(bpBrandId);
+            setVpPersonA(vpActiveBlueprint.id);
+            // Don't clear personB or location — user may have set them already
+        }
+
+        if (vpActiveBlueprint.type === 'location') {
+            setVpBrandId(bpBrandId);
+            setVpLocationId(vpActiveBlueprint.id);
+            if (raw.recommended_angles?.length) {
+                setVpSelectedAngles(raw.recommended_angles.slice(0, 3));
+            }
+        }
+    }, [vpActiveBlueprint]);
+
+    // ─── EFFECTIVE BRAND ID for Step 2 dropdowns ─────────────────────────────
+    // Uses blueprint's brandId directly so dropdowns populate even before
+    // React processes the setVpBrandId state update.
+    const effectiveBrandId = (vpActiveBlueprint?.raw as any)?.brandId ?? vpBrandId;
 
     const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null);
     const [fullScreenPreview, setFullScreenPreview] = useState(false);
@@ -97,7 +144,8 @@ export function ToolsModule({
         if (toolId === 'product') return ecomValidation;
         if (toolId === 'avatar') return avatarValidation;
         if (toolId === 'videopodcast') {
-            if (!vpBrandId) return { isValid: false, severity: "error", message: "Select a Brand first" };
+            const eBrand = (vpActiveBlueprint?.raw as any)?.brandId ?? vpBrandId;
+            if (!eBrand) return { isValid: false, severity: "error", message: "Select a Brand first" };
             if (!vpPersonA) return { isValid: false, severity: "error", message: "Select Person A" };
             if (vpArchetype !== 'single_talking_head' && !vpPersonB) return { isValid: false, severity: "error", message: "Select Person B" };
             if (!vpLocationId) return { isValid: false, severity: "error", message: "Select a Location" };
@@ -105,14 +153,14 @@ export function ToolsModule({
             return { isValid: true, severity: "ok", message: "" };
         }
         return { isValid: true, severity: "ok", message: "" };
-    }, [toolId, sceneValidation, ecomValidation, avatarValidation, vpBrandId, vpPersonA, vpPersonB, vpArchetype, vpLocationId, vpSelectedAngles]);
+    }, [toolId, sceneValidation, ecomValidation, avatarValidation, vpBrandId, vpActiveBlueprint, vpPersonA, vpPersonB, vpArchetype, vpLocationId, vpSelectedAngles]);
 
     const activeKeys = useMemo(() => {
         const keys: string[] = [];
         if (toolId === 'scene') { if (sourceAssetA) keys.push('sourceA'); if (sourceAssetB) keys.push('sourceB'); }
         else if (toolId === 'product') { if (sourceAssetA) keys.push('sourceA'); if (sourceAssetB) keys.push('sourceB'); }
         else if (toolId === 'avatar') { if (sourceAssetA) keys.push('sourceA'); if (sourceAssetB) keys.push('sourceB'); if (ref1Asset) keys.push('ref1'); if (ref2Asset) keys.push('ref2'); if (ref3Asset) keys.push('ref3'); }
-        else if (toolId === 'videopodcast') { /* No direct slots for now, uses blueprints */ }
+        else if (toolId === 'videopodcast') { /* Uses blueprints, no direct slots */ }
         return keys;
     }, [toolId, sourceAssetA, sourceAssetB, ref1Asset, ref2Asset, ref3Asset]);
 
@@ -120,9 +168,12 @@ export function ToolsModule({
         if (toolId === 'scene') return sceneValidation.severity === 'error';
         if (toolId === 'product') return ecomValidation.severity === 'error';
         if (toolId === 'avatar') return avatarValidation.severity === 'error'; 
-        if (toolId === 'videopodcast') return vpStep < 3 || !vpBrandId || !vpPersonA || (vpArchetype !== 'single_talking_head' && !vpPersonB) || !vpLocationId || vpSelectedAngles.length === 0;
+        if (toolId === 'videopodcast') {
+            const eBrand = (vpActiveBlueprint?.raw as any)?.brandId ?? vpBrandId;
+            return vpStep < 3 || !eBrand || !vpPersonA || (vpArchetype !== 'single_talking_head' && !vpPersonB) || !vpLocationId || vpSelectedAngles.length === 0;
+        }
         return false;
-    }, [toolId, sceneValidation, ecomValidation, avatarValidation, vpStep, vpBrandId, vpPersonA, vpPersonB, vpArchetype, vpLocationId, vpSelectedAngles]);
+    }, [toolId, sceneValidation, ecomValidation, avatarValidation, vpStep, vpBrandId, vpActiveBlueprint, vpPersonA, vpPersonB, vpArchetype, vpLocationId, vpSelectedAngles]);
 
     const kindMismatchWarnings = useMemo(() => getKindMismatchWarnings(sourceAssetA, sourceAssetB, toolId === 'avatar' ? 'person' : 'product'), [toolId, sourceAssetA, sourceAssetB]);
 
@@ -162,13 +213,24 @@ export function ToolsModule({
 
     const onGenerateScenes = async (signal: AbortSignal) => {
         const userPrompt = promptTexts.tools_scene || "";
-        const prompts = buildSceneVariantPrompts({ archetype: sceneArchetype, negativeSpace: sceneNS, variants: sceneVariants, customBrief: sceneArchetype === 'custom' ? userPrompt : undefined, userPrompt: userPrompt });
+        let customBrief = sceneArchetype === 'custom' ? userPrompt : undefined;
+        
+        if (sceneActiveBlueprint && sceneActiveBlueprint.type === 'location') {
+            const raw = sceneActiveBlueprint.raw as any;
+            const bpDesc = raw.visual?.description || "";
+            const bpLight = raw.visual?.lighting || "";
+            const bpSig = raw.visual?.signature_elements?.join(", ") || "";
+            const bpParams = raw.imagelab || {};
+            customBrief = (customBrief || "") + ` ${bpDesc}. Lighting: ${bpLight}. Elements: ${bpSig}. Style: ${bpParams.realism_level || ""}, ${bpParams.film_look || ""}, ${bpParams.lens_preset || ""}.`;
+        }
+
+        const prompts = buildSceneVariantPrompts({ archetype: sceneArchetype, negativeSpace: sceneNS, variants: sceneVariants, customBrief, userPrompt: userPrompt });
         const allReferences = [];
         if (sourceAssetB) allReferences.push({ dataUrl: sourceAssetB.dataUrl, label: `Fondo: ${sourceAssetB.label}` });
         for (let i = 0; i < prompts.length; i++) {
             if (signal.aborted) throw new DOMException("Aborted", "AbortError");
             let genImg = await generateImageFromPrompt({ prompt: prompts[i] + ". Negative: text, product", aspectRatio: sceneAR, size: "2k", referenceImages: allReferences, signal });
-            pushOutput({ id: safeId("scene"), module: "tools" as any, createdAt: Date.now(), label: `Scene ${i+1}`, imageUrl: genImg, metadata: globalDebug ? createDebugMetadataHelper("scene_creator", "scene_only", { mode: "SCENE_ONLY" }, { archetype: sceneArchetype, user_prompt: userPrompt }, { sourceA: sourceAssetA, sourceB: sourceAssetB }, i, sceneVariants, [], { enabled: true, prompt_built: true, images_sent: [] }) : undefined, aspect: sceneAR });
+            pushOutput({ id: safeId("scene"), module: "tools" as any, createdAt: Date.now(), label: `Scene ${i+1}`, imageUrl: genImg, metadata: globalDebug ? createDebugMetadataHelper("scene_creator", "scene_only", { mode: "SCENE_ONLY" }, { archetype: sceneArchetype, user_prompt: userPrompt, blueprint: sceneActiveBlueprint?.id }, { sourceA: sourceAssetA, sourceB: sourceAssetB }, i, sceneVariants, [], { enabled: true, prompt_built: true, images_sent: [] }) : undefined, aspect: sceneAR });
         }
     };
 
@@ -190,12 +252,21 @@ export function ToolsModule({
         if (ref2Asset) styleRefs.push({ dataUrl: ref2Asset.dataUrl, label: ref2Asset.label });
         if (ref3Asset) styleRefs.push({ dataUrl: ref3Asset.dataUrl, label: ref3Asset.label });
         const base = AVATAR_CATALOG.basePortraitStyles.find(x => x.id === avatarBaseStyle);
+        
+        let finalPrompt = promptTexts.tools_avatar || "";
+        let customRules = "";
+        if (avatarActiveBlueprint && avatarActiveBlueprint.type === 'person') {
+            const raw = avatarActiveBlueprint.raw as any;
+            finalPrompt += ` ${raw.imagelab?.description || ""}`;
+            customRules += `Portrait photography, ${raw.imagelab?.style || ""}. Compliance: ${raw.compliance_notes || ""}. `;
+            customRules += `Lens: ${raw.imagelab?.lens_preset || "85mm"}. DOF: shallow. Skin: ${raw.imagelab?.skin_detail || "realistic"}.`;
+        }
         for (let i = 0; i < avatarBatchSize; i++) {
              if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-             const res = await generateAvatar({ aspectRatio: avatarAR, baseStyleRules: base?.rules || "", contextRules: "Studio", roleRules: "Model", enableRefs: styleRefs.length > 0, allowMirrors: false, strictIdentity: avatarStrictIdentity, creativityLevel: avatarCreativity, subjectA, subjectB, background, styleRefs: styleRefs.length > 0 ? styleRefs : undefined, userPrompt: promptTexts.tools_avatar, signal });
-             pushOutput({ id: safeId("avatar"), module: "tools" as any, createdAt: Date.now(), label: `Avatar ${i+1}`, imageUrl: res, metadata: globalDebug ? createDebugMetadataHelper("avatar_generator", "avatar_render", { identity_lock: "STRICT" }, { user_prompt: promptTexts.tools_avatar }, { sourceA: sourceAssetA, sourceB: sourceAssetB, ref1: ref1Asset, ref2: ref2Asset, ref3: ref3Asset }, i, avatarBatchSize, [], { enabled: true, prompt_built: true, images_sent: ['subject_a'] }) : undefined, aspect: avatarAR });
+             const res = await generateAvatar({ aspectRatio: avatarAR, baseStyleRules: base?.rules || "", contextRules: "Studio " + customRules, roleRules: "Model", enableRefs: styleRefs.length > 0, allowMirrors: false, strictIdentity: avatarStrictIdentity, creativityLevel: avatarCreativity, subjectA, subjectB, background, styleRefs: styleRefs.length > 0 ? styleRefs : undefined, userPrompt: finalPrompt, signal });
+             pushOutput({ id: safeId("avatar"), module: "tools" as any, createdAt: Date.now(), label: `Avatar ${i+1}`, imageUrl: res, metadata: globalDebug ? createDebugMetadataHelper("avatar_generator", "avatar_render", { identity_lock: "STRICT" }, { user_prompt: finalPrompt, blueprint: avatarActiveBlueprint?.id }, { sourceA: sourceAssetA, sourceB: sourceAssetB, ref1: ref1Asset, ref2: ref2Asset, ref3: ref3Asset }, i, avatarBatchSize, [], { enabled: true, prompt_built: true, images_sent: ['subject_a'] }) : undefined, aspect: avatarAR });
         }
-    }
+    };
 
     const onGenerateVideoPodcast = async (signal: AbortSignal) => {
         const location = LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId);
@@ -219,7 +290,7 @@ export function ToolsModule({
                 if (personB) prompt += ` ${personB.compliance_notes || ""}`;
 
                 const genImg = await generateImageFromPrompt({
-                    prompt: prompt,
+                    prompt,
                     aspectRatio: "16:9",
                     size: "2k",
                     signal
@@ -235,9 +306,10 @@ export function ToolsModule({
                         module: "tools_videopodcast",
                         archetype: vpArchetype,
                         location: vpLocationId,
-                        angle: angle,
+                        angle,
                         persona_a: vpPersonA,
                         persona_b: vpPersonB || undefined,
+                        blueprint_used: vpActiveBlueprint?.id,
                         timestamp: new Date().toISOString()
                     },
                     aspect: "16:9"
@@ -303,6 +375,20 @@ export function ToolsModule({
 
             {toolId === 'scene' && (
                 <div className="space-y-8 animate-in fade-in">
+                    <BlueprintInputPanel 
+                        label="Cargar Location Blueprint" 
+                        allowedTypes={['location']} 
+                        activeBlueprint={sceneActiveBlueprint}
+                        onBlueprintCleared={() => {
+                            setSceneActiveBlueprint(null);
+                            setPromptText("tools_scene", "");
+                        }}
+                        onBlueprintLoaded={(bp) => {
+                            setSceneActiveBlueprint(bp);
+                            const raw = bp.raw as any;
+                            setPromptText("tools_scene", raw.visual?.description || "");
+                        }}
+                    />
                     <div className="grid grid-cols-2 gap-8">
                         <div className="space-y-6">
                             <div className="space-y-2">
@@ -323,6 +409,59 @@ export function ToolsModule({
                     </div>
                     <PromptWindow title="USER PROMPT (OPTIONAL)" value={promptTexts.tools_scene || ""} onChange={(v) => setPromptText("tools_scene", v)} placeholder="Add extra details, style notes..." rows={3} />
                     <RunControlButton className="w-full" label="Generate Scene Backgrounds" onRun={onGenerateScenes} onRunningChange={() => {}} />
+                </div>
+            )}
+
+            {toolId === 'avatar' && (
+                <div className="space-y-8 animate-in fade-in">
+                    <BlueprintInputPanel 
+                        label="Cargar Person Blueprint" 
+                        allowedTypes={['person']} 
+                        activeBlueprint={avatarActiveBlueprint}
+                        onBlueprintCleared={() => {
+                            setAvatarActiveBlueprint(null);
+                            setPromptText("tools_avatar", "");
+                        }}
+                        onBlueprintLoaded={(bp) => {
+                            setAvatarActiveBlueprint(bp);
+                            const raw = bp.raw as any;
+                            setPromptText("tools_avatar", raw.imagelab?.description || "");
+                        }}
+                    />
+                    <div className="grid grid-cols-3 gap-6">
+                        <div className="space-y-2">
+                            <div className="uv-title">Base Style</div>
+                            <select value={avatarBaseStyle} onChange={(e) => setAvatarBaseStyle(e.target.value)} className="uv-select">
+                                {AVATAR_CATALOG.basePortraitStyles.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                            </select>
+                        </div>
+                        <div className="space-y-2">
+                            <div className="uv-title">Aspect Ratio</div>
+                            <select value={avatarAR as any} onChange={(e) => setAvatarAR(e.target.value as any)} className="uv-select">
+                                {Object.entries(ASPECT_RATIOS).map(([k,v]) => <option key={k} value={v as any}>{k} ({v as any})</option>)}
+                            </select>
+                        </div>
+                        <div className="space-y-2">
+                            <div className="uv-title">Batch Size</div>
+                            <select value={avatarBatchSize} onChange={(e) => setAvatarBatchSize(Number(e.target.value))} className="uv-select">
+                                {(VARIANT_OPTIONS as any).map((v: any) => <option key={v} value={v}>{v} Variants</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-6">
+                         <div className="flex items-center justify-between bg-white/5 p-4 rounded-xl border border-white/5">
+                            <div className="text-xs font-bold text-white/80">Strict Identity Lock</div>
+                            <button onClick={() => setAvatarStrictIdentity(!avatarStrictIdentity)} className={`w-12 h-6 rounded-full transition-colors relative ${avatarStrictIdentity ? "bg-emerald-500" : "bg-white/10"}`}>
+                                <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${avatarStrictIdentity ? "left-7" : "left-1"}`} />
+                            </button>
+                        </div>
+                        <div className="space-y-2">
+                             <div className="uv-title">Creativity Level ({avatarCreativity})</div>
+                             <input type="range" min="1" max="5" step="1" value={avatarCreativity} onChange={(e) => setAvatarCreativity(Number(e.target.value))} className="w-full accent-[#FFAB00]" />
+                        </div>
+                    </div>
+                    <PromptWindow title="USER PROMPT (OPTIONAL)" value={promptTexts.tools_avatar || ""} onChange={(v) => setPromptText("tools_avatar", v)} placeholder="Describe the person, clothing, style..." rows={3} />
+                    <RunControlButton className="w-full" label="Generate Avatars" onRun={onGenerateAvatar} onRunningChange={() => {}} disabled={isExecutionBlocked} />
                 </div>
             )}
 
@@ -360,8 +499,26 @@ export function ToolsModule({
                         ))}
                     </div>
 
+                    {/* ── STEP 1: SETUP ─────────────────────────────────────────────────── */}
                     {vpStep === 1 && (
                         <div className="grid grid-cols-2 gap-8 animate-in slide-in-from-bottom-4">
+                            <div className="col-span-2">
+                                <BlueprintInputPanel 
+                                    label="Cargar Blueprint (Person/Location)" 
+                                    allowedTypes={['person', 'location']} 
+                                    activeBlueprint={vpActiveBlueprint}
+                                    onBlueprintCleared={() => {
+                                        setVpActiveBlueprint(null);
+                                        // Don't auto-clear brand/person/location on clear
+                                        // Let user decide
+                                    }}
+                                    onBlueprintLoaded={(bp) => {
+                                        // Set blueprint — sync useEffect will handle
+                                        // setting vpBrandId and vpPersonA/vpLocationId
+                                        setVpActiveBlueprint(bp);
+                                    }}
+                                />
+                            </div>
                             <div className="space-y-6">
                                 <div className="space-y-2">
                                     <div className="uv-title">Archetype</div>
@@ -391,14 +548,8 @@ export function ToolsModule({
                                 <div className="space-y-2">
                                     <div className="uv-title">Brand</div>
                                     <select 
-                                        value={vpBrandId} 
-                                        onChange={e => {
-                                            setVpBrandId(e.target.value);
-                                            setVpPersonA("");
-                                            setVpPersonB("");
-                                            setVpLocationId("");
-                                            setVpSelectedAngles([]);
-                                        }} 
+                                        value={vpBrandId}
+                                        onChange={e => handleBrandChange(e.target.value)}
                                         className="uv-select"
                                     >
                                         <option value="">-- Select Brand --</option>
@@ -406,9 +557,14 @@ export function ToolsModule({
                                             <option key={b.id} value={b.id}>{b.displayName}</option>
                                         ))}
                                     </select>
+                                    {vpActiveBlueprint && (
+                                        <div className="text-[10px] text-white/30 mt-1">
+                                            Blueprint loaded — brand pre-selected. Change here to override.
+                                        </div>
+                                    )}
                                 </div>
                                 <button 
-                                    disabled={!vpBrandId}
+                                    disabled={!effectiveBrandId}
                                     onClick={() => setVpStep(2)}
                                     className="w-full py-4 rounded-full bg-white text-black font-black uppercase tracking-widest text-xs disabled:opacity-20 transition-all hover:scale-[1.02]"
                                 >
@@ -418,6 +574,7 @@ export function ToolsModule({
                         </div>
                     )}
 
+                    {/* ── STEP 2: PERSONS & LOCATION ────────────────────────────────────── */}
                     {vpStep === 2 && (
                         <div className="grid grid-cols-2 gap-8 animate-in slide-in-from-bottom-4">
                             <div className="space-y-6">
@@ -426,9 +583,13 @@ export function ToolsModule({
                                     <div className="space-y-4 p-4 bg-white/5 rounded-2xl border border-white/5">
                                         <div className="space-y-2">
                                             <Label>Persona A</Label>
-                                            <select value={vpPersonA} onChange={e => setVpPersonA(e.target.value)} className="uv-select">
+                                            <select 
+                                                value={vpPersonA} 
+                                                onChange={e => setVpPersonA(e.target.value)} 
+                                                className="uv-select"
+                                            >
                                                 <option value="">-- Select Person A --</option>
-                                                {getBlueprintsByBrand(vpBrandId).map(p => (
+                                                {getBlueprintsByBrand(effectiveBrandId).map(p => (
                                                     <option key={p.id} value={p.id}>{p.displayName} ({p.role_default})</option>
                                                 ))}
                                             </select>
@@ -437,11 +598,21 @@ export function ToolsModule({
                                             <>
                                                 <div className="space-y-2">
                                                     <Label>Persona B</Label>
-                                                    <select value={vpPersonB} onChange={e => setVpPersonB(e.target.value)} className="uv-select">
+                                                    <select 
+                                                        value={vpPersonB} 
+                                                        onChange={e => setVpPersonB(e.target.value)} 
+                                                        className="uv-select"
+                                                    >
                                                         <option value="">-- Select Person B --</option>
-                                                        {getBlueprintsByBrand(vpBrandId).map(p => (
-                                                            <option key={p.id} value={p.id}>{p.displayName} ({p.role_default})</option>
-                                                        ))}
+                                                        {getBlueprintsByBrand(effectiveBrandId)
+                                                            .filter(p => p.id !== vpPersonA)
+                                                            .map(p => (
+                                                                <option key={p.id} value={p.id}>{p.displayName} ({p.role_default})</option>
+                                                            ))
+                                                        }
+                                                        {getBlueprintsByBrand(effectiveBrandId).filter(p => p.id !== vpPersonA).length === 0 && (
+                                                            <option disabled value="">— Add more blueprints for this brand —</option>
+                                                        )}
                                                     </select>
                                                 </div>
                                                 <button 
@@ -474,47 +645,59 @@ export function ToolsModule({
                                                 className="uv-select"
                                             >
                                                 <option value="">-- Select Location --</option>
-                                                {getLocationsByBrand(vpBrandId).filter(l => l.compatible_archetypes.includes(vpArchetype)).map(l => (
-                                                    <option key={l.id} value={l.id}>{l.displayName}</option>
-                                                ))}
+                                                {getLocationsByBrand(effectiveBrandId)
+                                                    .filter(l => !vpArchetype || l.compatible_archetypes.includes(vpArchetype as ArchetypeId))
+                                                    .map(l => (
+                                                        <option key={l.id} value={l.id}>{l.displayName}</option>
+                                                    ))
+                                                }
                                             </select>
                                         </div>
-                                        {vpLocationId && (
-                                            <div className="space-y-4 animate-in fade-in">
-                                                <div className="space-y-2">
-                                                    <Label>Angles to Generate (Max 5)</Label>
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId)?.recommended_angles.map(angle => (
-                                                            <button 
-                                                                key={angle}
-                                                                onClick={() => {
-                                                                    if (vpSelectedAngles.includes(angle)) {
-                                                                        setVpSelectedAngles(prev => prev.filter(a => a !== angle));
-                                                                    } else if (vpSelectedAngles.length < 5) {
-                                                                        setVpSelectedAngles(prev => [...prev, angle]);
-                                                                    }
-                                                                }}
-                                                                className={`px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all ${vpSelectedAngles.includes(angle) ? "bg-[#FFAB00] text-black" : "bg-white/5 text-white/40 hover:bg-white/10"}`}
-                                                            >
-                                                                {angle}
-                                                            </button>
-                                                        ))}
+                                        {vpLocationId && (() => {
+                                            const loc = LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId);
+                                            if (!loc) return null;
+                                            return (
+                                                <div className="space-y-4 animate-in fade-in">
+                                                    <div className="space-y-2">
+                                                        <Label>Angles to Generate (Max 5)</Label>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {loc.recommended_angles.map((angle: string) => (
+                                                                <button 
+                                                                    key={angle}
+                                                                    onClick={() => {
+                                                                        if (vpSelectedAngles.includes(angle)) {
+                                                                            setVpSelectedAngles(prev => prev.filter(a => a !== angle));
+                                                                        } else if (vpSelectedAngles.length < 5) {
+                                                                            setVpSelectedAngles(prev => [...prev, angle]);
+                                                                        }
+                                                                    }}
+                                                                    className={`px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all ${vpSelectedAngles.includes(angle) ? "bg-[#FFAB00] text-black" : "bg-white/5 text-white/40 hover:bg-white/10"}`}
+                                                                >
+                                                                    {angle}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-2 p-3 bg-black/40 rounded-xl border border-white/5">
+                                                        <div className="text-[9px] text-white/30 uppercase font-black">Realism: <span className="text-white/60">{loc.imagelab.realism_level}</span></div>
+                                                        <div className="text-[9px] text-white/30 uppercase font-black">Film: <span className="text-white/60">{loc.imagelab.film_look}</span></div>
+                                                        <div className="text-[9px] text-white/30 uppercase font-black">Lens: <span className="text-white/60">{loc.imagelab.lens_preset}</span></div>
+                                                        <div className="text-[9px] text-white/30 uppercase font-black">DOF: <span className="text-white/60">{loc.imagelab.depth_of_field}</span></div>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-2 gap-2 p-3 bg-black/40 rounded-xl border border-white/5">
-                                                    <div className="text-[9px] text-white/30 uppercase font-black">Realism: <span className="text-white/60">{LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId)?.imagelab.realism_level}</span></div>
-                                                    <div className="text-[9px] text-white/30 uppercase font-black">Film: <span className="text-white/60">{LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId)?.imagelab.film_look}</span></div>
-                                                    <div className="text-[9px] text-white/30 uppercase font-black">Lens: <span className="text-white/60">{LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId)?.imagelab.lens_preset}</span></div>
-                                                    <div className="text-[9px] text-white/30 uppercase font-black">DOF: <span className="text-white/60">{LOCATION_BLUEPRINTS.find(l => l.id === vpLocationId)?.imagelab.depth_of_field}</span></div>
-                                                </div>
-                                            </div>
-                                        )}
+                                            );
+                                        })()}
                                     </div>
                                 </div>
                                 <div className="flex gap-4">
                                     <button onClick={() => setVpStep(1)} className="flex-1 py-4 rounded-full bg-white/5 text-white/60 font-black uppercase tracking-widest text-xs hover:bg-white/10 transition-all">Back</button>
                                     <button 
-                                        disabled={!vpLocationId || vpSelectedAngles.length === 0 || !vpPersonA || (vpArchetype !== 'single_talking_head' && !vpPersonB)}
+                                        disabled={
+                                            !vpLocationId || 
+                                            vpSelectedAngles.length === 0 || 
+                                            !vpPersonA || 
+                                            (vpArchetype !== 'single_talking_head' && !vpPersonB)
+                                        }
                                         onClick={() => setVpStep(3)}
                                         className="flex-[2] py-4 rounded-full bg-white text-black font-black uppercase tracking-widest text-xs disabled:opacity-20 transition-all hover:scale-[1.02]"
                                     >
@@ -525,6 +708,7 @@ export function ToolsModule({
                         </div>
                     )}
 
+                    {/* ── STEP 3: GENERATION ────────────────────────────────────────────── */}
                     {vpStep === 3 && (
                         <div className="space-y-8 animate-in slide-in-from-bottom-4">
                             <div className="grid grid-cols-3 gap-6">
@@ -536,7 +720,7 @@ export function ToolsModule({
                                     </div>
                                     <div className="space-y-2">
                                         <div className="text-[10px] text-white/40 uppercase font-black">Brand</div>
-                                        <div className="text-sm font-bold">{BRANDS.find(b => b.id === vpBrandId)?.displayName}</div>
+                                        <div className="text-sm font-bold">{BRANDS.find(b => b.id === effectiveBrandId)?.displayName}</div>
                                     </div>
                                 </div>
                                 <div className="p-6 bg-white/5 rounded-[32px] border border-white/5 space-y-4">
