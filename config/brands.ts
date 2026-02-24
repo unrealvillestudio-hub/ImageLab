@@ -1,4 +1,4 @@
-import { BrandProfile } from "../types";
+import { BrandProfile } from "../core/types.ts";
 
 export const BRANDS: BrandProfile[] = [
   {
