@@ -77,7 +77,10 @@ export function ToolsModule({
     // Blueprint State
     const [sceneActiveBlueprint, setSceneActiveBlueprint] = useState<ParsedBlueprint | null>(null);
     const [avatarActiveBlueprint, setAvatarActiveBlueprint] = useState<ParsedBlueprint | null>(null);
+    const [ecomActiveBlueprint, setEcomActiveBlueprint] = useState<ParsedBlueprint | null>(null);
     const [vpActiveBlueprint, setVpActiveBlueprint] = useState<ParsedBlueprint | null>(null);
+    const [vpBlueprintB, setVpBlueprintB] = useState<ParsedBlueprint | null>(null);       // segunda persona
+    const [vpLocationBlueprint, setVpLocationBlueprint] = useState<ParsedBlueprint | null>(null); // location
 
     // VideoPodcast State
     const [vpStep, setVpStep] = useState(1);
@@ -467,6 +470,20 @@ export function ToolsModule({
 
             {toolId === 'product' && (
                 <div className="space-y-8 animate-in fade-in">
+                    <BlueprintInputPanel 
+                        label="Cargar Product Blueprint" 
+                        allowedTypes={['product']} 
+                        activeBlueprint={ecomActiveBlueprint}
+                        onBlueprintCleared={() => setEcomActiveBlueprint(null)}
+                        onBlueprintLoaded={(bp) => {
+                            setEcomActiveBlueprint(bp);
+                            const raw = bp.raw as any;
+                            // Auto-fill prompt con descripción del producto si existe
+                            if (raw.description?.en || raw.description?.es) {
+                                setPromptText("tools_product", raw.description?.en || raw.description?.es || "");
+                            }
+                        }}
+                    />
                     <div className="flex justify-between items-end gap-6">
                         <div className="flex-1 space-y-2">
                             <div className="uv-title">Quick Presets</div>
@@ -502,20 +519,32 @@ export function ToolsModule({
                     {/* ── STEP 1: SETUP ─────────────────────────────────────────────────── */}
                     {vpStep === 1 && (
                         <div className="grid grid-cols-2 gap-8 animate-in slide-in-from-bottom-4">
-                            <div className="col-span-2">
+                            <div className="col-span-2 space-y-3">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-white/30">Blueprints de la escena</div>
                                 <BlueprintInputPanel 
-                                    label="Cargar Blueprint (Person/Location)" 
-                                    allowedTypes={['person', 'location']} 
+                                    label="Persona A — Principal (obligatorio)" 
+                                    allowedTypes={['person']} 
                                     activeBlueprint={vpActiveBlueprint}
-                                    onBlueprintCleared={() => {
-                                        setVpActiveBlueprint(null);
-                                        // Don't auto-clear brand/person/location on clear
-                                        // Let user decide
-                                    }}
+                                    onBlueprintCleared={() => { setVpActiveBlueprint(null); }}
+                                    onBlueprintLoaded={(bp) => { setVpActiveBlueprint(bp); }}
+                                />
+                                <BlueprintInputPanel 
+                                    label="Persona B — Co-host / Invitado (opcional)" 
+                                    allowedTypes={['person']} 
+                                    activeBlueprint={vpBlueprintB}
+                                    onBlueprintCleared={() => setVpBlueprintB(null)}
+                                    onBlueprintLoaded={(bp) => setVpBlueprintB(bp)}
+                                />
+                                <BlueprintInputPanel 
+                                    label="Location Blueprint — Escena / Entorno (opcional)" 
+                                    allowedTypes={['location']} 
+                                    activeBlueprint={vpLocationBlueprint}
+                                    onBlueprintCleared={() => setVpLocationBlueprint(null)}
                                     onBlueprintLoaded={(bp) => {
-                                        // Set blueprint — sync useEffect will handle
-                                        // setting vpBrandId and vpPersonA/vpLocationId
-                                        setVpActiveBlueprint(bp);
+                                        setVpLocationBlueprint(bp);
+                                        // Auto-sugerir archetype si el BP lo indica
+                                        const raw = bp.raw as any;
+                                        if (raw.archetype_id) setVpArchetype(raw.archetype_id as ArchetypeId);
                                     }}
                                 />
                             </div>
