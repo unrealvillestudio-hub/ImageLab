@@ -1,5 +1,7 @@
 // ─── BlueprintInputPanel ──────────────────────────────────────────────────────
-// Azul + badge verde "Blueprint inyectado" cuando activo.
+// Look & feel integrado con el tema UV de ImageLab.
+// Vacío: uv-panel con título amber (uv-title style).
+// Activo: borde azul + badge verde "Blueprint inyectado".
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useRef, useState } from "react";
@@ -30,9 +32,9 @@ const TYPE_META: Record<BlueprintType, { icon: string; label: string }> = {
 
 function inferType(d: Record<string, unknown>): BlueprintType | null {
   const sv = (d.schema_version as string) ?? '';
-  if (sv.startsWith('BP_PERSON')   || d.voicelab   || d.humanize)       return 'person';
-  if (sv.startsWith('BP_LOCATION') || d.location   || d.scene)          return 'location';
-  if (sv.startsWith('BP_PRODUCT')  || d.compliance_flags || d.sku)      return 'product';
+  if (sv.startsWith('BP_PERSON')   || d.voicelab   || d.humanize)        return 'person';
+  if (sv.startsWith('BP_LOCATION') || d.location   || d.scene)           return 'location';
+  if (sv.startsWith('BP_PRODUCT')  || d.compliance_flags || d.sku)       return 'product';
   const s = (d.schema as string) ?? '';
   if (s === 'BP_PERSON'  || d.persona)  return 'person';
   if (s === 'BP_LOCATION')              return 'location';
@@ -44,16 +46,28 @@ function extractName(d: Record<string, unknown>): string {
   return ((d.displayName || d.display_name || d.location_name || d.name || d.id) as string) || 'Sin nombre';
 }
 
-function parseBP(json: string, allowed: BlueprintType[], allowedLabel: string): { bp: ParsedBlueprint } | { error: string } {
+function parseBP(
+  json: string,
+  allowed: BlueprintType[],
+  allowedLabel: string
+): { bp: ParsedBlueprint } | { error: string } {
   let data: Record<string, unknown>;
   try { data = JSON.parse(json); } catch { return { error: 'JSON inválido.' }; }
   const type = inferType(data);
   if (!type) return { error: 'No se detecta el tipo (BP_PERSON / BP_LOCATION / BP_PRODUCT).' };
   if (!allowed.includes(type)) return { error: `Tipo "${type}" no permitido aquí. Se esperaba: ${allowedLabel}.` };
-  return { bp: { id: (data.id as string) ?? crypto.randomUUID(), type, name: extractName(data), brandId: ((data.brandId || data.brand_id) as string) ?? 'unknown', raw: data } };
+  return {
+    bp: {
+      id: (data.id as string) ?? crypto.randomUUID(),
+      type,
+      name: extractName(data),
+      brandId: ((data.brandId || data.brand_id) as string) ?? 'unknown',
+      raw: data,
+    }
+  };
 }
 
-// ── Sub-panel de carga ────────────────────────────────────────────────────────
+// ── Panel de carga interno ────────────────────────────────────────────────────
 function LoadPanel({ onLoad, allowedLabel, fileRef, handleFile }: {
   onLoad: (json: string) => void;
   allowedLabel: string;
@@ -63,40 +77,51 @@ function LoadPanel({ onLoad, allowedLabel, fileRef, handleFile }: {
   const [paste, setPaste] = useState('');
   const [err, setErr] = useState<string | null>(null);
 
-  const doLoad = (json: string) => {
-    setErr(null);
-    const r = parseBP(json, [], allowedLabel); // validation done in parent
-    // just relay the raw text
-    onLoad(json);
-  };
-
   return (
-    <div className="px-4 pb-4 pt-3 space-y-3 bg-black/25 border-t border-white/8">
+    <div className="px-4 pb-4 pt-3 space-y-3" style={{ background: 'rgba(0,0,0,0.25)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
       <button
         onClick={() => fileRef.current?.click()}
-        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-dashed border-white/15 text-xs text-white/40 hover:border-white/35 hover:text-white/70 transition-colors"
+        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs transition-colors"
+        style={{ border: '1px dashed rgba(255,171,0,0.25)', color: 'rgba(255,171,0,0.5)' }}
+        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,171,0,0.5)'; (e.currentTarget as HTMLButtonElement).style.color = '#FFAB00'; }}
+        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,171,0,0.25)'; (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,171,0,0.5)'; }}
       >
         📂 Cargar archivo .json
       </button>
       <div>
-        <p className="text-[10px] text-white/25 mb-1.5 font-mono">O pega el JSON ({allowedLabel}):</p>
+        <p className="mb-1.5 font-mono" style={{ fontSize: '10px', color: 'rgba(235,235,235,0.3)', letterSpacing: '0.1em' }}>
+          O pega el JSON ({allowedLabel}):
+        </p>
         <textarea
           value={paste}
           onChange={e => { setPaste(e.target.value); setErr(null); }}
           placeholder={'{ "schema_version": "BP_PERSON_1.0", "displayName": "...", ... }'}
           rows={10}
-          className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-[11px] text-white/60 placeholder:text-white/20 outline-none focus:border-blue-500/40 resize-y font-mono leading-relaxed"
-          style={{ minHeight: '160px' }}
+          className="w-full rounded-xl px-3 py-2.5 font-mono leading-relaxed resize-y outline-none"
+          style={{
+            fontSize: '11px',
+            background: 'rgba(0,0,0,0.4)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            color: 'rgba(235,235,235,0.6)',
+            minHeight: '160px',
+          }}
+          onFocus={e => { e.currentTarget.style.borderColor = 'rgba(255,171,0,0.3)'; }}
+          onBlur={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'; }}
         />
       </div>
       <button
-        onClick={() => onLoad(paste)}
+        onClick={() => { setErr(null); onLoad(paste); }}
         disabled={!paste.trim()}
-        className="w-full py-2.5 rounded-xl bg-blue-600/25 hover:bg-blue-600/40 border border-blue-500/30 disabled:opacity-30 disabled:cursor-not-allowed text-sm text-blue-300 font-semibold transition-colors"
+        className="w-full py-2.5 rounded-xl text-sm font-bold transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        style={{ background: 'rgba(255,171,0,0.12)', border: '1px solid rgba(255,171,0,0.25)', color: '#FFAB00' }}
       >
         Cargar Blueprint
       </button>
-      {err && <p className="text-[11px] text-red-400 bg-red-500/10 rounded-xl px-3 py-2 border border-red-500/20">❌ {err}</p>}
+      {err && (
+        <p className="text-xs px-3 py-2 rounded-xl" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', color: '#F87171' }}>
+          ❌ {err}
+        </p>
+      )}
     </div>
   );
 }
@@ -104,7 +129,7 @@ function LoadPanel({ onLoad, allowedLabel, fileRef, handleFile }: {
 // ── Componente principal ──────────────────────────────────────────────────────
 export function BlueprintInputPanel({ label, allowedTypes, activeBlueprint, onBlueprintLoaded, onBlueprintCleared }: Props) {
   const [expanded, setExpanded] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr]           = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const allowedLabel = allowedTypes.map(t => TYPE_META[t].label).join(' / ');
@@ -115,7 +140,6 @@ export function BlueprintInputPanel({ label, allowedTypes, activeBlueprint, onBl
     if ('error' in result) { setErr(result.error); return; }
     onBlueprintLoaded(result.bp);
     setExpanded(false);
-    setErr(null);
   };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -127,34 +151,44 @@ export function BlueprintInputPanel({ label, allowedTypes, activeBlueprint, onBl
     e.target.value = '';
   };
 
-  // ── ACTIVO ───────────────────────────────────────────────────────────────
+  // ── ACTIVO — borde azul, badge verde ─────────────────────────────────────
   if (activeBlueprint) {
     const meta = TYPE_META[activeBlueprint.type];
     return (
-      <div className="rounded-2xl border-2 border-blue-500/50 bg-blue-500/8 overflow-hidden">
+      <div className="rounded-2xl overflow-hidden" style={{ border: '2px solid rgba(59,130,246,0.55)', background: 'rgba(59,130,246,0.07)' }}>
         <div className="flex items-center gap-3 px-4 py-3.5">
-          <span className="text-2xl">{meta.icon}</span>
+          <span style={{ fontSize: '22px' }}>{meta.icon}</span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-sm font-bold text-blue-100 leading-tight">{activeBlueprint.name}</p>
-              <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/35 text-emerald-400 font-semibold whitespace-nowrap">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+              <p className="text-sm font-bold truncate" style={{ color: '#BFDBFE' }}>{activeBlueprint.name}</p>
+              {/* Badge verde animado */}
+              <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full font-semibold whitespace-nowrap"
+                style={{ fontSize: '10px', background: 'rgba(16,185,129,0.18)', border: '1px solid rgba(16,185,129,0.35)', color: '#34D399' }}>
+                <span className="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#34D399' }} />
                 Blueprint inyectado
               </span>
             </div>
-            <p className="text-[11px] text-blue-300/50 mt-0.5">{meta.label} · {activeBlueprint.brandId}</p>
+            <p className="mt-0.5" style={{ fontSize: '11px', color: 'rgba(147,197,253,0.5)' }}>
+              {meta.label} · {activeBlueprint.brandId}
+            </p>
           </div>
           <button
             onClick={() => { onBlueprintCleared(); setExpanded(false); }}
-            className="flex-shrink-0 text-[10px] px-2.5 py-1 rounded-lg bg-white/5 hover:bg-red-500/15 hover:text-red-400 text-white/35 border border-white/10 hover:border-red-500/25 transition-all"
+            className="flex-shrink-0 rounded-lg transition-all"
+            style={{ fontSize: '10px', padding: '4px 10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.10)', color: 'rgba(255,255,255,0.35)' }}
+            onMouseEnter={e => { const b = e.currentTarget; b.style.background = 'rgba(239,68,68,0.12)'; b.style.color = '#F87171'; b.style.borderColor = 'rgba(239,68,68,0.25)'; }}
+            onMouseLeave={e => { const b = e.currentTarget; b.style.background = 'rgba(255,255,255,0.04)'; b.style.color = 'rgba(255,255,255,0.35)'; b.style.borderColor = 'rgba(255,255,255,0.10)'; }}
           >
             ✕ Quitar
           </button>
         </div>
-        {err && <p className="text-[11px] text-red-400 px-4 pb-2">❌ {err}</p>}
+        {err && <p className="px-4 pb-2 text-xs" style={{ color: '#F87171' }}>❌ {err}</p>}
         <button
           onClick={() => setExpanded(v => !v)}
-          className="w-full text-[10px] text-blue-400/40 hover:text-blue-400 py-1.5 border-t border-blue-500/15 hover:bg-blue-500/5 transition-colors"
+          className="w-full py-1.5 transition-colors"
+          style={{ fontSize: '10px', color: 'rgba(147,197,253,0.4)', borderTop: '1px solid rgba(59,130,246,0.15)' }}
+          onMouseEnter={e => { e.currentTarget.style.color = '#93C5FD'; e.currentTarget.style.background = 'rgba(59,130,246,0.05)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'rgba(147,197,253,0.4)'; e.currentTarget.style.background = 'transparent'; }}
         >
           {expanded ? '▲ Cerrar' : '↺ Reemplazar blueprint'}
         </button>
@@ -164,21 +198,29 @@ export function BlueprintInputPanel({ label, allowedTypes, activeBlueprint, onBl
     );
   }
 
-  // ── VACÍO ─────────────────────────────────────────────────────────────────
+  // ── VACÍO — mismo look que uv-panel con título amber ──────────────────────
   return (
-    <div className="rounded-2xl border border-dashed border-white/12 hover:border-white/22 overflow-hidden transition-colors">
+    <div className="rounded-2xl overflow-hidden" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.10)' }}>
       <button
         onClick={() => setExpanded(v => !v)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/3 transition-colors text-left"
+        className="w-full flex items-center gap-3 px-4 py-3 text-left transition-colors"
+        onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,171,0,0.04)'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
       >
-        <span className="text-lg opacity-25">🗂</span>
+        {/* Ícono amber */}
+        <span style={{ fontSize: '16px', color: '#FFAB00', opacity: 0.7 }}>🗂</span>
         <div className="flex-1">
-          <p className="text-xs text-white/45 font-medium">{label}</p>
-          <p className="text-[10px] text-white/22 mt-0.5">{allowedLabel}</p>
+          {/* Título en estilo uv-title: amber, bold, uppercase, tracking */}
+          <p style={{ color: '#FFAB00', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.18em', fontSize: '11px' }}>
+            {label}
+          </p>
+          <p style={{ fontSize: '10px', color: 'rgba(235,235,235,0.3)', marginTop: '2px', letterSpacing: '0.08em' }}>
+            {allowedLabel}
+          </p>
         </div>
-        <span className="text-white/20 text-xs">{expanded ? '▲' : '▼'}</span>
+        <span style={{ color: 'rgba(255,171,0,0.4)', fontSize: '11px' }}>{expanded ? '▲' : '▼'}</span>
       </button>
-      {err && <p className="text-[11px] text-red-400 px-4 pb-2">❌ {err}</p>}
+      {err && <p className="px-4 pb-2 text-xs" style={{ color: '#F87171' }}>❌ {err}</p>}
       {expanded && (
         <>
           <LoadPanel onLoad={handleLoad} allowedLabel={allowedLabel} fileRef={fileRef} handleFile={handleFile} />
