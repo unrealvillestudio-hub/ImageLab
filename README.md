@@ -1,25 +1,59 @@
-# UnrealVille Studio - ImageLab
+# ImageLab — Unreal>ille Studio
 
-A specialized tool for generating prompt packs, creating scenes, and managing digital assets for AI image generation workflows.
+Generador de prompt packs para imagen AI del ecosistema Unreal>ille Studio.
+Produce prompts estructurados para generación de escenas, avatares y assets de producto.
 
-## Features
+**Deploy:** Google AI Studio
+**Contexto completo del ecosistema:** [`CoreProject/CONTEXT.md`](https://github.com/unrealvillestudio-hub/CoreProject/blob/main/CONTEXT.md)
 
-- **PromptPack Generator**: Create structured JSON manifests for AI image generation pipelines.
-- **Scene Creator**: Generate scene backgrounds based on archetypes or custom prompts.
-- **Asset Tools**: Remove backgrounds, resize/convert images, and manage asset libraries.
-- **Advanced Customization**: Fine-tune generation parameters, including seeds, compositing options, and more.
-- **Offline Capable**: Works with a mock generator if no API key is provided.
+---
 
-## Getting Started
+## Rol en el ecosistema
 
-### Prerequisites
+ImageLab transforma BPs (personas, locaciones, productos) en prompts de imagen listos para ejecutar en modelos generativos. Es el punto de entrada visual del ecosistema.
 
-- Node.js 18+
-- npm or yarn
+```
+BluePrints (BP_PERSON + BP_LOCATION + BP_PRODUCT)
+    ↓
+ImageLab (genera prompt packs)
+    ↓
+Modelos de imagen (Midjourney, Flux, SDXL, etc.)
+```
 
-### Installation
+**Limitación confirmada:** Consistencia facial multi-persona simultánea requiere ComfyUI + InstantID. No solucionable en AI Studio.
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
+---
+
+## Stack
+
+- React 18 + TypeScript + Vite + Tailwind
+- AI: Gemini 2.0 Flash (Gemini API)
+- Deploy: Google AI Studio
+
+---
+
+## Dependencias
+
+| Consume | Provee |
+|---------|--------|
+| BP_PERSON (voz visual, rasgos) | Prompt packs de escena |
+| BP_LOCATION (atributos visuales) | Prompts de avatar |
+| BP_PRODUCT (packaging, colores) | Prompts de producto |
+
+---
+
+## Changelog
+
+| Fecha | Cambio |
+|---|---|
+| 2026-03-20 | README actualizado con arquitectura de ecosistema |
+
+---
+
+## Desarrollo local
+
+```bash
+npm install
+cp .env.example .env.local  # añade GEMINI_API_KEY
+npm run dev
+```
