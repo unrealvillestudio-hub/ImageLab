@@ -1,7 +1,5 @@
-
 import React, { useMemo, useState, useRef, useEffect } from "react";
 import JSZip from "jszip";
-// Fix: Use corrected relative paths for internal modules to resolve module not found errors
 import type {
   LibraryAsset,
   LibraryAssetKind,
@@ -14,37 +12,29 @@ import {
   downloadDataUrl,
   safeId,
 } from "./utils/imageUtils.ts";
-
-// CORE IMPORTS
 import { detectAssetKind } from "./core/vision/inferKind.ts";
 import { BUILD_TAG } from "./config/buildTag.ts";
-
-// MODULES IMPORTS
 import { LibraryProvider, useLibraryStore } from "./ui/stores/libraryStore.tsx";
 import { OutputProvider, useOutputStore } from "./ui/stores/outputStore.tsx";
+import { BrandsProvider } from "./lib/brandsContext.tsx"; // ← NUEVO
 import { LibraryDock } from "./modules/library/LibraryDock.tsx";
 import { ToolsModule } from "./modules/tools/ToolsModule.tsx";
 import { PromptPackModule } from "./modules/promptpack/PromptPackModule.tsx";
 import { CustomizeModule } from "./modules/customize/CustomizeModule.tsx";
-
-// UI IMPORTS
 import { 
     TabButton
 } from "./ui/components.tsx";
-
-// NEW COMPONENTS
 import { FixedPreviewPane } from "./components/preview/FixedPreviewPane.tsx";
 import { AssetLibraryDrawer } from "./components/drawers/AssetLibraryDrawer.tsx";
-
-// Fix: Removed redundant global aistudio declaration to resolve modifier and type conflicts with existing global definitions.
-// The window.aistudio property is assumed to be provided by the environment with the correct AIStudio type.
 
 // WRAPPER FOR STORE
 export default function App() {
     return (
         <LibraryProvider>
             <OutputProvider>
-                <AppContent />
+                <BrandsProvider>  {/* ← NUEVO: envuelve AppContent */}
+                    <AppContent />
+                </BrandsProvider>
             </OutputProvider>
         </LibraryProvider>
     )
@@ -56,19 +46,12 @@ function AppContent() {
   });
   const [showDebugToggle, setShowDebugToggle] = useState(false);
   const { outputs } = useOutputStore();
-
-  // Layout State
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
-
-  // @google/genai compliance: API Key Selection State
   const [hasApiKey, setHasApiKey] = useState<boolean>(true);
 
-  // BUILD TAG SYNC
   useEffect(() => {
     document.title = `ImageLab • ${BUILD_TAG}`;
-    
-    // CACHE BUSTING
     const k = "imagelab_build_tag";
     const prev = localStorage.getItem(k);
     if (prev && prev !== BUILD_TAG) {
@@ -77,7 +60,6 @@ function AppContent() {
         return;
     }
     localStorage.setItem(k, BUILD_TAG);
-
     const checkApiKey = async () => {
       if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
         const has = await window.aistudio.hasSelectedApiKey();
@@ -110,11 +92,8 @@ function AppContent() {
     let kind = explicitKind;
     let alphaDetected = false;
     const d = await detectAssetKind(dataUrl); 
-    if (!kind) {
-        kind = d.kind; 
-    }
+    if (!kind) { kind = d.kind; }
     alphaDetected = d.alphaDetected;
-    
     const type: PersonType | undefined = kind === 'person' ? 'real' : undefined;
     setAssets(prev => [{ id: safeId("asset"), kind: kind!, label, dataUrl, type, alphaDetected, placementHint, createdAt: Date.now() }, ...prev]);
   };
@@ -199,7 +178,6 @@ function AppContent() {
           </div>
         </div>
       </header>
-
       <main className="flex-1 overflow-hidden relative max-w-[1920px] mx-auto w-full px-8 py-6">
         <div className="grid grid-cols-12 gap-6 h-full">
           <div className="col-span-12 h-full overflow-y-auto custom-scrollbar pr-2">
@@ -224,7 +202,6 @@ function AppContent() {
           </div>
         </div>
       </main>
-
       <AssetLibraryDrawer isOpen={drawerOpen} setOpen={setDrawerOpen}>
           <LibraryDock 
               activeSlots={activeSlots} 
@@ -232,7 +209,6 @@ function AppContent() {
               onPreview={openLibraryPreview}
           />
       </AssetLibraryDrawer>
-
       {previewOpen && previewItems[previewIndex] && (
         <div className="fixed inset-0 z-[2000] flex flex-col bg-black/98 backdrop-blur-3xl animate-in fade-in duration-300">
           <div className="flex items-center justify-between p-8 bg-black/40 border-b border-white/5">
