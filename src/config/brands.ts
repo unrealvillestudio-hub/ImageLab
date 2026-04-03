@@ -1,6 +1,19 @@
-import { BrandProfile } from "../core/types.ts";
+/**
+ * brands.ts — ImageLab
+ * 
+ * BRANDS_FALLBACK: array estático usado cuando Supabase no está disponible.
+ * Las marcas en producción se cargan desde Supabase via brandLoader.ts.
+ * 
+ * Para añadir una marca nueva:
+ *   1. Añadirla en Supabase con los campos imagelab_* correctos.
+ *   2. Añadirla aquí como fallback para desarrollo offline.
+ * 
+ * Fuente de verdad: Supabase tabla `brands`.
+ */
 
-export const BRANDS: BrandProfile[] = [
+import { BrandProfile } from "../core/types";
+
+export const BRANDS_FALLBACK: BrandProfile[] = [
   {
     id: "new",
     displayName: "--- NEW (Clear Context) ---",
@@ -9,6 +22,18 @@ export const BRANDS: BrandProfile[] = [
     visualIdentity: "Clear, neutral, clinical photography, high-end commercial quality.",
     complianceRules: "No text, no logos.",
     defaultNegativePrompt: "text, logos, watermarks, blurry, low resolution, artifacts"
+  },
+  {
+    id: "NeuroneSCF",
+    displayName: "Neurone South & Central Florida",
+    industry: "cosmetics_haircare",
+    requiresProductLock: true,
+    visualIdentity:
+      "Professional hair care Miami. Patricia Osorio as authority figure. Salon context, tropical light, warm golden tones. Product shots require alpha channel. Reference photos available.",
+    complianceRules:
+      "Cosmetic claims only. No medical claims. FDA/FTC compliant. Focus on aesthetic and sensorial benefits. No before/after without disclaimer.",
+    defaultNegativePrompt:
+      "text, logos, watermark, medical imagery, clinical setting, extra fingers, low resolution, artifacts",
   },
   {
     id: "D7Herbal",
@@ -37,8 +62,8 @@ export const BRANDS: BrandProfile[] = [
     requiresProductLock: true,
     visualIdentity:
       "High-tech garage, neon rim lights, carbon fiber accents, wet floor reflections, aggressive contrast, professional detailing bay.",
-    complianceRules: "Show technical precision.",
-    defaultNegativePrompt: "dirty cars, rust, text, low lighting",
+    complianceRules: "Show technical precision. No license plates visible.",
+    defaultNegativePrompt: "dirty cars, rust, text, low lighting, license plates",
   },
   {
     id: "VizosCosmetics",
@@ -72,7 +97,7 @@ export const BRANDS: BrandProfile[] = [
   },
   {
     id: "PatriciaOsorioVizosSalon",
-    displayName: "PatriciaOsorio (Vizos Salón - Miami)",
+    displayName: "Patricia Osorio (Vizos Salón - Miami)",
     industry: "luxury_salon",
     requiresProductLock: false,
     visualIdentity:
@@ -81,3 +106,9 @@ export const BRANDS: BrandProfile[] = [
     defaultNegativePrompt: "cold weather, dark rooms, cheap furniture",
   }
 ];
+
+/**
+ * @deprecated Usar fetchBrandProfiles() de brandLoader.ts en su lugar.
+ * Este export se mantiene solo por compatibilidad con código que aún no migró.
+ */
+export const BRANDS = BRANDS_FALLBACK;
