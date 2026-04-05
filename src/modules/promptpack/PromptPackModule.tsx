@@ -6,7 +6,6 @@ import {
 } from "../../core/types.ts";
 import { parsePromptPackJson, runPromptPack } from "../../services/promptpack.ts";
 import PsychoLayerSelector from "../../services/components/PsychoLayerSelector.tsx";
-import { buildPsychoVisualInjection } from "../../services/psychoPresetLoader.ts";
 import type { PsychoPreset } from "../../services/psychoPresetLoader.ts";
 import { validatePromptPackPolicy, validateSlotsICR } from "../../core/policies/slotValidation.ts";
 import { createDebugMetadataHelper } from "../../core/debug/debugUtils.ts";
