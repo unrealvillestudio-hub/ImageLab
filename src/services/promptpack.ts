@@ -117,8 +117,9 @@ export async function runPromptPack(params: {
   overrideCreativity?: CreativityLevel;
   variantCount?: number; // UI default override if JSON doesn't specify
   signal?: AbortSignal;
+  psychoPreset?: PsychoPreset | null;
 }): Promise<PromptPackRunResult> {
-  const { pack, overrideCreativity, variantCount = 3, signal } = params;
+  const { pack, overrideCreativity, variantCount = 3, signal, psychoPreset = null } = params;
   const runId = safeId("run");
   const items = [];
 
