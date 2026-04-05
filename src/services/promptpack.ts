@@ -1,4 +1,6 @@
 import { PromptPackV1, PromptPackRunResult, CreativityLevel, ReferenceImage, PromptPackValidationResult, LibraryAsset, ValidationError } from "../core/types.ts";
+import { buildPsychoVisualInjection } from './psychoPresetLoader.ts';
+import type { PsychoPreset } from './psychoPresetLoader.ts';
 import { generateImageFromPrompt } from "./gemini.ts";
 import { safeId } from "../utils/imageUtils.ts";
 
@@ -167,6 +169,10 @@ export async function runPromptPack(params: {
               };
               finalPrompt += `. ${creativityDescriptors[overrideCreativity]}`;
           }
+
+          // Psycho Layer injection
+          const psychoInjection = buildPsychoVisualInjection(psychoPreset);
+          if (psychoInjection) finalPrompt += psychoInjection;
 
           // 3. EXECUTE GENERATION LOOP FOR VARIANTS
           // Priority: Job Specific > Pack Global > UI Default
