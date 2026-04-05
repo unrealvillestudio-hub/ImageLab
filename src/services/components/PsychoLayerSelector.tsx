@@ -28,7 +28,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { loadPsychoPresets, PsychoPreset } from '../services/psychoPresetLoader';
+import { loadPsychoPresets, PsychoPreset } from '../psychoPresetLoader';
 
 interface Props {
   selected: PsychoPreset | null;
