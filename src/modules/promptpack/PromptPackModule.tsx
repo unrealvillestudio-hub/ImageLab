@@ -5,6 +5,9 @@ import {
     PromptPackValidationResult, DebugMetadata, CreativityLevel, ModelStage, PlacementHint, VARIANT_OPTIONS, PromptPackV1, LibraryAssetKind 
 } from "../../core/types.ts";
 import { parsePromptPackJson, runPromptPack } from "../../services/promptpack.ts";
+import PsychoLayerSelector from "../../services/components/PsychoLayerSelector.tsx";
+import { buildPsychoVisualInjection } from "../../services/psychoPresetLoader.ts";
+import type { PsychoPreset } from "../../services/psychoPresetLoader.ts";
 import { validatePromptPackPolicy, validateSlotsICR } from "../../core/policies/slotValidation.ts";
 import { createDebugMetadataHelper } from "../../core/debug/debugUtils.ts";
 import { useLibraryStore } from "../../ui/stores/libraryStore.tsx";
@@ -38,7 +41,8 @@ export function PromptPackModule({ activeSlots, globalDebug }: PromptPackModuleP
     const [ppRaw, setPpRaw] = useState("");
     const [ppCreativity, setPpCreativity] = useState<CreativityLevel>(2);
     const [isRunning, setIsRunning] = useState(false);
-    const [ppVariants, setPpVariants] = useState<number>(3); 
+    const [ppVariants, setPpVariants] = useState<number>(3);
+    const [psychoPreset, setPsychoPreset] = useState<PsychoPreset | null>(null); 
 
     const [modalOpen, setModalOpen] = useState(false);
     const [modalIndex, setModalIndex] = useState(0);
@@ -66,7 +70,7 @@ export function PromptPackModule({ activeSlots, globalDebug }: PromptPackModuleP
         if (ppIncludeAsset && sourceAssetA) pack.inputs.source_asset = { dataUrl: sourceAssetA.dataUrl, label: sourceAssetA.label };
         if (sourceAssetB) pack.inputs.reference_images = [{ dataUrl: sourceAssetB.dataUrl, label: sourceAssetB.label }];
         
-        const res = await runPromptPack({ pack, overrideCreativity: ppCreativity, variantCount: ppVariants, signal });
+        const res = await runPromptPack({ pack, overrideCreativity: ppCreativity, variantCount: ppVariants, signal, psychoPreset });
         res.items.forEach(item => {
             pushOutput({ id: safeId("res"), module: "promptpack", createdAt: Date.now(), label: item.label, imageUrl: item.imageDataUrl, metadata: globalDebug ? createDebugMetadataHelper("promptpack", "gemini_runner", { global: "Standard" }, { creativity: ppCreativity }, { sourceA: sourceAssetA, sourceB: sourceAssetB }, item.variant_index, ppVariants) : undefined });
         });
@@ -108,6 +112,7 @@ export function PromptPackModule({ activeSlots, globalDebug }: PromptPackModuleP
                 <div className="uv-title mb-2">JSON Specifications</div>
                 <textarea className="uv-input h-[380px] font-mono text-amber-200/70" value={ppRaw} onChange={e => setPpRaw(e.target.value)} placeholder="Paste PromptPack JSON..." />
             </div>
+            <div className="my-4"><PsychoLayerSelector selected={psychoPreset} onSelect={setPsychoPreset} /></div>
             <div className="flex justify-center"><RunControlButton label="Ejecutar Pipeline" onRun={onRunPromptPack} onRunningChange={setIsRunning} disabled={ppValidation.status === "BLOCKED"} /></div>
             <div className="mt-12 pt-10 border-t border-white/5"><PipelineOutputGallery items={globalOutputs} currentModule="promptpack" onOpenIndex={(idx, filtered) => { setModalFilteredItems(filtered); setModalIndex(idx); setModalOpen(true); }} emptyMessage="No outputs yet." /></div>
             <OutputPreviewModal open={modalOpen} items={modalFilteredItems} index={modalIndex} onSetIndex={setModalIndex} onClose={() => setModalOpen(false)} onDiscard={discardOutput} onDownload={id => { const it = modalFilteredItems.find(x => x.id === id); if(it) downloadDataUrl(`${it.label}.png`, it.imageUrl); }} onAddToLibrary={handleAddToLibrary} />
