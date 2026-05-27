@@ -5,8 +5,9 @@
 
 declare const process: { env: Record<string, string | undefined> };
 
-const SB_URL      = () => process.env.VITE_SUPABASE_URL ?? '';
-const SB_KEY      = () => process.env.VITE_SUPABASE_ANON_KEY ?? '';
+// Server-side only env names (no VITE_ prefix — those are opt-in for the client bundle).
+const SB_URL      = () => process.env.SUPABASE_URL ?? '';
+const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const GEMINI_KEY  = () => process.env.GEMINI_API_KEY ?? process.env.VITE_GEMINI_API_KEY ?? '';
 
 const IMAGEN_MODEL  = 'imagen-3.0-generate-002';
