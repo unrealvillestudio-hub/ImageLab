@@ -1,7 +1,9 @@
 /**
  * ImageLab — POST /api/execute
- * v2 — CORS fix: Access-Control-Allow-Origin *
+ * v3 — Node serverless runtime, maxDuration 60s (Edge default 10s caused 504)
  */
+
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -199,42 +201,56 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-export default async function handler(req: Request): Promise<Response> {
-  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
-  if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: CORS });
+export const config = { maxDuration: 60 };
+
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v);
+
+  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
   let body: any;
-  try { body = await req.json(); }
-  catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: CORS }); }
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body ?? null);
+  } catch {
+    res.status(400).json({ error: 'Invalid JSON' });
+    return;
+  }
+  if (!body || typeof body !== 'object') {
+    res.status(400).json({ error: 'Invalid JSON' });
+    return;
+  }
 
   if (body?.mode === 'direct') {
     try {
       if (!body.prompt || typeof body.prompt !== 'string') {
-        return new Response(JSON.stringify({ error: 'prompt is required for direct mode' }), { status: 400, headers: CORS });
+        res.status(400).json({ error: 'prompt is required for direct mode' });
+        return;
       }
       const imageDataUrl = await generateImageDirect(body as DirectImageRequest);
-      return new Response(JSON.stringify({ image_data_url: imageDataUrl, status: 'ok' }), { status: 200, headers: CORS });
+      res.status(200).json({ image_data_url: imageDataUrl, status: 'ok' });
+      return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return new Response(JSON.stringify({ error: msg, status: 'error' }), { status: 500, headers: CORS });
+      res.status(500).json({ error: msg, status: 'error' });
+      return;
     }
   }
 
-  if (!body.brandId) return new Response(JSON.stringify({ error: 'brandId is required' }), { status: 400, headers: CORS });
+  if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
 
   try {
     const promptJson   = await buildVisualPrompt(body as ExecuteRequest);
     const imageDataUrl = await generateImage(promptJson);
     const promptParsed = JSON.parse(promptJson);
 
-    return new Response(JSON.stringify({
+    res.status(200).json({
       output: `[IMAGE_GENERATED]\nPrompt: ${promptParsed.prompt}\nAspect: ${promptParsed.aspect_ratio}\nCanal: ${promptParsed.canal}`,
       image_data_url: imageDataUrl,
       status: 'ok',
-    }), { status: 200, headers: CORS });
-
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ error: msg, status: 'error' }), { status: 500, headers: CORS });
+    res.status(500).json({ error: msg, status: 'error' });
   }
 }
