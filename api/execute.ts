@@ -8,9 +8,10 @@ declare const process: { env: Record<string, string | undefined> };
 // Server-side only env names (no VITE_ prefix — those are opt-in for the client bundle).
 const SB_URL      = () => process.env.SUPABASE_URL ?? '';
 const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-const GEMINI_KEY  = () => process.env.GEMINI_API_KEY ?? process.env.VITE_GEMINI_API_KEY ?? '';
+// Server-side only — never read VITE_* here (Vite exposes those to the client bundle).
+const GEMINI_KEY  = () => process.env.GEMINI_API_KEY ?? '';
 
-const IMAGEN_MODEL  = 'imagen-3.0-generate-002';
+const IMAGEN_MODEL  = 'imagen-3.0-fast-generate-001';
 const GEMINI_VISION_MODEL = 'gemini-2.5-flash-image';
 const UPSTREAM_TIMEOUT_MS = 270_000;
 
