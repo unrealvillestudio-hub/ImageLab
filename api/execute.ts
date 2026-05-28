@@ -1,21 +1,63 @@
 /**
  * ImageLab — POST /api/execute
- * v3 — Node serverless runtime, maxDuration 60s (Edge default 10s caused 504)
+ * v4 — Vertex AI (uses GCP billing / $300 trial), Service Account auth.
+ *
+ * Migration notes vs v3:
+ *  - Auth: GEMINI_API_KEY query param → Bearer OAuth2 token from Service Account.
+ *  - Endpoint: generativelanguage.googleapis.com → {region}-aiplatform.googleapis.com.
+ *  - Billing: AI Studio prepay → GCP billing (consumes the project's trial credits).
+ *  - Multimodal direct mode (source / reference images via gemini-2.5-flash-image)
+ *    is NOT YET implemented on Vertex. Text-only direct prompts work; multimodal
+ *    requests return a clear 400 instead of silently failing.
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { GoogleAuth } from 'google-auth-library';
 
 declare const process: { env: Record<string, string | undefined> };
 
 // Server-side only env names (no VITE_ prefix — those are opt-in for the client bundle).
 const SB_URL      = () => process.env.SUPABASE_URL ?? '';
 const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-// Server-side only — never read VITE_* here (Vite exposes those to the client bundle).
-const GEMINI_KEY  = () => process.env.GEMINI_API_KEY ?? '';
 
-const IMAGEN_MODEL  = 'imagen-3.0-fast-generate-001';
-const GEMINI_VISION_MODEL = 'gemini-2.5-flash-image';
-const UPSTREAM_TIMEOUT_MS = 270_000;
+// Vertex AI config.
+const GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
+const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
+const IMAGEN_MODEL = 'imagen-3.0-fast-generate-001';
+
+// maxDuration is 60s (see `config` below). Leave ~5s headroom for token + JSON I/O.
+const UPSTREAM_TIMEOUT_MS = 55_000;
+
+// --- Auth ------------------------------------------------------------------
+// Singleton GoogleAuth — reuses cached access tokens across warm invocations.
+let _auth: GoogleAuth | null = null;
+function getAuth(): GoogleAuth {
+  if (_auth) return _auth;
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY ?? '';
+  if (!raw) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY missing — paste the Service Account JSON into Vercel env vars.');
+  }
+  let credentials: any;
+  try {
+    credentials = JSON.parse(raw);
+  } catch {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not valid JSON. Paste the raw JSON of the SA key.');
+  }
+  _auth = new GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+  return _auth;
+}
+
+async function getAccessToken(): Promise<string> {
+  const client = await getAuth().getClient();
+  const tokenResponse = await client.getAccessToken();
+  if (!tokenResponse.token) throw new Error('Failed to obtain GCP access token from Service Account.');
+  return tokenResponse.token;
+}
+
+// --- Supabase prompt-context loaders --------------------------------------
 
 interface ExecuteRequest {
   brandId: string | null;
@@ -90,40 +132,54 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<string> {
   });
 }
 
-async function generateImage(promptJson: string): Promise<string> {
-  const parsed = JSON.parse(promptJson);
+// --- Vertex AI Imagen 3 ---------------------------------------------------
+
+async function vertexPredictImagen(params: {
+  prompt: string;
+  negativePrompt?: string;
+  aspectRatio?: string;
+}): Promise<string> {
+  const project  = GCP_PROJECT();
+  const location = GCP_LOCATION();
+  if (!project) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+
+  const token = await getAccessToken();
+  const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${IMAGEN_MODEL}:predict`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:predict?key=${GEMINI_KEY()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instances: [{ prompt: parsed.prompt }],
-          parameters: {
-            sampleCount: 1,
-            negativePrompt: parsed.negative_prompt,
-            aspectRatio: parsed.aspect_ratio,
-            safetyFilterLevel: 'BLOCK_ONLY_HIGH',
-            personGeneration: 'ALLOW_ADULT',
-          },
-        }),
-        signal: controller.signal,
-      }
-    );
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        instances: [{ prompt: params.prompt }],
+        parameters: {
+          sampleCount: 1,
+          negativePrompt: params.negativePrompt,
+          aspectRatio: params.aspectRatio ?? '1:1',
+          // Vertex enum values are lowercase (AI Studio used UPPERCASE).
+          safetyFilterLevel: 'block_only_high',
+          personGeneration: 'allow_adult',
+        },
+      }),
+      signal: controller.signal,
+    });
 
-    if (!res.ok) throw new Error(`Imagen 3 API error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Vertex Imagen error ${res.status}: ${await res.text()}`);
 
     const data = await res.json();
-    const b64 = data.predictions?.[0]?.bytesBase64Encoded;
-    if (!b64) throw new Error('Imagen 3: no image returned');
-    return `data:image/jpeg;base64,${b64}`;
+    const pred = data.predictions?.[0];
+    const b64  = pred?.bytesBase64Encoded;
+    const mime = pred?.mimeType ?? 'image/png';
+    if (!b64) throw new Error('Vertex Imagen: no image returned.');
+    return `data:${mime};base64,${b64}`;
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Imagen 3 API timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s`);
+      throw new Error(`Vertex Imagen timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
     }
     throw err;
   } finally {
@@ -131,69 +187,44 @@ async function generateImage(promptJson: string): Promise<string> {
   }
 }
 
+// Orchestrator path (brandId): builds a rich prompt then calls Vertex.
+async function generateImage(promptJson: string): Promise<string> {
+  const parsed = JSON.parse(promptJson);
+  return vertexPredictImagen({
+    prompt: parsed.prompt,
+    negativePrompt: parsed.negative_prompt,
+    aspectRatio: parsed.aspect_ratio,
+  });
+}
+
+// Direct path (called from src/services/gemini.ts): raw prompt + aspect ratio.
 interface DirectImageRequest {
   mode: 'direct';
   prompt: string;
   aspectRatio?: string;
   sourceAssetDataUrl?: string;
   referenceImages?: { dataUrl: string; label?: string }[];
-  model?: string;
-}
-
-function dataUrlToInlinePart(dataUrl: string) {
-  const [meta, b64] = dataUrl.split(',');
-  const mimeType = meta.split(';')[0].split(':')[1];
-  return { inlineData: { mimeType, data: b64 } };
+  model?: string; // accepted for compatibility; ignored on Vertex (always Imagen 3 fast).
 }
 
 async function generateImageDirect(req: DirectImageRequest): Promise<string> {
-  let modelName = req.model || GEMINI_VISION_MODEL;
-  if (modelName.startsWith('gemini-3')) modelName = GEMINI_VISION_MODEL;
-
-  const parts: any[] = [{ text: req.prompt }];
-  if (req.sourceAssetDataUrl) parts.push(dataUrlToInlinePart(req.sourceAssetDataUrl));
-  if (req.referenceImages) {
-    for (const ref of req.referenceImages) parts.push(dataUrlToInlinePart(ref.dataUrl));
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_KEY()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: {
-            imageConfig: { aspectRatio: req.aspectRatio ?? '1:1' },
-          },
-        }),
-        signal: controller.signal,
-      }
+  const hasMultimodal = !!req.sourceAssetDataUrl
+    || (Array.isArray(req.referenceImages) && req.referenceImages.length > 0);
+  if (hasMultimodal) {
+    throw new Error(
+      'Multimodal generation (source / reference images) is not yet wired on the Vertex backend. '
+      + 'Send a text-only prompt for now, or revert to the AI Studio gemini-2.5-flash-image path.'
     );
-
-    if (!res.ok) throw new Error(`Gemini API error ${res.status}: ${await res.text()}`);
-
-    const data = await res.json();
-    const partsOut = data.candidates?.[0]?.content?.parts;
-    if (!Array.isArray(partsOut)) throw new Error('No output content generated by the model.');
-    for (const p of partsOut) {
-      if (p?.inlineData?.data) return `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`;
-    }
-    throw new Error('No image data found in the model response.');
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Gemini API timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeout);
   }
+  return vertexPredictImagen({
+    prompt: req.prompt,
+    negativePrompt: 'blurry, low quality, amateur, watermark, text overlay, logo',
+    aspectRatio: req.aspectRatio ?? '1:1',
+  });
 }
 
-// CORS fix: era 'https://orchestrator.vercel.app'
+// --- HTTP handler ----------------------------------------------------------
+
 const CORS = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
