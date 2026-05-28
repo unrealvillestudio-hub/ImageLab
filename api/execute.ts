@@ -1,14 +1,19 @@
 /**
  * ImageLab — POST /api/execute
- * v4 — Vertex AI (uses GCP billing / $300 trial), Service Account auth.
+ * v5 — Vertex AI text-to-image + multimodal subject/style customization.
  *
- * Migration notes vs v3:
- *  - Auth: GEMINI_API_KEY query param → Bearer OAuth2 token from Service Account.
- *  - Endpoint: generativelanguage.googleapis.com → {region}-aiplatform.googleapis.com.
- *  - Billing: AI Studio prepay → GCP billing (consumes the project's trial credits).
- *  - Multimodal direct mode (source / reference images via gemini-2.5-flash-image)
- *    is NOT YET implemented on Vertex. Text-only direct prompts work; multimodal
- *    requests return a clear 400 instead of silently failing.
+ * Routing:
+ *  - Orchestrator path (brandId + stage): builds a brand-aware prompt and calls
+ *    imagen-3.0-fast-generate-001 (text-to-image, fast & cheap).
+ *  - Direct mode without refs: same fast model.
+ *  - Direct mode WITH sourceAssetDataUrl or referenceImages: routes to
+ *    imagen-3.0-capability-001 with REFERENCE_TYPE_SUBJECT / REFERENCE_TYPE_STYLE
+ *    bindings. Subject type (PERSON / PRODUCT / ANIMAL / DEFAULT) is inferred
+ *    from the asset label; refs whose label hints at style are sent as STYLE.
+ *
+ * Auth: Service Account JSON (GOOGLE_SERVICE_ACCOUNT_KEY) → OAuth2 Bearer token
+ * via google-auth-library. Billed to GCP (uses the project's trial credits, not
+ * AI Studio prepay).
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
@@ -23,7 +28,8 @@ const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 // Vertex AI config.
 const GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
 const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
-const IMAGEN_MODEL = 'imagen-3.0-fast-generate-001';
+const IMAGEN_MODEL            = 'imagen-3.0-fast-generate-001';   // text-to-image (cheap, fast)
+const IMAGEN_CAPABILITY_MODEL = 'imagen-3.0-capability-001';      // subject/style customization
 
 // maxDuration is 60s (see `config` below). Leave ~5s headroom for token + JSON I/O.
 const UPSTREAM_TIMEOUT_MS = 55_000;
@@ -203,23 +209,165 @@ interface DirectImageRequest {
   prompt: string;
   aspectRatio?: string;
   sourceAssetDataUrl?: string;
+  sourceAssetLabel?: string;
   referenceImages?: { dataUrl: string; label?: string }[];
-  model?: string; // accepted for compatibility; ignored on Vertex (always Imagen 3 fast).
+  model?: string; // accepted for compatibility; ignored on Vertex.
+}
+
+// --- Vertex AI Imagen 3 Capability (subject / style customization) -----
+
+/** Strip the `data:image/...;base64,` header and return just the base64 payload. */
+function dataUrlBase64(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',');
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+/** Heuristic: map a free-form asset label to the closest Imagen subjectType. */
+function inferSubjectType(label?: string): 'SUBJECT_TYPE_PERSON' | 'SUBJECT_TYPE_ANIMAL' | 'SUBJECT_TYPE_PRODUCT' | 'SUBJECT_TYPE_DEFAULT' {
+  const l = (label ?? '').toLowerCase();
+  if (/(person|people|man|woman|human|model|face|avatar|portrait|persona)/.test(l)) return 'SUBJECT_TYPE_PERSON';
+  if (/(animal|dog|cat|pet|horse)/.test(l)) return 'SUBJECT_TYPE_ANIMAL';
+  if (/(product|bottle|item|sku|packshot|object|merch|good)/.test(l)) return 'SUBJECT_TYPE_PRODUCT';
+  return 'SUBJECT_TYPE_DEFAULT';
+}
+
+/** Is this reference image meant as a STYLE ref (not a subject)? */
+function looksLikeStyleRef(label?: string): boolean {
+  const l = (label ?? '').toLowerCase();
+  return /(style|aesthetic|mood|look|grade|grading|reference|ref\b|palette|art\s*direction|inspiration)/.test(l);
+}
+
+interface CapabilityRef {
+  referenceType: 'REFERENCE_TYPE_SUBJECT' | 'REFERENCE_TYPE_STYLE';
+  referenceId: number;
+  referenceImage: { bytesBase64Encoded: string };
+  subjectImageConfig?: { subjectDescription: string; subjectType: string };
+  styleImageConfig?: { styleDescription: string };
+}
+
+async function vertexPredictImagenCapability(params: {
+  prompt: string;
+  negativePrompt?: string;
+  aspectRatio?: string;
+  refs: CapabilityRef[];
+}): Promise<string> {
+  const project  = GCP_PROJECT();
+  const location = GCP_LOCATION();
+  if (!project) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+
+  const token = await getAccessToken();
+  const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${IMAGEN_CAPABILITY_MODEL}:predict`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        instances: [{
+          prompt: params.prompt,
+          referenceImages: params.refs,
+        }],
+        parameters: {
+          sampleCount: 1,
+          negativePrompt: params.negativePrompt,
+          aspectRatio: params.aspectRatio ?? '1:1',
+          safetyFilterLevel: 'block_only_high',
+          personGeneration: 'allow_adult',
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) throw new Error(`Vertex Imagen Capability error ${res.status}: ${await res.text()}`);
+
+    const data = await res.json();
+    const pred = data.predictions?.[0];
+    const b64  = pred?.bytesBase64Encoded;
+    const mime = pred?.mimeType ?? 'image/png';
+    if (!b64) throw new Error('Vertex Imagen Capability: no image returned.');
+    return `data:${mime};base64,${b64}`;
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`Vertex Imagen Capability timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function generateImageDirect(req: DirectImageRequest): Promise<string> {
-  const hasMultimodal = !!req.sourceAssetDataUrl
-    || (Array.isArray(req.referenceImages) && req.referenceImages.length > 0);
-  if (hasMultimodal) {
-    throw new Error(
-      'Multimodal generation (source / reference images) is not yet wired on the Vertex backend. '
-      + 'Send a text-only prompt for now, or revert to the AI Studio gemini-2.5-flash-image path.'
-    );
+  const hasSource = !!req.sourceAssetDataUrl;
+  const hasRefs   = Array.isArray(req.referenceImages) && req.referenceImages.length > 0;
+
+  // No images → text-to-image fast path.
+  if (!hasSource && !hasRefs) {
+    return vertexPredictImagen({
+      prompt: req.prompt,
+      negativePrompt: 'blurry, low quality, amateur, watermark, text overlay, logo',
+      aspectRatio: req.aspectRatio ?? '1:1',
+    });
   }
-  return vertexPredictImagen({
-    prompt: req.prompt,
+
+  // Multimodal → Imagen 3 capability model with subject/style references.
+  const refs: CapabilityRef[] = [];
+  let nextId = 1;
+
+  if (req.sourceAssetDataUrl) {
+    const subjectType = inferSubjectType(req.sourceAssetLabel);
+    const description = req.sourceAssetLabel?.trim() || 'main subject';
+    refs.push({
+      referenceType: 'REFERENCE_TYPE_SUBJECT',
+      referenceId: nextId++,
+      referenceImage: { bytesBase64Encoded: dataUrlBase64(req.sourceAssetDataUrl) },
+      subjectImageConfig: { subjectDescription: description, subjectType },
+    });
+  }
+
+  if (hasRefs) {
+    for (const r of req.referenceImages!) {
+      const id = nextId++;
+      if (looksLikeStyleRef(r.label)) {
+        refs.push({
+          referenceType: 'REFERENCE_TYPE_STYLE',
+          referenceId: id,
+          referenceImage: { bytesBase64Encoded: dataUrlBase64(r.dataUrl) },
+          styleImageConfig: { styleDescription: r.label?.trim() || 'reference style' },
+        });
+      } else {
+        refs.push({
+          referenceType: 'REFERENCE_TYPE_SUBJECT',
+          referenceId: id,
+          referenceImage: { bytesBase64Encoded: dataUrlBase64(r.dataUrl) },
+          subjectImageConfig: {
+            subjectDescription: r.label?.trim() || `subject ${id}`,
+            subjectType: inferSubjectType(r.label),
+          },
+        });
+      }
+    }
+  }
+
+  // Imagen 3 expects [referenceId] tokens inline in the prompt to bind images
+  // to their roles. Prepend a clause that names every subject ref, and append
+  // a style clause if any style refs are present.
+  const subjectIds = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_SUBJECT').map(r => `[${r.referenceId}]`);
+  const styleIds   = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_STYLE').map(r => `[${r.referenceId}]`);
+
+  let finalPrompt = req.prompt;
+  if (subjectIds.length > 0) finalPrompt = `${subjectIds.join(' ')} ${finalPrompt}`;
+  if (styleIds.length > 0)   finalPrompt = `${finalPrompt} in the style of ${styleIds.join(' ')}`;
+
+  return vertexPredictImagenCapability({
+    prompt: finalPrompt,
     negativePrompt: 'blurry, low quality, amateur, watermark, text overlay, logo',
     aspectRatio: req.aspectRatio ?? '1:1',
+    refs,
   });
 }
 
