@@ -91,25 +91,25 @@ interface ExecuteRequest {
 }
 
 async function sb<T>(path: string): Promise<T | null> {
+  const rawUrl = process.env.SUPABASE_URL ?? '';
+  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  const normalized = SB_URL();
+  console.log(`[sb v6.3] env_raw_url_len=${rawUrl.length} normalized_url=${JSON.stringify(normalized)} key_len=${rawKey.length}`);
   try {
-    const url = `${SB_URL()}/rest/v1/${path}`;
+    const url = `${normalized}/rest/v1/${path}`;
+    console.log(`[sb v6.3] fetching ${url}`);
     const res = await fetch(url, {
-      headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
+      headers: { apikey: rawKey, Authorization: `Bearer ${rawKey}` },
     });
     const body = await res.text();
-    if (!res.ok) {
-      console.error(`[sb v6.2] ${res.status} ${url} body=${body.slice(0, 250)}`);
-      return null;
-    }
+    console.log(`[sb v6.3] status=${res.status} body_head=${body.slice(0, 150)}`);
+    if (!res.ok) return null;
     let data: any;
-    try { data = JSON.parse(body); } catch { console.error(`[sb v6.2] non-JSON for ${url}: ${body.slice(0, 200)}`); return null; }
-    if (Array.isArray(data) && data.length === 0) {
-      console.log(`[sb v6.2] empty result url=${url}`);
-    }
+    try { data = JSON.parse(body); } catch { return null; }
     return Array.isArray(data) ? (data[0] ?? null) : data;
   } catch (err) {
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.error(`[sb v6.2] exception ${msg}`);
+    const msg = err instanceof Error ? `${err.name}|${err.message}|${(err as any).cause?.code ?? ''}` : String(err);
+    console.error(`[sb v6.3] exception ${msg}`);
     return null;
   }
 }
