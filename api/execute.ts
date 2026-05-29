@@ -549,6 +549,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
 
   try {
+    // v6.3 diagnostic: surface env shape directly in response for debugging.
+    const _rawUrl = process.env.SUPABASE_URL ?? '';
+    const _diag = {
+      raw_url_len: _rawUrl.length,
+      raw_url_head: _rawUrl.slice(0, 30),
+      raw_url_tail: _rawUrl.slice(-10),
+      normalized_url: SB_URL(),
+      key_len: (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').length,
+    };
     const built = await buildVisualPrompt(body as ExecuteRequest);
     const imageDataUrl = await vertexPredictImagen({
       prompt:         built.prompt,
@@ -564,6 +573,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       brand:          built.brandName,
       canal:          built.canal,
       status:         'ok',
+      _debug_env:     _diag,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
