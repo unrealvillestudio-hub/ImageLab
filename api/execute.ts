@@ -24,7 +24,16 @@ import { GoogleAuth } from 'google-auth-library';
 declare const process: { env: Record<string, string | undefined> };
 
 // Server-side only env names (no VITE_ prefix — those are opt-in for the client bundle).
-const SB_URL      = () => process.env.SUPABASE_URL ?? '';
+// Normalize SUPABASE_URL: tolerate values pasted without the protocol (the
+// Vercel env had `amlvyycfepwhiindxgzw.supabase.co` saved bare, which makes
+// fetch throw "Invalid URL" because relative URLs need an origin in Node).
+function normalizeSupabaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+const SB_URL      = () => normalizeSupabaseUrl(process.env.SUPABASE_URL ?? '');
 const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
 // Vertex AI config.
@@ -82,32 +91,14 @@ interface ExecuteRequest {
 }
 
 async function sb<T>(path: string): Promise<T | null> {
-  const urlBase = SB_URL();
-  const keyLen  = SB_KEY().length;
-  if (!urlBase) {
-    console.error(`[sb] ENV missing: SUPABASE_URL.len=${urlBase.length} SUPABASE_SERVICE_ROLE_KEY.len=${keyLen}`);
-    return null;
-  }
   try {
-    const url = `${urlBase}/rest/v1/${path}`;
-    const res = await fetch(url, {
+    const res = await fetch(`${SB_URL()}/rest/v1/${path}`, {
       headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.error(`[sb] ${url} -> ${res.status} ${body.slice(0, 300)}`);
-      return null;
-    }
+    if (!res.ok) return null;
     const data = await res.json();
-    if (Array.isArray(data) && data.length === 0) {
-      console.log(`[sb] ${url} -> 200 but empty array`);
-    }
     return Array.isArray(data) ? (data[0] ?? null) : data;
-  } catch (err) {
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.error(`[sb] exception url_base=${urlBase} key_len=${keyLen} err=${msg}`);
-    return null;
-  }
+  } catch { return null; }
 }
 
 // --- Imagelab presets (per-brand visual identity) ------------------------
