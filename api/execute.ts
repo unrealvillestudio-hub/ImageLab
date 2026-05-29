@@ -82,8 +82,14 @@ interface ExecuteRequest {
 }
 
 async function sb<T>(path: string): Promise<T | null> {
+  const urlBase = SB_URL();
+  const keyLen  = SB_KEY().length;
+  if (!urlBase) {
+    console.error(`[sb] ENV missing: SUPABASE_URL.len=${urlBase.length} SUPABASE_SERVICE_ROLE_KEY.len=${keyLen}`);
+    return null;
+  }
   try {
-    const url = `${SB_URL()}/rest/v1/${path}`;
+    const url = `${urlBase}/rest/v1/${path}`;
     const res = await fetch(url, {
       headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
     });
@@ -98,7 +104,8 @@ async function sb<T>(path: string): Promise<T | null> {
     }
     return Array.isArray(data) ? (data[0] ?? null) : data;
   } catch (err) {
-    console.error(`[sb] exception`, err);
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.error(`[sb] exception url_base=${urlBase} key_len=${keyLen} err=${msg}`);
     return null;
   }
 }
