@@ -83,13 +83,24 @@ interface ExecuteRequest {
 
 async function sb<T>(path: string): Promise<T | null> {
   try {
-    const res = await fetch(`${SB_URL()}/rest/v1/${path}`, {
+    const url = `${SB_URL()}/rest/v1/${path}`;
+    const res = await fetch(url, {
       headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`[sb] ${url} -> ${res.status} ${body.slice(0, 300)}`);
+      return null;
+    }
     const data = await res.json();
+    if (Array.isArray(data) && data.length === 0) {
+      console.log(`[sb] ${url} -> 200 but empty array`);
+    }
     return Array.isArray(data) ? (data[0] ?? null) : data;
-  } catch { return null; }
+  } catch (err) {
+    console.error(`[sb] exception`, err);
+    return null;
+  }
 }
 
 // --- Imagelab presets (per-brand visual identity) ------------------------
