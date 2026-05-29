@@ -97,27 +97,14 @@ interface ExecuteRequest {
 }
 
 async function sb<T>(path: string): Promise<T | null> {
-  const rawUrl = process.env.SUPABASE_URL ?? '';
-  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-  const normalized = SB_URL();
-  console.log(`[sb v6.3] env_raw_url_len=${rawUrl.length} normalized_url=${JSON.stringify(normalized)} key_len=${rawKey.length}`);
   try {
-    const url = `${normalized}/rest/v1/${path}`;
-    console.log(`[sb v6.3] fetching ${url}`);
-    const res = await fetch(url, {
-      headers: { apikey: rawKey, Authorization: `Bearer ${rawKey}` },
+    const res = await fetch(`${SB_URL()}/rest/v1/${path}`, {
+      headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
     });
-    const body = await res.text();
-    console.log(`[sb v6.3] status=${res.status} body_head=${body.slice(0, 150)}`);
     if (!res.ok) return null;
-    let data: any;
-    try { data = JSON.parse(body); } catch { return null; }
+    const data = await res.json();
     return Array.isArray(data) ? (data[0] ?? null) : data;
-  } catch (err) {
-    const msg = err instanceof Error ? `${err.name}|${err.message}|${(err as any).cause?.code ?? ''}` : String(err);
-    console.error(`[sb v6.3] exception ${msg}`);
-    return null;
-  }
+  } catch { return null; }
 }
 
 // --- Imagelab presets (per-brand visual identity) ------------------------
@@ -555,15 +542,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
 
   try {
-    // v6.3 diagnostic: surface env shape directly in response for debugging.
-    const _rawUrl = process.env.SUPABASE_URL ?? '';
-    const _diag = {
-      raw_url_len: _rawUrl.length,
-      raw_url_head: _rawUrl.slice(0, 30),
-      raw_url_tail: _rawUrl.slice(-10),
-      normalized_url: SB_URL(),
-      key_len: (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').length,
-    };
     const built = await buildVisualPrompt(body as ExecuteRequest);
     const imageDataUrl = await vertexPredictImagen({
       prompt:         built.prompt,
@@ -579,7 +557,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       brand:          built.brandName,
       canal:          built.canal,
       status:         'ok',
-      _debug_env:     _diag,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
