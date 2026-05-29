@@ -24,14 +24,20 @@ import { GoogleAuth } from 'google-auth-library';
 declare const process: { env: Record<string, string | undefined> };
 
 // Server-side only env names (no VITE_ prefix — those are opt-in for the client bundle).
-// Normalize SUPABASE_URL: tolerate values pasted without the protocol (the
-// Vercel env had `amlvyycfepwhiindxgzw.supabase.co` saved bare, which makes
-// fetch throw "Invalid URL" because relative URLs need an origin in Node).
+// Normalize SUPABASE_URL: tolerate three common shapes that get pasted into
+// the Vercel env panel by accident.
+//   1) bare project ref     "amlvyycfepwhiindxgzw"
+//   2) bare hostname        "amlvyycfepwhiindxgzw.supabase.co"
+//   3) full url             "https://amlvyycfepwhiindxgzw.supabase.co"
+// All three end up as `https://{ref}.supabase.co`.
 function normalizeSupabaseUrl(raw: string): string {
-  const trimmed = raw.trim().replace(/\/+$/, '');
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed}`;
+  let v = raw.trim().replace(/\/+$/, '');
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) {
+    if (!v.includes('.')) v = `${v}.supabase.co`;
+    v = `https://${v}`;
+  }
+  return v;
 }
 const SB_URL      = () => normalizeSupabaseUrl(process.env.SUPABASE_URL ?? '');
 const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
