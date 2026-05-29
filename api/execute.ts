@@ -1,15 +1,17 @@
 /**
  * ImageLab — POST /api/execute
- * v5 — Vertex AI text-to-image + multimodal subject/style customization.
+ * v6 — Imagelab_presets injection (per-brand visual identity).
  *
  * Routing:
- *  - Orchestrator path (brandId + stage): builds a brand-aware prompt and calls
- *    imagen-3.0-fast-generate-001 (text-to-image, fast & cheap).
- *  - Direct mode without refs: same fast model.
- *  - Direct mode WITH sourceAssetDataUrl or referenceImages: routes to
- *    imagen-3.0-capability-001 with REFERENCE_TYPE_SUBJECT / REFERENCE_TYPE_STYLE
- *    bindings. Subject type (PERSON / PRODUCT / ANIMAL / DEFAULT) is inferred
- *    from the asset label; refs whose label hints at style are sent as STYLE.
+ *  - Orchestrator path (brandId + stage): looks up imagelab_presets by
+ *    brand_id+canal; if found, assembles the brand-specific prompt format
+ *    (reference_aesthetic + composition + lighting + grading + mood +
+ *    concept + brand DNA + texture + FORBIDDEN); else falls back to the
+ *    legacy generic prompt. Always calls imagen-3.0-fast-generate-001.
+ *  - Direct mode (text-only): same preset lookup if body carries brand_id+
+ *    canal; otherwise raw prompt path. imagen-3.0-fast-generate-001.
+ *  - Direct mode (multimodal): preset prompt + REFERENCE_TYPE_SUBJECT/STYLE
+ *    bindings via imagen-3.0-capability-001.
  *
  * Auth: Service Account JSON (GOOGLE_SERVICE_ACCOUNT_KEY) → OAuth2 Bearer token
  * via google-auth-library. Billed to GCP (uses the project's trial credits, not
@@ -90,52 +92,130 @@ async function sb<T>(path: string): Promise<T | null> {
   } catch { return null; }
 }
 
-async function buildVisualPrompt(req: ExecuteRequest): Promise<string> {
-  const brandId     = req.brandId ?? 'DEFAULT';
-  const canal       = req.params.canal ?? 'instagram_feed';
-  const psychoId    = req.params.psycho_preset;
-  const aspectRatio = req.params.aspect_ratio ?? (canal.includes('reel') || canal === 'tiktok' ? '9:16' : '1:1');
+// --- Imagelab presets (per-brand visual identity) ------------------------
 
-  const [brand, preset, psychoPreset] = await Promise.all([
-    sb<any>(`brands?id=eq.${brandId}&select=id,name,market,imagelab_style,imagelab_negative,imagelab_palette`),
-    sb<any>(`imagelab_presets?brand_id=eq.${brandId}&canal=eq.${canal}&select=*`),
-    psychoId ? sb<any>(`psycho_presets?id=eq.${psychoId}&select=*`) : null,
-  ]);
+interface ImageGenInput {
+  prompt: string;
+  negativePrompt: string;
+  aspectRatio: string;
+  brandName: string;
+  canal: string;
+  presetUsed: boolean;
+  presetId: string | null;
+}
 
-  const globalPreset = !preset
-    ? await sb<any>(`imagelab_presets?brand_id=eq.GLOBAL&canal=eq.${canal}&select=*`)
-    : null;
+const FALLBACK_NEGATIVE = 'blurry, low quality, amateur, stock photo look, watermark, text overlay, logo';
 
-  const activePreset = preset ?? globalPreset;
-  const brandName = brand?.name ?? brandId;
+/** Load the imagelab_presets row for (brand_id, canal). Returns null if none. */
+async function loadImagelabPreset(brandId: string, canal: string): Promise<any | null> {
+  if (!brandId || !canal) return null;
+  const b = encodeURIComponent(brandId);
+  const c = encodeURIComponent(canal);
+  const row = await sb<any>(`imagelab_presets?brand_id=eq.${b}&canal=eq.${c}&select=*&limit=1`);
+  return row ?? null;
+}
+
+/**
+ * Assemble the preset-driven prompt per the spec:
+ *   "{reference_aesthetic} aesthetic. {composition_rule}. {lighting_style}.
+ *    {color_grading}. Mood: {mood}. Concept: {job_prompt}.
+ *    Brand DNA: {brand_dna}. {texture}.
+ *    Photorealistic, 8K, large format cinema. FORBIDDEN: {negative_prompt}."
+ */
+function buildPromptFromPreset(preset: any, conceptText: string, aspectRatioFallback?: string): ImageGenInput {
+  const ep = (preset?.extra_params ?? {}) as Record<string, any>;
+
+  const moodList = Array.isArray(ep.mood) ? ep.mood.join(', ')
+    : (typeof ep.mood === 'string' ? ep.mood : '');
+  const forbiddenList = Array.isArray(ep.forbidden_elements) ? ep.forbidden_elements.join(', ')
+    : (typeof ep.forbidden_elements === 'string' ? ep.forbidden_elements : '');
+
+  const negParts: string[] = [];
+  if (forbiddenList)            negParts.push(forbiddenList);
+  if (preset?.negative_prompt)  negParts.push(preset.negative_prompt);
+  const negativePrompt = negParts.filter(Boolean).join(', ') || FALLBACK_NEGATIVE;
 
   const parts: string[] = [];
-  const subject = req.params.subject ?? req.stage.description ?? `producto de ${brandName}`;
-  parts.push(subject);
+  if (ep.reference_aesthetic) parts.push(`${ep.reference_aesthetic} aesthetic.`);
+  if (ep.composition_rule)    parts.push(`${ep.composition_rule}.`);
+  if (preset?.lighting_style) parts.push(`${preset.lighting_style}.`);
+  if (preset?.color_grading)  parts.push(`${preset.color_grading}.`);
+  if (moodList)               parts.push(`Mood: ${moodList}.`);
+  if (conceptText)            parts.push(`Concept: ${conceptText}.`);
+  if (ep.brand_dna)           parts.push(`Brand DNA: ${ep.brand_dna}.`);
+  if (ep.texture)             parts.push(`${ep.texture}.`);
+  parts.push('Photorealistic, 8K, large format cinema.');
+  if (negativePrompt)         parts.push(`FORBIDDEN: ${negativePrompt}.`);
 
+  return {
+    prompt: parts.join(' '),
+    negativePrompt,
+    aspectRatio: preset?.aspect_ratio ?? aspectRatioFallback ?? '1:1',
+    brandName: preset?.brand_id ?? 'unknown',
+    canal: preset?.canal ?? 'INSTAGRAM_FEED',
+    presetUsed: true,
+    presetId: (preset?.preset_id as string) ?? null,
+  };
+}
+
+/**
+ * Orchestrator-path prompt builder.
+ *
+ * 1. Normalize canal to UPPERCASE (matches imagelab_presets.canal convention).
+ * 2. Try to load preset for (brand_id, canal). If found → preset-driven prompt.
+ * 3. Else fall back to the legacy generic builder (preserves prior behavior).
+ */
+async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
+  const brandId     = req.brandId ?? 'DEFAULT';
+  const canal       = (req.params.canal ?? 'INSTAGRAM_FEED').toUpperCase();
+  const psychoId    = req.params.psycho_preset;
+  const aspectRatio = req.params.aspect_ratio ?? (canal.includes('REEL') || canal === 'TIKTOK' ? '9:16' : '1:1');
+
+  // Concept text: same heuristic the legacy path used (subject → stage description → fallback).
+  const copyOutput = req.previousOutputs?.copylab ?? req.previousOutputs?.CopyLab ?? '';
+  const conceptText = (req.params.subject ?? req.stage.description ?? '').trim();
+
+  // ── Preset injection (v6) ────────────────────────────────────────────
+  const preset = await loadImagelabPreset(brandId, canal);
+  if (preset) {
+    const built = buildPromptFromPreset(preset, conceptText, aspectRatio);
+    return {
+      ...built,
+      brandName: brandId,
+      canal,
+    };
+  }
+
+  console.log(`[ImageLab v6] No preset found for brand_id=${brandId} canal=${canal}, using raw prompt`);
+
+  // ── Legacy generic builder (no preset) ───────────────────────────────
+  const [brand, psychoPreset] = await Promise.all([
+    sb<any>(`brands?id=eq.${encodeURIComponent(brandId)}&select=id,name,market,imagelab_style,imagelab_negative,imagelab_palette`),
+    psychoId ? sb<any>(`psycho_presets?id=eq.${encodeURIComponent(psychoId)}&select=*`) : null,
+  ]);
+
+  const brandName = brand?.name ?? brandId;
+  const subject = conceptText || `producto de ${brandName}`;
+
+  const parts: string[] = [subject];
   if (brand?.imagelab_style) parts.push(brand.imagelab_style);
-  if (activePreset?.visual_style) parts.push(activePreset.visual_style);
-  if (activePreset?.lighting) parts.push(`${activePreset.lighting} lighting`);
-  if (activePreset?.mood) parts.push(`mood: ${activePreset.mood}`);
   if (brand?.imagelab_palette) parts.push(`color palette: ${brand.imagelab_palette}`);
   if (psychoPreset?.visual_injection) parts.push(psychoPreset.visual_injection);
   if (req.params.style_notes) parts.push(req.params.style_notes);
-
-  const copyOutput = req.previousOutputs?.copylab ?? req.previousOutputs?.CopyLab ?? '';
   if (copyOutput) parts.push(`Visual must reinforce this copy theme: ${copyOutput.slice(0, 150)}`);
-
   parts.push('professional photography, high quality, 8k, sharp focus, commercial grade');
 
-  const negativePrompt = brand?.imagelab_negative
-    ?? 'blurry, low quality, amateur, stock photo look, watermark, text overlay, logo';
+  const negativePrompt = brand?.imagelab_negative ?? FALLBACK_NEGATIVE;
 
-  return JSON.stringify({
+  return {
     prompt: parts.filter(Boolean).join(', '),
-    negative_prompt: negativePrompt,
-    aspect_ratio: aspectRatio,
-    brand: brandName,
+    negativePrompt,
+    aspectRatio,
+    brandName,
     canal,
-  });
+    presetUsed: false,
+    presetId: null,
+  };
 }
 
 // --- Vertex AI Imagen 3 ---------------------------------------------------
@@ -193,25 +273,18 @@ async function vertexPredictImagen(params: {
   }
 }
 
-// Orchestrator path (brandId): builds a rich prompt then calls Vertex.
-async function generateImage(promptJson: string): Promise<string> {
-  const parsed = JSON.parse(promptJson);
-  return vertexPredictImagen({
-    prompt: parsed.prompt,
-    negativePrompt: parsed.negative_prompt,
-    aspectRatio: parsed.aspect_ratio,
-  });
-}
-
-// Direct path (called from src/services/gemini.ts): raw prompt + aspect ratio.
+// Direct path (called from src/services/gemini.ts or directly by callers
+// that pass brand_id + canal to opt into preset injection).
 interface DirectImageRequest {
   mode: 'direct';
   prompt: string;
   aspectRatio?: string;
+  brand_id?: string;   // v6: opt into imagelab_presets injection
+  canal?: string;      // v6: opt into imagelab_presets injection (case-insensitive)
   sourceAssetDataUrl?: string;
   sourceAssetLabel?: string;
   referenceImages?: { dataUrl: string; label?: string }[];
-  model?: string; // accepted for compatibility; ignored on Vertex.
+  model?: string;      // accepted for compatibility; ignored on Vertex.
 }
 
 // --- Vertex AI Imagen 3 Capability (subject / style customization) -----
@@ -301,17 +374,46 @@ async function vertexPredictImagenCapability(params: {
   }
 }
 
-async function generateImageDirect(req: DirectImageRequest): Promise<string> {
+interface DirectImageResult {
+  image_data_url: string;
+  preset_used: boolean;
+  preset_id: string | null;
+}
+
+async function generateImageDirect(req: DirectImageRequest): Promise<DirectImageResult> {
   const hasSource = !!req.sourceAssetDataUrl;
   const hasRefs   = Array.isArray(req.referenceImages) && req.referenceImages.length > 0;
 
+  // v6: optional preset injection — only when brand_id + canal are both provided.
+  let basePrompt = req.prompt;
+  let negativePrompt = FALLBACK_NEGATIVE;
+  let aspectRatio = req.aspectRatio ?? '1:1';
+  let presetUsed = false;
+  let presetId: string | null = null;
+
+  if (req.brand_id && req.canal) {
+    const canal = req.canal.toUpperCase();
+    const preset = await loadImagelabPreset(req.brand_id, canal);
+    if (preset) {
+      const built = buildPromptFromPreset(preset, req.prompt, aspectRatio);
+      basePrompt     = built.prompt;
+      negativePrompt = built.negativePrompt;
+      aspectRatio    = built.aspectRatio;
+      presetUsed     = true;
+      presetId       = built.presetId;
+    } else {
+      console.log(`[ImageLab v6] No preset found for brand_id=${req.brand_id} canal=${canal}, using raw prompt`);
+    }
+  }
+
   // No images → text-to-image fast path.
   if (!hasSource && !hasRefs) {
-    return vertexPredictImagen({
-      prompt: req.prompt,
-      negativePrompt: 'blurry, low quality, amateur, watermark, text overlay, logo',
-      aspectRatio: req.aspectRatio ?? '1:1',
+    const dataUrl = await vertexPredictImagen({
+      prompt: basePrompt,
+      negativePrompt,
+      aspectRatio,
     });
+    return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
   }
 
   // Multimodal → Imagen 3 capability model with subject/style references.
@@ -359,16 +461,17 @@ async function generateImageDirect(req: DirectImageRequest): Promise<string> {
   const subjectIds = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_SUBJECT').map(r => `[${r.referenceId}]`);
   const styleIds   = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_STYLE').map(r => `[${r.referenceId}]`);
 
-  let finalPrompt = req.prompt;
+  let finalPrompt = basePrompt;
   if (subjectIds.length > 0) finalPrompt = `${subjectIds.join(' ')} ${finalPrompt}`;
   if (styleIds.length > 0)   finalPrompt = `${finalPrompt} in the style of ${styleIds.join(' ')}`;
 
-  return vertexPredictImagenCapability({
+  const dataUrl = await vertexPredictImagenCapability({
     prompt: finalPrompt,
-    negativePrompt: 'blurry, low quality, amateur, watermark, text overlay, logo',
-    aspectRatio: req.aspectRatio ?? '1:1',
+    negativePrompt,
+    aspectRatio,
     refs,
   });
+  return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
 }
 
 // --- HTTP handler ----------------------------------------------------------
@@ -406,8 +509,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         res.status(400).json({ error: 'prompt is required for direct mode' });
         return;
       }
-      const imageDataUrl = await generateImageDirect(body as DirectImageRequest);
-      res.status(200).json({ image_data_url: imageDataUrl, status: 'ok' });
+      const result = await generateImageDirect(body as DirectImageRequest);
+      res.status(200).json({
+        image_data_url: result.image_data_url,
+        preset_used:    result.preset_used,
+        preset_id:      result.preset_id,
+        status:         'ok',
+      });
       return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -419,14 +527,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
 
   try {
-    const promptJson   = await buildVisualPrompt(body as ExecuteRequest);
-    const imageDataUrl = await generateImage(promptJson);
-    const promptParsed = JSON.parse(promptJson);
+    const built = await buildVisualPrompt(body as ExecuteRequest);
+    const imageDataUrl = await vertexPredictImagen({
+      prompt:         built.prompt,
+      negativePrompt: built.negativePrompt,
+      aspectRatio:    built.aspectRatio,
+    });
 
     res.status(200).json({
-      output: `[IMAGE_GENERATED]\nPrompt: ${promptParsed.prompt}\nAspect: ${promptParsed.aspect_ratio}\nCanal: ${promptParsed.canal}`,
+      output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
       image_data_url: imageDataUrl,
-      status: 'ok',
+      preset_used:    built.presetUsed,
+      preset_id:      built.presetId,
+      brand:          built.brandName,
+      canal:          built.canal,
+      status:         'ok',
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
