@@ -1,15 +1,4 @@
-export interface AIStudio {
-  hasSelectedApiKey: () => Promise<boolean>;
-  openSelectKey: () => Promise<void>;
-}
-
-declare global {
-  interface Window {
-    aistudio: AIStudio;
-  }
-}
-
-export type TabId = "promptpack" | "tools" | "customize";
+export type TabId = "promptpack" | "tools" | "customize" | "productshots";
 export type ToolId = "scene" | "avatar" | "product" | "videopodcast";
 export type LibraryAssetKind = "product" | "reference" | "other" | "person" | "background" | "unknown";
 export type PersonType = "real" | "synthetic";
