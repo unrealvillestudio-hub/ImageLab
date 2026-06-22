@@ -1,17 +1,25 @@
 /**
  * ImageLab — POST /api/execute
- * v6 — Imagelab_presets injection (per-brand visual identity).
+ * v7 — Gemini 2.5 Flash Image (migrated off Vertex Imagen 3, shut down 2026-06-24).
+ *
+ * All image generation runs on `gemini-2.5-flash-image` via Vertex AI's
+ * `:generateContent` endpoint — the single model now handles both text-to-image
+ * and multimodal (subject/style reference) generation.
  *
  * Routing:
  *  - Orchestrator path (brandId + stage): looks up imagelab_presets by
  *    brand_id+canal; if found, assembles the brand-specific prompt format
  *    (reference_aesthetic + composition + lighting + grading + mood +
  *    concept + brand DNA + texture + FORBIDDEN); else falls back to the
- *    legacy generic prompt. Always calls imagen-3.0-fast-generate-001.
+ *    legacy generic prompt. Calls gemini-2.5-flash-image (text-to-image).
  *  - Direct mode (text-only): same preset lookup if body carries brand_id+
- *    canal; otherwise raw prompt path. imagen-3.0-fast-generate-001.
- *  - Direct mode (multimodal): preset prompt + REFERENCE_TYPE_SUBJECT/STYLE
- *    bindings via imagen-3.0-capability-001.
+ *    canal; otherwise raw prompt path. gemini-2.5-flash-image.
+ *  - Direct mode (multimodal): preset prompt + reference images passed as
+ *    inlineData parts, with their subject/style roles described in the text
+ *    (Gemini-image has no REFERENCE_TYPE system). gemini-2.5-flash-image.
+ *
+ * Gemini-image has no negativePrompt parameter, so any negative prompt is
+ * absorbed into the text body as "Avoid: ...".
  *
  * Auth: Service Account JSON (GOOGLE_SERVICE_ACCOUNT_KEY) → OAuth2 Bearer token
  * via google-auth-library. Billed to GCP (uses the project's trial credits, not
@@ -45,8 +53,20 @@ const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 // Vertex AI config.
 const GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
 const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
-const IMAGEN_MODEL            = 'imagen-3.0-fast-generate-001';   // text-to-image (cheap, fast)
-const IMAGEN_CAPABILITY_MODEL = 'imagen-3.0-capability-001';      // subject/style customization
+// Single Gemini-image model handles both roles (text-to-image + multimodal
+// subject/style references) via :generateContent. Replaced the two Imagen 3
+// models (fast-generate + capability), shut down 2026-06-24. If Google
+// deprecates this, change it here.
+const GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image';
+
+// Aspect ratios Gemini 2.5 Flash Image accepts. Anything else degrades to 1:1.
+const VALID_ASPECT_RATIOS = new Set([
+  '1:1', '3:2', '2:3', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9',
+]);
+function normalizeAspectRatio(ar?: string): string {
+  const v = (ar ?? '').trim();
+  return VALID_ASPECT_RATIOS.has(v) ? v : '1:1';
+}
 
 // maxDuration is 60s (see `config` below). Leave ~5s headroom for token + JSON I/O.
 const UPSTREAM_TIMEOUT_MS = 55_000;
@@ -233,54 +253,81 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
   };
 }
 
-// --- Vertex AI Imagen 3 ---------------------------------------------------
+// --- Vertex AI Gemini 2.5 Flash Image -------------------------------------
 
+const GEMINI_IMAGE_URL = () =>
+  `https://${GCP_LOCATION()}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT()}/locations/${GCP_LOCATION()}/publishers/google/models/${GEMINI_IMAGE_MODEL}:generateContent`;
+
+/**
+ * Gemini-image has no negativePrompt parameter — absorb it into the text body
+ * as an "Avoid: ..." clause.
+ */
+function appendNegative(prompt: string, negativePrompt?: string): string {
+  const neg = (negativePrompt ?? '').trim();
+  if (!neg) return prompt;
+  return `${prompt} Avoid: ${neg}.`;
+}
+
+/**
+ * Pull the first inline image out of a Gemini :generateContent response.
+ * Returns a `data:<mime>;base64,<...>` URL. Throws with the block/finish reason
+ * if no image part is present.
+ */
+function extractInlineImage(data: any): string {
+  const parts = data?.candidates?.[0]?.content?.parts ?? [];
+  const imgPart = parts.find((p: any) => p?.inlineData?.data);
+  if (!imgPart) {
+    const block   = data?.promptFeedback?.blockReason;
+    const finish  = data?.candidates?.[0]?.finishReason;
+    const extra   = block ? ` (blockReason=${block})` : finish ? ` (finishReason=${finish})` : '';
+    throw new Error(`Gemini image: no inlineData returned${extra}.`);
+  }
+  const mime = imgPart.inlineData.mimeType ?? 'image/png';
+  return `data:${mime};base64,${imgPart.inlineData.data}`;
+}
+
+/**
+ * Text-to-image via gemini-2.5-flash-image:generateContent.
+ * (Name retained from the Imagen era to keep call sites stable.)
+ */
 async function vertexPredictImagen(params: {
   prompt: string;
   negativePrompt?: string;
   aspectRatio?: string;
 }): Promise<string> {
-  const project  = GCP_PROJECT();
-  const location = GCP_LOCATION();
-  if (!project) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+  if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
 
   const token = await getAccessToken();
-  const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${IMAGEN_MODEL}:predict`;
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(GEMINI_IMAGE_URL(), {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        instances: [{ prompt: params.prompt }],
-        parameters: {
-          sampleCount: 1,
-          negativePrompt: params.negativePrompt,
-          aspectRatio: params.aspectRatio ?? '1:1',
-          // Vertex enum values are lowercase (AI Studio used UPPERCASE).
-          safetyFilterLevel: 'block_only_high',
-          personGeneration: 'allow_adult',
+        contents: [{
+          role: 'user',
+          parts: [{ text: appendNegative(params.prompt, params.negativePrompt) }],
+        }],
+        generationConfig: {
+          responseModalities: ['IMAGE'],
+          imageConfig: {
+            aspectRatio: normalizeAspectRatio(params.aspectRatio),
+          },
         },
       }),
       signal: controller.signal,
     });
 
-    if (!res.ok) throw new Error(`Vertex Imagen error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Gemini image error ${res.status}: ${await res.text()}`);
 
-    const data = await res.json();
-    const pred = data.predictions?.[0];
-    const b64  = pred?.bytesBase64Encoded;
-    const mime = pred?.mimeType ?? 'image/png';
-    if (!b64) throw new Error('Vertex Imagen: no image returned.');
-    return `data:${mime};base64,${b64}`;
+    return extractInlineImage(await res.json());
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Vertex Imagen timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+      throw new Error(`Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
     }
     throw err;
   } finally {
@@ -299,10 +346,10 @@ interface DirectImageRequest {
   sourceAssetDataUrl?: string;
   sourceAssetLabel?: string;
   referenceImages?: { dataUrl: string; label?: string }[];
-  model?: string;      // accepted for compatibility; ignored on Vertex.
+  model?: string;      // accepted for compatibility; ignored — gemini-2.5-flash-image is the only model.
 }
 
-// --- Vertex AI Imagen 3 Capability (subject / style customization) -----
+// --- Gemini 2.5 Flash Image — multimodal (subject / style references) -----
 
 /** Strip the `data:image/...;base64,` header and return just the base64 payload. */
 function dataUrlBase64(dataUrl: string): string {
@@ -310,78 +357,69 @@ function dataUrlBase64(dataUrl: string): string {
   return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
 }
 
-/** Heuristic: map a free-form asset label to the closest Imagen subjectType. */
-function inferSubjectType(label?: string): 'SUBJECT_TYPE_PERSON' | 'SUBJECT_TYPE_ANIMAL' | 'SUBJECT_TYPE_PRODUCT' | 'SUBJECT_TYPE_DEFAULT' {
-  const l = (label ?? '').toLowerCase();
-  if (/(person|people|man|woman|human|model|face|avatar|portrait|persona)/.test(l)) return 'SUBJECT_TYPE_PERSON';
-  if (/(animal|dog|cat|pet|horse)/.test(l)) return 'SUBJECT_TYPE_ANIMAL';
-  if (/(product|bottle|item|sku|packshot|object|merch|good)/.test(l)) return 'SUBJECT_TYPE_PRODUCT';
-  return 'SUBJECT_TYPE_DEFAULT';
+/** Infer the mimeType from a data URL header (default image/png). */
+function dataUrlMime(dataUrl: string): string {
+  const m = /^data:([^;,]+)[;,]/.exec(dataUrl);
+  return m?.[1] || 'image/png';
 }
 
-/** Is this reference image meant as a STYLE ref (not a subject)? */
+/** Is this reference image meant as a STYLE ref (not a subject)? Used only to
+ *  word the prompt text — Gemini-image has no REFERENCE_TYPE system. */
 function looksLikeStyleRef(label?: string): boolean {
   const l = (label ?? '').toLowerCase();
   return /(style|aesthetic|mood|look|grade|grading|reference|ref\b|palette|art\s*direction|inspiration)/.test(l);
 }
 
-interface CapabilityRef {
-  referenceType: 'REFERENCE_TYPE_SUBJECT' | 'REFERENCE_TYPE_STYLE';
-  referenceId: number;
-  referenceImage: { bytesBase64Encoded: string };
-  subjectImageConfig?: { subjectDescription: string; subjectType: string };
-  styleImageConfig?: { styleDescription: string };
-}
+interface InlineImage { mimeType: string; data: string; }
 
+/**
+ * Multimodal (subject/style references) via gemini-2.5-flash-image:generateContent.
+ * Each reference image is an `inlineData` part; their roles are described in the
+ * text prompt (Gemini-image has no REFERENCE_TYPE_SUBJECT/STYLE bindings).
+ * (Name retained from the Imagen era to keep call sites stable.)
+ */
 async function vertexPredictImagenCapability(params: {
   prompt: string;
   negativePrompt?: string;
   aspectRatio?: string;
-  refs: CapabilityRef[];
+  images: InlineImage[];
 }): Promise<string> {
-  const project  = GCP_PROJECT();
-  const location = GCP_LOCATION();
-  if (!project) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+  if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
 
   const token = await getAccessToken();
-  const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${IMAGEN_CAPABILITY_MODEL}:predict`;
+
+  const parts: any[] = params.images.map(img => ({
+    inlineData: { mimeType: img.mimeType, data: img.data },
+  }));
+  parts.push({ text: appendNegative(params.prompt, params.negativePrompt) });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(GEMINI_IMAGE_URL(), {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        instances: [{
-          prompt: params.prompt,
-          referenceImages: params.refs,
-        }],
-        parameters: {
-          sampleCount: 1,
-          negativePrompt: params.negativePrompt,
-          aspectRatio: params.aspectRatio ?? '1:1',
-          safetyFilterLevel: 'block_only_high',
-          personGeneration: 'allow_adult',
+        contents: [{ role: 'user', parts }],
+        generationConfig: {
+          responseModalities: ['IMAGE'],
+          imageConfig: {
+            aspectRatio: normalizeAspectRatio(params.aspectRatio),
+          },
         },
       }),
       signal: controller.signal,
     });
 
-    if (!res.ok) throw new Error(`Vertex Imagen Capability error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Gemini image (multimodal) error ${res.status}: ${await res.text()}`);
 
-    const data = await res.json();
-    const pred = data.predictions?.[0];
-    const b64  = pred?.bytesBase64Encoded;
-    const mime = pred?.mimeType ?? 'image/png';
-    if (!b64) throw new Error('Vertex Imagen Capability: no image returned.');
-    return `data:${mime};base64,${b64}`;
+    return extractInlineImage(await res.json());
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Vertex Imagen Capability timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+      throw new Error(`Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
     }
     throw err;
   } finally {
@@ -431,60 +469,54 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
     return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
   }
 
-  // Multimodal → Imagen 3 capability model with subject/style references.
-  const refs: CapabilityRef[] = [];
-  let nextId = 1;
+  // Multimodal → gemini-2.5-flash-image: pass each reference as an inlineData
+  // part and describe its role (subject vs style) in the text prompt. There is
+  // no REFERENCE_TYPE binding — the [n] tokens of the Imagen era are replaced by
+  // natural-language role descriptions.
+  const images: InlineImage[] = [];
+  const subjectDescs: string[] = [];
+  const styleDescs: string[]   = [];
 
   if (req.sourceAssetDataUrl) {
-    const subjectType = inferSubjectType(req.sourceAssetLabel);
-    const description = req.sourceAssetLabel?.trim() || 'main subject';
-    refs.push({
-      referenceType: 'REFERENCE_TYPE_SUBJECT',
-      referenceId: nextId++,
-      referenceImage: { bytesBase64Encoded: dataUrlBase64(req.sourceAssetDataUrl) },
-      subjectImageConfig: { subjectDescription: description, subjectType },
+    images.push({
+      mimeType: dataUrlMime(req.sourceAssetDataUrl),
+      data:     dataUrlBase64(req.sourceAssetDataUrl),
     });
+    subjectDescs.push(req.sourceAssetLabel?.trim() || 'main subject');
   }
 
   if (hasRefs) {
     for (const r of req.referenceImages!) {
-      const id = nextId++;
+      images.push({ mimeType: dataUrlMime(r.dataUrl), data: dataUrlBase64(r.dataUrl) });
       if (looksLikeStyleRef(r.label)) {
-        refs.push({
-          referenceType: 'REFERENCE_TYPE_STYLE',
-          referenceId: id,
-          referenceImage: { bytesBase64Encoded: dataUrlBase64(r.dataUrl) },
-          styleImageConfig: { styleDescription: r.label?.trim() || 'reference style' },
-        });
+        styleDescs.push(r.label?.trim() || 'reference style');
       } else {
-        refs.push({
-          referenceType: 'REFERENCE_TYPE_SUBJECT',
-          referenceId: id,
-          referenceImage: { bytesBase64Encoded: dataUrlBase64(r.dataUrl) },
-          subjectImageConfig: {
-            subjectDescription: r.label?.trim() || `subject ${id}`,
-            subjectType: inferSubjectType(r.label),
-          },
-        });
+        subjectDescs.push(r.label?.trim() || 'subject');
       }
     }
   }
 
-  // Imagen 3 expects [referenceId] tokens inline in the prompt to bind images
-  // to their roles. Prepend a clause that names every subject ref, and append
-  // a style clause if any style refs are present.
-  const subjectIds = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_SUBJECT').map(r => `[${r.referenceId}]`);
-  const styleIds   = refs.filter(r => r.referenceType === 'REFERENCE_TYPE_STYLE').map(r => `[${r.referenceId}]`);
+  const roleClauses: string[] = [];
+  if (subjectDescs.length > 0) {
+    roleClauses.push(
+      `Using the provided image(s) as the exact subject (${subjectDescs.join(', ')}), keep their identity, labels, and proportions unchanged.`,
+    );
+  }
+  if (styleDescs.length > 0) {
+    roleClauses.push(
+      `Match the visual style of the provided style reference(s) (${styleDescs.join(', ')}).`,
+    );
+  }
 
-  let finalPrompt = basePrompt;
-  if (subjectIds.length > 0) finalPrompt = `${subjectIds.join(' ')} ${finalPrompt}`;
-  if (styleIds.length > 0)   finalPrompt = `${finalPrompt} in the style of ${styleIds.join(' ')}`;
+  const finalPrompt = roleClauses.length > 0
+    ? `${roleClauses.join(' ')} ${basePrompt}`
+    : basePrompt;
 
   const dataUrl = await vertexPredictImagenCapability({
     prompt: finalPrompt,
     negativePrompt,
     aspectRatio,
-    refs,
+    images,
   });
   return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
 }
