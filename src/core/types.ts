@@ -1,4 +1,4 @@
-export type TabId = "promptpack" | "tools" | "customize" | "productshots";
+export type TabId = "promptpack" | "tools" | "customize" | "bgremover";
 export type ToolId = "scene" | "avatar" | "product" | "videopodcast";
 export type LibraryAssetKind = "product" | "reference" | "other" | "person" | "background" | "unknown";
 export type PersonType = "real" | "synthetic";

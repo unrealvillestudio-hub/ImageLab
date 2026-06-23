@@ -12,7 +12,7 @@
  * X-Credits-Charged response header. On error it returns a JSON body we relay
  * with a clear message (402 = out of credits, 400 = invalid image).
  *
- * Belongs to the ProductShots submodule (deterministic, no AI model).
+ * Belongs to the BGRemover submodule (no AI model).
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';

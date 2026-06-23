@@ -21,7 +21,7 @@ import { LibraryDock } from "./modules/library/LibraryDock.tsx";
 import { ToolsModule } from "./modules/tools/ToolsModule.tsx";
 import { PromptPackModule } from "./modules/promptpack/PromptPackModule.tsx";
 import { CustomizeModule } from "./modules/customize/CustomizeModule.tsx";
-import { ProductShotsModule } from "./modules/productshots/ProductShotsModule.tsx";
+import { BGRemoverModule } from "./modules/bgremover/BGRemoverModule.tsx";
 import { 
     TabButton
 } from "./ui/components.tsx";
@@ -136,7 +136,7 @@ function AppContent() {
                 <TabButton active={tab === "promptpack"} onClick={() => setTab("promptpack")}>PromptPack</TabButton>
                 <TabButton active={tab === "tools"} onClick={() => setTab("tools")}>Tools</TabButton>
                 <TabButton active={tab === "customize"} onClick={() => setTab("customize")}>Customize</TabButton>
-                <TabButton active={tab === "productshots"} onClick={() => setTab("productshots")}>ProductShots</TabButton>
+                <TabButton active={tab === "bgremover"} onClick={() => setTab("bgremover")}>BGRemover</TabButton>
               </nav>
           </div>
         </div>
@@ -162,8 +162,8 @@ function AppContent() {
             {tab === "customize" && (
               <CustomizeModule />
             )}
-            {tab === "productshots" && (
-              <ProductShotsModule />
+            {tab === "bgremover" && (
+              <BGRemoverModule />
             )}
           </div>
         </div>

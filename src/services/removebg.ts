@@ -1,5 +1,5 @@
 /**
- * ProductShots — remove.bg client.
+ * BGRemover — remove.bg client.
  * Mirrors services/gemini.ts: a thin fetch wrapper over the server-side proxy
  * at /api/removebg. No state, no global store. The API key stays server-side.
  */

@@ -1,21 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
+import JSZip from "jszip";
 import { removeBg } from "../../services/removebg.ts";
-import {
-  makeCatalogBackground,
-  aspectToDimensions,
-  type CatalogVariant,
-} from "../../utils/catalogBackground.ts";
-import {
-  composeProductShot,
-  type ProductShotLayout,
-} from "../../utils/compositeDeterministic.ts";
 import { downloadDataUrl, readFileAsDataUrl, safeId } from "../../utils/imageUtils.ts";
 
 /**
- * ProductShots — autonomous catalog packshot submodule.
- * 4 linear steps: Upload → Remove background → Compose → Download.
+ * BGRemover — autonomous background-removal submodule.
+ * 3 linear steps: Upload (1–7) → Remove background → Download.
  * Local state only — NO global library store, NO presets, NO AI model.
- * Composition is 100% deterministic (canvas).
+ * Background removal is proxied server-side to remove.bg (api/removebg.ts);
+ * download operates on the individual cutouts (no composition).
  */
 
 type ProductStatus = "original" | "preview" | "final";
@@ -26,7 +19,7 @@ interface ProductImage {
   originalDataUrl: string;
   // Preview (free, low-res) and final (1 credit, full-res) cutouts are stored in
   // SEPARATE fields so a late-resolving preview can never clobber a confirmed
-  // hi-res cutout. The composer always picks the highest resolution available.
+  // hi-res cutout. Download always picks the highest resolution available.
   previewCutoutDataUrl?: string;
   finalCutoutDataUrl?: string;
   busy: boolean;
@@ -49,35 +42,26 @@ function productStatus(p: ProductImage): ProductStatus {
   return "original";
 }
 
+function baseName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "") || "cutout";
+}
+
 type OutputFormat = "image/png" | "image/webp";
 
 const MAX_PRODUCTS = 7;
-const ASPECT_OPTIONS = ["1:1", "4:5", "4:3", "16:9", "9:16"] as const;
-const LAYOUT_OPTIONS: { id: ProductShotLayout; label: string }[] = [
-  { id: "auto", label: "Auto" },
-  { id: "row", label: "Fila" },
-  { id: "group", label: "Grupo" },
-];
 
-export function ProductShotsModule() {
+export function BGRemoverModule() {
   const [products, setProducts] = useState<ProductImage[]>([]);
   const [creditsSpent, setCreditsSpent] = useState(0);
 
-  const [variant, setVariant] = useState<CatalogVariant>("light");
-  const [aspect, setAspect] = useState<string>("1:1");
-  const [layout, setLayout] = useState<ProductShotLayout>("auto");
-
-  const [composing, setComposing] = useState(false);
-  const [composed, setComposed] = useState<string | null>(null);
-  const [composeError, setComposeError] = useState<string | null>(null);
-
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("image/png");
   const [webpQuality, setWebpQuality] = useState(0.9);
+  const [zipping, setZipping] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  const hasCutouts = useMemo(() => products.some((p) => bestCutout(p)), [products]);
+  const cutouts = useMemo(() => products.filter((p) => bestCutout(p)), [products]);
 
   // --- Step 1: upload ------------------------------------------------------
 
@@ -142,74 +126,57 @@ export function ProductShotsModule() {
     }
   };
 
-  // --- Step 3: compose -----------------------------------------------------
+  // --- Step 3: download (per cutout) --------------------------------------
 
-  const compose = async () => {
-    if (products.length === 0) return;
-    setComposing(true);
-    setComposeError(null);
-    try {
-      const { w, h } = aspectToDimensions(aspect);
-      const background = makeCatalogBackground({ variant, width: w, height: h });
-      const productSrcs = products.map(bestSource);
-      const { dataUrl } = await composeProductShot({
-        backgroundSrc: background,
-        productSrcs,
-        opts: {
-          variant,
-          layout,
-          colorMatch: { enabled: true, strength: 0.3 },
-          lightWrap: { enabled: true, strength: 0.16 },
-          contactShadow: { enabled: true },
-          output: { type: "image/png" },
-        },
-      });
-      setComposed(dataUrl);
-    } catch (err) {
-      setComposeError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setComposing(false);
-    }
-  };
-
-  // Signature that changes whenever any product's best-available resolution
-  // changes (original → preview → final).
-  const sourceSig = useMemo(
-    () => products.map((p) => `${p.id}:${productStatus(p)}`).join("|"),
-    [products],
-  );
-
-  // Keep the displayed composition in sync. Once a composition exists, changing
-  // the background variant, aspect, layout, or a product's resolution (e.g.
-  // confirming hi-res) re-renders automatically — so "Oscuro" visibly affects
-  // the canvas and confirmed hi-res cutouts replace the preview ones.
-  useEffect(() => {
-    if (composed == null) return;
-    if (composing) return;
-    if (products.length === 0) return;
-    if (products.some((p) => p.busy)) return;
-    void compose();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [variant, aspect, layout, sourceSig]);
-
-  // --- Step 4: download ----------------------------------------------------
-
-  const download = async () => {
-    if (!composed) return;
-    if (outputFormat === "image/png") {
-      downloadDataUrl(`productshot_${Date.now()}.png`, composed);
-      return;
-    }
-    // Re-encode the composed PNG to WEBP at the chosen quality.
-    const img = await loadImageEl(composed);
+  // PNG keeps the original alpha cutout untouched; WEBP re-encodes via canvas
+  // (WEBP also supports alpha) at the chosen quality for a smaller file.
+  const encodeCutout = async (cutoutDataUrl: string): Promise<string> => {
+    if (outputFormat === "image/png") return cutoutDataUrl;
+    const img = await loadImageEl(cutoutDataUrl);
     const canvas = document.createElement("canvas");
     canvas.width = img.naturalWidth || img.width;
     canvas.height = img.naturalHeight || img.height;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) return cutoutDataUrl;
     ctx.drawImage(img, 0, 0);
-    const webp = canvas.toDataURL("image/webp", webpQuality);
-    downloadDataUrl(`productshot_${Date.now()}.webp`, webp);
+    return canvas.toDataURL("image/webp", webpQuality);
+  };
+
+  const ext = () => (outputFormat === "image/png" ? "png" : "webp");
+
+  const downloadOne = async (p: ProductImage) => {
+    const cut = bestCutout(p);
+    if (!cut) return;
+    const data = await encodeCutout(cut);
+    downloadDataUrl(`${baseName(p.fileName)}_cutout.${ext()}`, data);
+  };
+
+  const downloadAll = async () => {
+    if (cutouts.length === 0 || zipping) return;
+    setZipping(true);
+    try {
+      const zip = new JSZip();
+      const used: Record<string, number> = {};
+      for (const p of cutouts) {
+        const cut = bestCutout(p);
+        if (!cut) continue;
+        const data = await encodeCutout(cut);
+        const b64 = data.split(",")[1] ?? "";
+        // Disambiguate duplicate base names within the zip.
+        let name = `${baseName(p.fileName)}_cutout.${ext()}`;
+        if (used[name] != null) {
+          used[name] += 1;
+          name = `${baseName(p.fileName)}_cutout_${used[name]}.${ext()}`;
+        } else {
+          used[name] = 0;
+        }
+        zip.file(name, b64, { base64: true });
+      }
+      const zipB64 = await zip.generateAsync({ type: "base64" });
+      downloadDataUrl(`cutouts_${Date.now()}.zip`, `data:application/zip;base64,${zipB64}`);
+    } finally {
+      setZipping(false);
+    }
   };
 
   // --- Render --------------------------------------------------------------
@@ -218,9 +185,9 @@ export function ProductShotsModule() {
     <div className="max-w-[1100px] mx-auto pb-16 space-y-6">
       <header className="flex items-end justify-between">
         <div>
-          <h1 className="uv-h1">Product<span> Shots</span></h1>
+          <h1 className="uv-h1">BG<span> Remover</span></h1>
           <p className="uv-muted text-[11px] mt-1">
-            Sube · quita fondo · compón sobre catálogo · descarga. Sin IA, 100% determinístico.
+            Sube · quita el fondo · descarga el recorte. Sin IA, proxy a remove.bg.
           </p>
         </div>
         <div className="uv-pill px-4 py-2 text-right">
@@ -339,83 +306,59 @@ export function ProductShotsModule() {
         )}
       </Section>
 
-      {/* STEP 3 — COMPOSE */}
-      <Section step={3} title="Componer" hint={hasCutouts ? "" : "Sugerencia: quita el fondo primero para mejor resultado"}>
-        {products.length === 0 ? (
-          <EmptyHint>Sube imágenes para habilitar este paso.</EmptyHint>
+      {/* STEP 3 — DOWNLOAD (per cutout) */}
+      <Section step={3} title="Descargar" hint="PNG conserva alpha · WEBP pesa menos">
+        {cutouts.length === 0 ? (
+          <EmptyHint>Quita el fondo de al menos una imagen para descargar.</EmptyHint>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
-            <div className="space-y-4">
-              <ControlRow label="Fondo">
-                <div className="flex gap-2">
-                  <Chip active={variant === "light"} onClick={() => setVariant("light")}>Claro</Chip>
-                  <Chip active={variant === "dark"} onClick={() => setVariant("dark")}>Oscuro</Chip>
-                </div>
-              </ControlRow>
-
-              <ControlRow label="Aspect ratio">
-                <select className="uv-select" value={aspect} onChange={(e) => setAspect(e.target.value)}>
-                  {ASPECT_OPTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-                </select>
-              </ControlRow>
-
-              <ControlRow label="Layout">
-                <div className="flex gap-2">
-                  {LAYOUT_OPTIONS.map((l) => (
-                    <Chip key={l.id} active={layout === l.id} onClick={() => setLayout(l.id)}>{l.label}</Chip>
-                  ))}
-                </div>
-              </ControlRow>
-
-              <button
-                className="uv-btn uv-btn-primary w-full py-3 text-[12px] disabled:opacity-40"
-                disabled={composing}
-                onClick={compose}
-              >
-                {composing ? "Componiendo..." : "Componer"}
-              </button>
-              {composeError && <p className="uv-warning text-[10px]">{composeError}</p>}
-            </div>
-
-            <div className="uv-panel p-3 min-h-[320px] flex items-center justify-center bg-checkered rounded-xl">
-              {composed ? (
-                <img src={composed} className="max-h-[60vh] max-w-full object-contain rounded-md shadow-2xl" alt="composed" />
-              ) : (
-                <p className="uv-muted text-[11px]">El resultado aparecerá aquí.</p>
+          <>
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex gap-2">
+                <Chip active={outputFormat === "image/png"} onClick={() => setOutputFormat("image/png")}>PNG</Chip>
+                <Chip active={outputFormat === "image/webp"} onClick={() => setOutputFormat("image/webp")}>WEBP</Chip>
+              </div>
+              {outputFormat === "image/webp" && (
+                <label className="flex items-center gap-3">
+                  <span className="uv-label">Calidad {Math.round(webpQuality * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={1}
+                    step={0.05}
+                    value={webpQuality}
+                    onChange={(e) => setWebpQuality(Number(e.target.value))}
+                    className="accent-[#FFAB00]"
+                  />
+                </label>
               )}
+              <button
+                className="uv-btn uv-btn-primary px-6 py-3 text-[12px] disabled:opacity-40 ml-auto"
+                disabled={zipping}
+                onClick={downloadAll}
+              >
+                {zipping ? "Comprimiendo..." : `Descargar todas (.zip · ${cutouts.length})`}
+              </button>
             </div>
-          </div>
-        )}
-      </Section>
 
-      {/* STEP 4 — DOWNLOAD */}
-      <Section step={4} title="Descargar" hint="PNG conserva alpha · WEBP pesa menos">
-        {!composed ? (
-          <EmptyHint>Compón una imagen para habilitar la descarga.</EmptyHint>
-        ) : (
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex gap-2">
-              <Chip active={outputFormat === "image/png"} onClick={() => setOutputFormat("image/png")}>PNG</Chip>
-              <Chip active={outputFormat === "image/webp"} onClick={() => setOutputFormat("image/webp")}>WEBP</Chip>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+              {cutouts.map((p) => (
+                <div key={p.id} className="uv-panel p-2 space-y-2">
+                  <div className="aspect-square rounded-md overflow-hidden bg-checkered flex items-center justify-center">
+                    <img src={bestCutout(p)} className="max-h-full max-w-full object-contain" alt={p.fileName} />
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <StatusBadge status={productStatus(p)} busy={p.busy} />
+                    <button
+                      className="uv-btn uv-btn-ghost px-3 py-1.5 text-[10px]"
+                      onClick={() => downloadOne(p)}
+                    >
+                      {ext().toUpperCase()}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
-            {outputFormat === "image/webp" && (
-              <label className="flex items-center gap-3">
-                <span className="uv-label">Calidad {Math.round(webpQuality * 100)}%</span>
-                <input
-                  type="range"
-                  min={0.5}
-                  max={1}
-                  step={0.05}
-                  value={webpQuality}
-                  onChange={(e) => setWebpQuality(Number(e.target.value))}
-                  className="accent-[#FFAB00]"
-                />
-              </label>
-            )}
-            <button className="uv-btn uv-btn-primary px-6 py-3 text-[12px]" onClick={download}>
-              Descargar {outputFormat === "image/png" ? "PNG" : "WEBP"}
-            </button>
-          </div>
+          </>
         )}
       </Section>
     </div>
@@ -436,15 +379,6 @@ function Section(props: React.PropsWithChildren<{ step: number; title: string; h
       </div>
       {props.children}
     </section>
-  );
-}
-
-function ControlRow(props: React.PropsWithChildren<{ label: string }>) {
-  return (
-    <div className="space-y-2">
-      <div className="uv-label">{props.label}</div>
-      {props.children}
-    </div>
   );
 }
 
@@ -486,7 +420,7 @@ function loadImageEl(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Failed to load composed image"));
+    img.onerror = () => reject(new Error("Failed to load cutout image"));
     img.src = src;
   });
 }
