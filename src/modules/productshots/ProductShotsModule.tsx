@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { removeBg } from "../../services/removebg.ts";
 import {
   makeCatalogBackground,
@@ -24,10 +24,29 @@ interface ProductImage {
   id: string;
   fileName: string;
   originalDataUrl: string;
-  cutoutDataUrl?: string;
-  status: ProductStatus;
+  // Preview (free, low-res) and final (1 credit, full-res) cutouts are stored in
+  // SEPARATE fields so a late-resolving preview can never clobber a confirmed
+  // hi-res cutout. The composer always picks the highest resolution available.
+  previewCutoutDataUrl?: string;
+  finalCutoutDataUrl?: string;
   busy: boolean;
   error?: string;
+}
+
+// Highest-resolution cutout available for a product (final > preview), or the
+// original if no background removal has run yet.
+function bestSource(p: ProductImage): string {
+  return p.finalCutoutDataUrl ?? p.previewCutoutDataUrl ?? p.originalDataUrl;
+}
+
+function bestCutout(p: ProductImage): string | undefined {
+  return p.finalCutoutDataUrl ?? p.previewCutoutDataUrl;
+}
+
+function productStatus(p: ProductImage): ProductStatus {
+  if (p.finalCutoutDataUrl) return "final";
+  if (p.previewCutoutDataUrl) return "preview";
+  return "original";
 }
 
 type OutputFormat = "image/png" | "image/webp";
@@ -58,7 +77,7 @@ export function ProductShotsModule() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  const hasCutouts = useMemo(() => products.some((p) => p.cutoutDataUrl), [products]);
+  const hasCutouts = useMemo(() => products.some((p) => bestCutout(p)), [products]);
 
   // --- Step 1: upload ------------------------------------------------------
 
@@ -76,7 +95,6 @@ export function ProductShotsModule() {
           id: safeId("ps"),
           fileName: f.name,
           originalDataUrl: dataUrl,
-          status: "original",
           busy: false,
         });
       } catch {
@@ -104,11 +122,11 @@ export function ProductShotsModule() {
         imageDataUrl: target.originalDataUrl,
         preview,
       });
-      patch(id, {
-        cutoutDataUrl: imageDataUrl,
-        status: preview ? "preview" : "final",
-        busy: false,
-      });
+      // Write ONLY the field for this resolution. A late preview never overwrites
+      // a confirmed final, and confirming final never wipes the preview.
+      patch(id, preview
+        ? { previewCutoutDataUrl: imageDataUrl, busy: false }
+        : { finalCutoutDataUrl: imageDataUrl, busy: false });
       if (creditsCharged > 0) setCreditsSpent((c) => c + creditsCharged);
     } catch (err) {
       patch(id, { busy: false, error: err instanceof Error ? err.message : String(err) });
@@ -118,7 +136,7 @@ export function ProductShotsModule() {
   const removeBgAll = async (preview: boolean) => {
     for (const p of products) {
       // Skip already-final cutouts when confirming hi-res in bulk.
-      if (!preview && p.status === "final") continue;
+      if (!preview && p.finalCutoutDataUrl) continue;
       // eslint-disable-next-line no-await-in-loop
       await runRemoveBg(p.id, preview);
     }
@@ -133,7 +151,7 @@ export function ProductShotsModule() {
     try {
       const { w, h } = aspectToDimensions(aspect);
       const background = makeCatalogBackground({ variant, width: w, height: h });
-      const productSrcs = products.map((p) => p.cutoutDataUrl ?? p.originalDataUrl);
+      const productSrcs = products.map(bestSource);
       const { dataUrl } = await composeProductShot({
         backgroundSrc: background,
         productSrcs,
@@ -153,6 +171,26 @@ export function ProductShotsModule() {
       setComposing(false);
     }
   };
+
+  // Signature that changes whenever any product's best-available resolution
+  // changes (original → preview → final).
+  const sourceSig = useMemo(
+    () => products.map((p) => `${p.id}:${productStatus(p)}`).join("|"),
+    [products],
+  );
+
+  // Keep the displayed composition in sync. Once a composition exists, changing
+  // the background variant, aspect, layout, or a product's resolution (e.g.
+  // confirming hi-res) re-renders automatically — so "Oscuro" visibly affects
+  // the canvas and confirmed hi-res cutouts replace the preview ones.
+  useEffect(() => {
+    if (composed == null) return;
+    if (composing) return;
+    if (products.length === 0) return;
+    if (products.some((p) => p.busy)) return;
+    void compose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variant, aspect, layout, sourceSig]);
 
   // --- Step 4: download ----------------------------------------------------
 
@@ -226,7 +264,7 @@ export function ProductShotsModule() {
               <div key={p.id} className="relative group uv-panel p-2">
                 <div className="aspect-square rounded-md overflow-hidden bg-checkered flex items-center justify-center">
                   <img
-                    src={p.cutoutDataUrl ?? p.originalDataUrl}
+                    src={bestSource(p)}
                     className="max-h-full max-w-full object-contain"
                     alt={p.fileName}
                   />
@@ -239,7 +277,7 @@ export function ProductShotsModule() {
                   ×
                 </button>
                 <div className="mt-1 text-center">
-                  <StatusBadge status={p.status} hasCutout={!!p.cutoutDataUrl} busy={p.busy} />
+                  <StatusBadge status={productStatus(p)} busy={p.busy} />
                 </div>
                 {p.error && <p className="text-[8px] text-red-400 mt-1 leading-tight">{p.error}</p>}
               </div>
@@ -269,8 +307,8 @@ export function ProductShotsModule() {
                   <div className="grid grid-cols-2 gap-2">
                     <BeforeAfter label="Original" src={p.originalDataUrl} />
                     <BeforeAfter
-                      label={p.status === "final" ? "Alta res" : p.status === "preview" ? "Preview" : "—"}
-                      src={p.cutoutDataUrl}
+                      label={productStatus(p) === "final" ? "Alta res" : productStatus(p) === "preview" ? "Preview" : "—"}
+                      src={bestCutout(p)}
                       checkered
                     />
                   </div>
@@ -422,10 +460,10 @@ function EmptyHint(props: React.PropsWithChildren<{}>) {
   return <p className="uv-muted text-[11px] italic">{props.children}</p>;
 }
 
-function StatusBadge({ status, hasCutout, busy }: { status: ProductStatus; hasCutout: boolean; busy: boolean }) {
+function StatusBadge({ status, busy }: { status: ProductStatus; busy: boolean }) {
   if (busy) return <span className="uv-label text-[#FFAB00]">Procesando…</span>;
   if (status === "final") return <span className="uv-label text-emerald-400">Alta res</span>;
-  if (status === "preview" && hasCutout) return <span className="uv-label text-[#FFAB00]">Preview</span>;
+  if (status === "preview") return <span className="uv-label text-[#FFAB00]">Preview</span>;
   return <span className="uv-label">Original</span>;
 }
 

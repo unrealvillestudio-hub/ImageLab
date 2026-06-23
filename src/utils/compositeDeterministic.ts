@@ -345,11 +345,14 @@ export type ProductShotOptions = {
   output?: { type?: "image/png" | "image/webp"; quality?: number };
 };
 
-// Default base product height (fraction of canvas H) by product count.
+// Default base product height (fraction of canvas H) by product count. These are
+// only a starting ratio — the layout then scales the whole group up to fill the
+// canvas within the width/height budgets (see composeProductShot), so multi-product
+// shots don't end up as a small strip with empty space above.
 function defaultHeightPct(n: number): number {
-  if (n <= 1) return 0.6;
-  if (n <= 3) return 0.5;
-  return 0.4;
+  if (n <= 1) return 0.7;
+  if (n <= 3) return 0.6;
+  return 0.5;
 }
 
 /**
@@ -387,16 +390,15 @@ export async function composeProductShot(params: {
   const prImgs = await Promise.all(srcs.map(loadImage));
   const n = prImgs.length;
 
-  const baselineY = Math.round(H * clamp(opts.baselinePct ?? 0.84, 0.5, 0.98));
   const baseHeightPct = clamp(opts.productHeightPct ?? defaultHeightPct(n), 0.1, 0.9);
-  const gap = Math.round(W * clamp(opts.gapPct ?? 0.035, 0, 0.2));
+  const baseGap = W * clamp(opts.gapPct ?? 0.035, 0, 0.2);
 
   const layout: ProductShotLayout = opts.layout ?? "auto";
   const useDepth = (layout === "group") || (layout === "auto" && n >= 4);
   const mid = (n - 1) / 2;
 
-  // Per-product target heights (with optional center-emphasis depth).
-  const heights = prImgs.map((_, i) => {
+  // Per-product relative heights (with optional center-emphasis depth).
+  const relHeights = prImgs.map((_, i) => {
     let pct = baseHeightPct;
     if (useDepth && n > 1) {
       const dist = Math.abs(i - mid) / (mid || 1); // 0 center → 1 edge
@@ -405,29 +407,43 @@ export async function composeProductShot(params: {
     return H * pct;
   });
 
-  // Draw sizes from each product's aspect ratio.
-  let draws = prImgs.map((img, i) => {
+  // Provisional draw sizes from each product's aspect ratio.
+  const provisional = prImgs.map((img, i) => {
     const pw0 = img.naturalWidth || img.width;
     const ph0 = img.naturalHeight || img.height;
-    const drawH = Math.max(1, Math.round(heights[i]));
+    const drawH = Math.max(1, relHeights[i]);
     const ratio = pw0 && ph0 ? pw0 / ph0 : 1;
-    const drawW = Math.max(1, Math.round(drawH * ratio));
+    const drawW = Math.max(1, drawH * ratio);
     return { img, drawW, drawH };
   });
 
-  // Fit to width: if the row overflows ~90% of canvas, scale everyone down.
-  const totalW = draws.reduce((s, d) => s + d.drawW, 0) + gap * (n - 1);
-  const availW = W * 0.9;
-  if (totalW > availW) {
-    const k = availW / totalW;
-    draws = draws.map((d) => ({
-      img: d.img,
-      drawW: Math.max(1, Math.round(d.drawW * k)),
-      drawH: Math.max(1, Math.round(d.drawH * k)),
-    }));
-  }
+  // Fill the canvas with balance: scale the whole group (and the gaps) by a single
+  // factor that makes it as large as both budgets allow — width budget 90% of W,
+  // height budget 82% of H for the tallest item. This both shrinks an overflowing
+  // row AND grows an under-filled one, so products are never a tiny strip.
+  const provGap = baseGap;
+  const provRowW = provisional.reduce((s, d) => s + d.drawW, 0) + provGap * (n - 1);
+  const provMaxH = provisional.reduce((m, d) => Math.max(m, d.drawH), 0);
+  const widthBudget = W * 0.9;
+  const heightBudget = H * 0.82;
+  const fill = Math.min(widthBudget / provRowW, heightBudget / provMaxH);
+
+  const gap = Math.round(provGap * fill);
+  const draws = provisional.map((d) => ({
+    img: d.img,
+    drawW: Math.max(1, Math.round(d.drawW * fill)),
+    drawH: Math.max(1, Math.round(d.drawH * fill)),
+  }));
 
   const finalTotalW = draws.reduce((s, d) => s + d.drawW, 0) + gap * (n - 1);
+  const finalMaxH = draws.reduce((m, d) => Math.max(m, d.drawH), 0);
+
+  // Vertical centering: products share a common floor baseline, but the group's
+  // vertical extent is centered (with a slight downward bias for a grounded feel),
+  // so the empty space is balanced top/bottom instead of all above the products.
+  const baselineY = Math.round(
+    clamp(H * 0.54 + finalMaxH / 2, finalMaxH + H * 0.04, H * 0.96),
+  );
   let cursorX = Math.round((W - finalTotalW) / 2);
 
   const cm = opts.colorMatch ?? { enabled: true, strength: 0.3, samplePadPx: 40 };
