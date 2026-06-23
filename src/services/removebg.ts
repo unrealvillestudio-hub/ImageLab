@@ -22,6 +22,12 @@ export async function removeBg(params: {
   });
 
   if (!res.ok) {
+    // Vercel rejects request bodies > ~4.5 MB with a 413 before our proxy runs.
+    // The client normalizes images first (see prepareImageForUpload), so this is
+    // a defensive fallback message.
+    if (res.status === 413) {
+      throw new Error('La imagen es demasiado grande para procesar. Probá con una imagen más liviana.');
+    }
     let detail = '';
     try { detail = (await res.json())?.error ?? ''; } catch { detail = await res.text().catch(() => ''); }
     throw new Error(`remove.bg error ${res.status}: ${detail}`);

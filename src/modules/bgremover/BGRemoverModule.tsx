@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
 import { removeBg } from "../../services/removebg.ts";
-import { downloadDataUrl, readFileAsDataUrl, safeId } from "../../utils/imageUtils.ts";
+import { downloadDataUrl, prepareImageForUpload, readFileAsDataUrl, safeId } from "../../utils/imageUtils.ts";
 
 /**
  * BGRemover — autonomous background-removal submodule.
@@ -102,8 +102,13 @@ export function BGRemoverModule() {
     if (!target || target.busy) return;
     patch(id, { busy: true, error: undefined });
     try {
+      // Normalize before upload: re-encode to a clean baseline JPEG + cap the
+      // dimension. Prevents remove.bg's "error reading the image" (odd/partial
+      // PNG encodings) and Vercel's 413 on large payloads. The cutout remove.bg
+      // returns is still a full-alpha PNG.
+      const uploadDataUrl = await prepareImageForUpload(target.originalDataUrl);
       const { imageDataUrl, creditsCharged } = await removeBg({
-        imageDataUrl: target.originalDataUrl,
+        imageDataUrl: uploadDataUrl,
         preview,
       });
       // Write ONLY the field for this resolution. A late preview never overwrites
