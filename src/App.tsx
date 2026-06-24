@@ -21,6 +21,7 @@ import { LibraryDock } from "./modules/library/LibraryDock.tsx";
 import { ToolsModule } from "./modules/tools/ToolsModule.tsx";
 import { PromptPackModule } from "./modules/promptpack/PromptPackModule.tsx";
 import { CustomizeModule } from "./modules/customize/CustomizeModule.tsx";
+import { BGRemoverModule } from "./modules/bgremover/BGRemoverModule.tsx";
 import { 
     TabButton
 } from "./ui/components.tsx";
@@ -48,7 +49,6 @@ function AppContent() {
   const { outputs } = useOutputStore();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedOutputId, setSelectedOutputId] = useState<string | null>(null);
-  const [hasApiKey, setHasApiKey] = useState<boolean>(true);
 
   useEffect(() => {
     document.title = `ImageLab • ${BUILD_TAG}`;
@@ -60,13 +60,9 @@ function AppContent() {
         return;
     }
     localStorage.setItem(k, BUILD_TAG);
-    const checkApiKey = async () => {
-      if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
-        const has = await window.aistudio.hasSelectedApiKey();
-        setHasApiKey(has);
-      }
-    };
-    checkApiKey();
+    // NOTE: the legacy AI Studio API-key gate (window.aistudio.hasSelectedApiKey)
+    // was removed — ImageLab authenticates to Vertex server-side via a Service
+    // Account (GOOGLE_SERVICE_ACCOUNT_KEY). There is no client-side key to select.
   }, []);
 
   useEffect(() => localStorage.setItem("global_debug", String(globalDebug)), [globalDebug]);
@@ -109,40 +105,6 @@ function AppContent() {
   const handleMouseMove = (e: React.MouseEvent) => { if (!isDragging) return; setOffset({ x: e.clientX - dragStart.current.x, y: e.clientY - dragStart.current.y }); };
   const handleMouseUp = () => setIsDragging(false);
 
-  if (!hasApiKey) {
-    return (
-      <div className="min-h-screen bg-[#050505] text-[#EBEBEB] flex items-center justify-center p-8">
-        <div className="max-w-md w-full bg-[#121212] border border-[#FFAB00]/20 rounded-[32px] p-8 text-center space-y-6">
-          <div className="flex flex-col mb-4">
-            <div className="text-white font-black tracking-[-0.02em] text-[24px] leading-none uppercase italic">UNRLVL</div>
-            <div className="text-[#FFAB00] text-[12px] font-bold tracking-[0.28em] uppercase mt-1">ImageLab</div>
-          </div>
-          <h2 className="text-xl font-black uppercase tracking-widest text-[#FFAB00]">Pro Features Locked</h2>
-          <p className="text-white/60 text-sm leading-relaxed">
-            This application uses high-quality image generation models. To proceed, you must select an API key from a paid GCP project.
-          </p>
-          <div className="bg-black/40 p-4 rounded-xl text-left space-y-2">
-            <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Billing Info</p>
-            <p className="text-[11px] text-white/50">
-              User must select a API key from a paid GCP project. Documentation: <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="text-[#FFAB00] hover:underline">ai.google.dev/gemini-api/docs/billing</a>.
-            </p>
-          </div>
-          <button 
-            onClick={async () => {
-              if (window.aistudio && window.aistudio.openSelectKey) {
-                await window.aistudio.openSelectKey();
-                setHasApiKey(true);
-              }
-            }}
-            className="w-full topaz-gradient text-black py-4 rounded-full font-black uppercase tracking-[0.2em] text-xs hover:scale-[1.02] active:scale-[0.98] transition-all"
-          >
-            Select API Key
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#050505] text-[#EBEBEB] overflow-hidden flex flex-col">
       <header className="sticky top-0 z-[100] border-b border-[#FFAB00]/10 bg-[#050505]/90 backdrop-blur-2xl px-8 py-4 shrink-0">
@@ -174,6 +136,7 @@ function AppContent() {
                 <TabButton active={tab === "promptpack"} onClick={() => setTab("promptpack")}>PromptPack</TabButton>
                 <TabButton active={tab === "tools"} onClick={() => setTab("tools")}>Tools</TabButton>
                 <TabButton active={tab === "customize"} onClick={() => setTab("customize")}>Customize</TabButton>
+                <TabButton active={tab === "bgremover"} onClick={() => setTab("bgremover")}>BGRemover</TabButton>
               </nav>
           </div>
         </div>
@@ -198,6 +161,9 @@ function AppContent() {
             )}
             {tab === "customize" && (
               <CustomizeModule />
+            )}
+            {tab === "bgremover" && (
+              <BGRemoverModule />
             )}
           </div>
         </div>
