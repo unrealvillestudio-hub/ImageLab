@@ -235,7 +235,7 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
   const parts: string[] = [subject];
   if (brand?.imagelab_style) parts.push(brand.imagelab_style);
   if (brand?.imagelab_palette) parts.push(`color palette: ${brand.imagelab_palette}`);
-  if (psychoPreset?.visual_injection) parts.push(psychoPreset.visual_injection);
+  if (psychoPreset?.injection_visual) parts.push(psychoPreset.injection_visual);
   if (req.params.style_notes) parts.push(req.params.style_notes);
   if (copyOutput) parts.push(`Visual must reinforce this copy theme: ${copyOutput.slice(0, 150)}`);
   parts.push('professional photography, high quality, 8k, sharp focus, commercial grade');
