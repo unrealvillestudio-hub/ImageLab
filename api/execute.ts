@@ -116,15 +116,60 @@ interface ExecuteRequest {
   previousOutputs: Record<string, string>;
 }
 
+/**
+ * Lector de PostgREST. Devuelve la primera fila, o `null`.
+ *
+ * FAIL-LOUD (#95-B). Antes esto era `if (!res.ok) return null` + `catch { return null }`: un
+ * `select` contra una columna inexistente devolvía 400, se tragaba, y el prompt salía sin
+ * identidad de marca **sin que nadie se enterara**. Así vivió meses. Es la misma familia de fallo
+ * silencioso que costó tres semanas en el fan-out y un mes en el cron 29.
+ *
+ * La distinción que importa, y por la que no alcanza con "loguear si null":
+ *
+ *   200 + [fila]  → hay dato.
+ *   200 + []      → AUSENCIA LEGÍTIMA. La marca no tiene preset, o no tiene identidad cargada
+ *                   (hoy: ForumPHs, UnrealvilleStudio). Degrada en silencio, es el caso previsto.
+ *   4xx / 5xx     → BUG. Columna que no existe, tabla mal escrita, permiso faltante, RLS.
+ *                   GRITA, y con el cuerpo de la respuesta: PostgREST nombra la columna ofensora
+ *                   ahí y ese es justo el diagnóstico que faltaba.
+ *   throw         → BUG de red/DNS/env. Grita igual.
+ *
+ * Sigue devolviendo `null` en los tres casos: cambiar eso a `throw` dejaría a la marca sin imagen
+ * en vez de con una imagen genérica, que es un cambio de comportamiento mayor y no es lo que este
+ * paso viene a hacer. Lo que cambia es que el fallo deja de ser invisible.
+ */
 async function sb<T>(path: string): Promise<T | null> {
+  // El path lleva el brand_id pero ninguna credencial — es seguro loguearlo entero, y sin él
+  // el error no dice QUÉ consulta falló.
+  const where = path.split('?')[0];
   try {
     const res = await fetch(`${SB_URL()}/rest/v1/${path}`, {
       headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      let body = '';
+      try { body = (await res.text()).slice(0, 400); } catch { /* cuerpo ilegible: el status ya informa */ }
+      console.error(
+        `[ImageLab][sb] CONSULTA FALLIDA ${res.status} sobre "${where}" — la marca queda SIN ese ` +
+        `contexto y el prompt sale degradado. NO es "la marca no tiene el dato": es que la query ` +
+        `no corrió. path=${path}${body ? ` · respuesta=${body}` : ''}`,
+      );
+      return null;
+    }
     const data = await res.json();
-    return Array.isArray(data) ? (data[0] ?? null) : data;
-  } catch { return null; }
+    const row = Array.isArray(data) ? (data[0] ?? null) : data;
+    if (row == null) {
+      // Ausencia legítima: informativo, no error. Un ERROR acá enseñaría a ignorar los ERROR.
+      console.log(`[ImageLab][sb] sin filas en "${where}" (ausencia legítima) · path=${path}`);
+    }
+    return row;
+  } catch (e) {
+    console.error(
+      `[ImageLab][sb] EXCEPCIÓN consultando "${where}" — prompt degradado. ` +
+      `path=${path} · ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return null;
+  }
 }
 
 // --- Imagelab presets (per-brand visual identity) ------------------------
