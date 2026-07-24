@@ -337,23 +337,60 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
   console.log(`[ImageLab v6] No preset found for brand_id=${brandId} canal=${canal}, using raw prompt`);
 
   // ── Legacy generic builder (no preset) ───────────────────────────────
+  //
+  // #95-A — este `select` pedía CUATRO columnas que no existen en `public.brands`:
+  //   `name` · `imagelab_style` · `imagelab_negative` · `imagelab_palette`
+  // PostgREST devuelve 400 ante una columna desconocida, así que la consulta **fallaba entera** y
+  // `brand` era SIEMPRE `null`. Resultado: ni estilo, ni paleta, ni negativo de marca — el prompt
+  // salía genérico para TODAS las marcas que caen a esta rama. Hasta #95-B eso ni siquiera se
+  // logueaba. Ninguno de los cuatro nombres aparece en migración alguna: eran un supuesto.
+  //
+  // Los reemplazos, uno por uno:
+  //   `name`              → `display_name`. Es como se llama la columna.
+  //   `imagelab_style`    → `imagelab_visual_identity`. El equivalente a NIVEL DE MARCA, y es el
+  //                         mismo campo que ya lee el loader del modo sync (`src/lib/brandLoader`).
+  //                         Existe además un `person_blueprints.imagelab_style` — ver nota abajo.
+  //   `imagelab_negative` → `default_negative_prompt`. Equivalente exacto; el sync ya lo lee.
+  //   `imagelab_palette`  → SE DESCARTA. No existe en ninguna tabla del esquema. Crear una columna
+  //                         para satisfacer un `select` roto es hacerlo al revés, y derivarla de
+  //                         `imagelab_visual_identity` sería inventar semántica que nadie definió.
+  //                         Si algún día hace falta una paleta explícita se diseña y se siembra,
+  //                         con el consumidor ya funcionando. Decisión de Sam.
+  //
+  // Se suman `imagelab_compliance_rules` e `imagelab_industry`: existen, están pobladas y el modo
+  // sync ya las carga en su `BrandProfile`. Traerlas acá es lo que empieza a darle a los dos
+  // caminos el mismo insumo — el objetivo declarado de "mismo ADN venga de donde venga".
+  //
+  // NOTA sobre `person_blueprints.imagelab_style` (existe, y NO se usa acá a propósito):
+  // es un blueprint de PERSONA (el host/modelo que aparece en la imagen), no el estilo de la
+  // marca. Hay 5 filas, una por marca, y **solo NeuroneSCF de las 4 marcas del carril IID tiene
+  // una** — y esa marca ya trae `imagelab_visual_identity` a nivel de marca. Además, en el modo
+  // sync el blueprint lo ELIGE UN HUMANO en la UI (hasta dos personas por pieza); no hay
+  // equivalente automático, y decidir cuándo una persona entra en una pieza de marca es diseño,
+  // no cableado. Queda anotado, fuera de A.
   const [brand, psychoPreset] = await Promise.all([
-    sb<any>(`brands?id=eq.${encodeURIComponent(brandId)}&select=id,name,market,imagelab_style,imagelab_negative,imagelab_palette`),
+    sb<any>(
+      `brands?id=eq.${encodeURIComponent(brandId)}&select=` +
+      `id,display_name,market,imagelab_visual_identity,imagelab_compliance_rules,imagelab_industry,default_negative_prompt`,
+    ),
     psychoId ? sb<any>(`psycho_presets?id=eq.${encodeURIComponent(psychoId)}&select=*`) : null,
   ]);
 
-  const brandName = brand?.name ?? brandId;
+  const brandName = brand?.display_name ?? brandId;
   const subject = conceptText || `producto de ${brandName}`;
 
   const parts: string[] = [subject];
-  if (brand?.imagelab_style) parts.push(brand.imagelab_style);
-  if (brand?.imagelab_palette) parts.push(`color palette: ${brand.imagelab_palette}`);
-  if (psychoPreset?.injection_visual) parts.push(psychoPreset.injection_visual);
-  if (req.params.style_notes) parts.push(req.params.style_notes);
+  if (brand?.imagelab_visual_identity)  parts.push(brand.imagelab_visual_identity);
+  if (brand?.imagelab_industry)         parts.push(`industry context: ${brand.imagelab_industry}`);
+  if (psychoPreset?.injection_visual)   parts.push(psychoPreset.injection_visual);
+  if (req.params.style_notes)           parts.push(req.params.style_notes);
   if (copyOutput) parts.push(`Visual must reinforce this copy theme: ${copyOutput.slice(0, 150)}`);
+  // Las reglas de compliance van AL FINAL y como restricción explícita: son un candado de marca
+  // («sin texto», «sin claims absolutos»), no un rasgo estético que deba mezclarse con el estilo.
+  if (brand?.imagelab_compliance_rules) parts.push(`Brand constraints: ${brand.imagelab_compliance_rules}`);
   parts.push('professional photography, high quality, 8k, sharp focus, commercial grade');
 
-  const negativePrompt = brand?.imagelab_negative ?? FALLBACK_NEGATIVE;
+  const negativePrompt = brand?.default_negative_prompt ?? FALLBACK_NEGATIVE;
 
   return {
     prompt: parts.filter(Boolean).join(', '),
