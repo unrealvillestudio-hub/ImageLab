@@ -255,11 +255,211 @@ async function loadImagelabPreset(brandId: string, canal: string): Promise<any |
 }
 
 /**
+ * Carga el preset GLOBAL (`brand_id IS NULL`) para un canal. #95-C.
+ *
+ * Existen 7 filas globales (`LANDING`, `META`, `TIKTOK`, `WEB`) que hasta ahora eran **inalcanzables
+ * desde el camino async**: el lookup solo consultaba `brand_id=eq.<marca>`. CopyLab sí las usa
+ * (`mergeImagelabPresets(global, brand)`), así que el patrón correcto ya estaba escrito en el
+ * ecosistema — solo faltaba aquí.
+ */
+async function loadGlobalPreset(canal: string): Promise<any | null> {
+  if (!canal) return null;
+  const upper = canal.toUpperCase();
+  const lower = canal.toLowerCase();
+
+  const hit = await sb<any>(`imagelab_presets?brand_id=is.null&canal=eq.${encodeURIComponent(upper)}&select=*&limit=1`);
+  if (hit) return hit;
+  if (lower === upper) return null;
+  return await sb<any>(`imagelab_presets?brand_id=is.null&canal=eq.${encodeURIComponent(lower)}&select=*&limit=1`);
+}
+
+// ── C:BEGIN ── (#95-C, 2026-07-24) bloque PURO: fusión de capas → prompt visual.
+// Sin fetch, sin DB, sin estado. Lo ejecuta `tests/visual_spec_test.mjs` extrayéndolo por estos
+// sentinelas: lo que se testea es la fuente que se deploya, no una copia.
+//
+// POR QUÉ EXISTE. Antes había dos builders excluyentes y ninguno completo:
+//   · rama PRESET  → `buildPromptFromPreset` leía SOLO `extra_params`, `lighting_style` y
+//     `color_grading`. **Ignoraba las 10 columnas del preset que espejan los ejes de marca** y
+//     **nunca recibía el `psycho_preset`**. Por eso la única fila con `extra_params` poblado
+//     (UnrealvilleStudio/INSTAGRAM_FEED) era el único caso que producía algo con carácter.
+//   · rama LEGACY  → leía la marca (tras #95-A) pero ignoraba cualquier preset.
+// Resultado: identidad y estímulo **nunca coincidían en la misma imagen**, y las 10 columnas
+// espejo del preset eran datos declarados que nadie leía.
+//
+// EL MODELO. Los ejes visuales existen en DOS niveles con los MISMOS nombres:
+//   `brands.imagelab_realism_level`  ←→  `imagelab_presets.realism_level`
+//   `brands.imagelab_film_look`      ←→  `imagelab_presets.film_look`   … y así los 10.
+// Eso no es casualidad: **el preset es un override por canal de los mismos ejes que la marca fija
+// como base**. La fusión es la que los datos ya describían y nadie ejecutaba:
+//
+//   marca (base)  ←  preset de marca (override)  ←  preset global (relleno)
+//
+// El preset de marca gana sobre el global; el global solo rellena lo que nadie declaró. La marca
+// es la base porque es lo que define a la marca en TODOS los canales; el preset ajusta uno.
+const EJES_COMPARTIDOS = [
+  'realism_level', 'film_look', 'lens_preset', 'depth_of_field', 'framing',
+  'skin_detail', 'imperfections', 'humidity_level', 'sweat_level', 'grain_level',
+] as const;
+
+export interface VisualSpec {
+  // Ejes que viven en los dos niveles. Valor efectivo tras la fusión.
+  ejes: Record<string, string>;
+  // Solo del preset.
+  lighting_style: string | null;
+  color_grading: string | null;
+  reference_aesthetic: string | null;
+  composition_rule: string | null;
+  mood: string | null;
+  brand_dna: string | null;
+  texture: string | null;
+  // Solo de la marca.
+  visual_identity: string | null;
+  compliance_rules: string | null;
+  industry: string | null;
+  // Estímulo psicológico. `null` = no llegó (caso del camino sync: degrada, no falla).
+  psycho_injection: string | null;
+  psycho_id: string | null;
+  // Negativo y metadatos.
+  negative: string;
+  aspect_ratio: string | null;
+  preset_id: string | null;
+  preset_source: 'brand' | 'global' | 'none';
+}
+
+/** Primer valor no vacío. `''` y `null` cuentan como ausencia; `0` y `false` no aplican acá. */
+function firstNonEmpty(...vals: unknown[]): string | null {
+  for (const v of vals) {
+    if (v === null || v === undefined) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
+export function mergeVisualSpec(
+  brand: any | null,
+  brandPreset: any | null,
+  globalPreset: any | null,
+  psycho: any | null,
+): VisualSpec {
+  const preset = brandPreset ?? globalPreset ?? null;
+  const presetSource: VisualSpec['preset_source'] = brandPreset ? 'brand' : (globalPreset ? 'global' : 'none');
+  const ep = (preset?.extra_params ?? {}) as Record<string, any>;
+
+  // PRECEDENCIA DE LOS 10 EJES — por especificidad, de más a menos:
+  //
+  //   1. preset de MARCA  (esta marca, este canal)      ← lo más específico que existe
+  //   2. la MARCA         (esta marca, todos los canales)
+  //   3. preset GLOBAL    (cualquier marca, este canal) ← solo RELLENA lo que nadie declaró
+  //
+  // El global va ÚLTIMO, y esto importa: es un default para todas las marcas, así que no puede
+  // pisar lo que una marca declaró sobre sí misma. Caso real que lo obliga — LucienSael en TIKTOK:
+  // la marca declara `realism_level = "photorealistic, editorial, high-end commercial photography
+  // standard"` y el preset global de TIKTOK dice `"cinematic"`. Si el global ganara, la spec de
+  // retrato editorial de la marca quedaría sustituida por un genérico — justo el problema que #95
+  // vino a cerrar. El global sí aporta donde la marca calla (p. ej. `grain_level` en un TikTok).
+  const ejes: Record<string, string> = {};
+  for (const eje of EJES_COMPARTIDOS) {
+    const v = firstNonEmpty(brandPreset?.[eje], brand?.[`imagelab_${eje}`], globalPreset?.[eje]);
+    if (v) ejes[eje] = v;
+  }
+
+  // Negativo ACUMULATIVO, no excluyente: lo prohibido por la marca sigue prohibido aunque el canal
+  // agregue lo suyo. Un `??` acá dejaría caer el candado de marca al aparecer un preset.
+  const negParts: string[] = [];
+  const forbidden = Array.isArray(ep.forbidden_elements) ? ep.forbidden_elements.join(', ')
+    : (typeof ep.forbidden_elements === 'string' ? ep.forbidden_elements : '');
+  if (forbidden)                     negParts.push(forbidden);
+  if (preset?.negative_prompt)       negParts.push(String(preset.negative_prompt));
+  if (brand?.default_negative_prompt) negParts.push(String(brand.default_negative_prompt));
+  const negative = [...new Set(negParts.filter(Boolean).flatMap((s) => s.split(',').map((x) => x.trim())))]
+    .filter(Boolean).join(', ') || FALLBACK_NEGATIVE;
+
+  const mood = Array.isArray(ep.mood) ? ep.mood.join(', ')
+    : (typeof ep.mood === 'string' ? ep.mood : null);
+
+  return {
+    ejes,
+    lighting_style:      firstNonEmpty(preset?.lighting_style),
+    color_grading:       firstNonEmpty(preset?.color_grading),
+    reference_aesthetic: firstNonEmpty(ep.reference_aesthetic),
+    composition_rule:    firstNonEmpty(ep.composition_rule),
+    mood:                firstNonEmpty(mood),
+    brand_dna:           firstNonEmpty(ep.brand_dna),
+    texture:             firstNonEmpty(ep.texture),
+    visual_identity:     firstNonEmpty(brand?.imagelab_visual_identity),
+    compliance_rules:    firstNonEmpty(brand?.imagelab_compliance_rules),
+    industry:            firstNonEmpty(brand?.imagelab_industry),
+    // DEGRADACIÓN LIMPIA (#99): si no llega estímulo, el prompt sale sin capa psicológica y nada
+    // más cambia. Es el estado ESPERADO del camino sync, no un error — el estímulo pertenece al
+    // flujo async, y la UI se reconvierte (deuda #100), no se parcha.
+    psycho_injection:    firstNonEmpty(psycho?.injection_visual),
+    psycho_id:           firstNonEmpty(psycho?.id),
+    negative,
+    aspect_ratio:        firstNonEmpty(preset?.aspect_ratio),
+    preset_id:           firstNonEmpty(preset?.preset_id),
+    preset_source:       presetSource,
+  };
+}
+
+/**
+ * Compone el prompt final. El ORDEN no es decorativo: los generadores de imagen pesan más lo que
+ * viene primero, así que va de lo que la imagen ES a cómo se ve, y termina en restricciones.
+ *
+ *   concepto → identidad de marca → estética/composición → ejes técnicos → luz y color →
+ *   mood → ADN de marca → textura → ESTÍMULO → notas del operador → tema del copy →
+ *   candado de compliance → cola de calidad → FORBIDDEN
+ */
+export function composeVisualPrompt(
+  spec: VisualSpec,
+  conceptText: string,
+  opts: { styleNotes?: string | null; copyTheme?: string | null } = {},
+): string {
+  const p: string[] = [];
+
+  if (conceptText)             p.push(`Concept: ${conceptText}.`);
+  if (spec.visual_identity)    p.push(`Brand visual identity: ${spec.visual_identity}.`);
+  if (spec.reference_aesthetic) p.push(`${spec.reference_aesthetic} aesthetic.`);
+  if (spec.composition_rule)   p.push(`${spec.composition_rule}.`);
+
+  // Los ejes en orden fijo (no el del objeto): el prompt debe ser reproducible entre corridas.
+  const ejesTxt = EJES_COMPARTIDOS.filter((e) => spec.ejes[e]).map((e) => `${e.replace(/_/g, ' ')}: ${spec.ejes[e]}`);
+  if (ejesTxt.length)          p.push(`${ejesTxt.join(', ')}.`);
+
+  if (spec.lighting_style)     p.push(`${spec.lighting_style}.`);
+  if (spec.color_grading)      p.push(`${spec.color_grading}.`);
+  if (spec.mood)               p.push(`Mood: ${spec.mood}.`);
+  if (spec.brand_dna)          p.push(`Brand DNA: ${spec.brand_dna}.`);
+  if (spec.texture)            p.push(`${spec.texture}.`);
+  if (spec.industry)           p.push(`Industry context: ${spec.industry}.`);
+
+  // El estímulo va DESPUÉS de la identidad y ANTES de las restricciones: modula la lectura de una
+  // imagen que ya es de la marca. Si viniera primero, competiría con la identidad.
+  if (spec.psycho_injection)   p.push(`PSYCHO LAYER [${spec.psycho_id ?? 'n/a'}]: ${spec.psycho_injection}.`);
+
+  if (opts.styleNotes)         p.push(`${opts.styleNotes}.`);
+  if (opts.copyTheme)          p.push(`Visual must reinforce this copy theme: ${opts.copyTheme}.`);
+  // El compliance al final y como candado explícito: es una restricción de marca, no un rasgo
+  // estético que deba mezclarse con el estilo.
+  if (spec.compliance_rules)   p.push(`Brand constraints: ${spec.compliance_rules}.`);
+
+  p.push('Photorealistic, high quality, 8K, sharp focus, commercial grade.');
+  if (spec.negative)           p.push(`FORBIDDEN: ${spec.negative}.`);
+
+  return p.join(' ');
+}
+// ── C:END ──
+
+/**
  * Assemble the preset-driven prompt per the spec:
  *   "{reference_aesthetic} aesthetic. {composition_rule}. {lighting_style}.
  *    {color_grading}. Mood: {mood}. Concept: {job_prompt}.
  *    Brand DNA: {brand_dna}. {texture}.
  *    Photorealistic, 8K, large format cinema. FORBIDDEN: {negative_prompt}."
+ *
+ * ⚠️ #95-C — este builder ya NO gobierna el camino del Orchestrator/IID (lo hace
+ * `composeVisualPrompt`). Se conserva porque **`generateImageDirect` (modo `direct`, el de la UI)
+ * sigue llamándolo**. Reconvertir ese camino es la deuda #100.
  */
 function buildPromptFromPreset(preset: any, conceptText: string, aspectRatioFallback?: string): ImageGenInput {
   const ep = (preset?.extra_params ?? {}) as Record<string, any>;
@@ -298,108 +498,82 @@ function buildPromptFromPreset(preset: any, conceptText: string, aspectRatioFall
 }
 
 /**
- * Orchestrator-path prompt builder.
+ * Orchestrator/IID prompt builder — UNIFICADO (#95-C).
  *
- * 1. Normalize canal (#95-D): UPPERCASE + alias legacy. Ver `normalizeCanal`.
- * 2. Try to load preset for (brand_id, canal). If found → preset-driven prompt.
- * 3. Else fall back to the legacy generic builder (preserves prior behavior).
+ * Antes eran dos ramas excluyentes y ninguna completa (ver el bloque C). Ahora una sola:
+ *
+ *   1. Normaliza el canal (#95-D): MAYÚSCULAS + alias legacy.
+ *   2. Carga EN PARALELO las cuatro capas: marca · preset de marca · preset global · estímulo.
+ *   3. Las fusiona (`mergeVisualSpec`) y compone (`composeVisualPrompt`), las dos puras.
+ *
+ * Lo que cambia respecto de antes, en una línea cada uno:
+ *   · La identidad de marca llega SIEMPRE, haya preset o no. Antes, tener preset la anulaba.
+ *   · Las 10 columnas del preset que espejan los ejes de marca **se leen**. Antes se ignoraban.
+ *   · El `psycho_preset` entra en las DOS ramas. Antes solo en la legacy, así que identidad y
+ *     estímulo nunca coincidían en la misma imagen.
+ *   · El preset GLOBAL (7 filas, `brand_id IS NULL`) es alcanzable. Antes, nunca.
+ *   · El negativo es ACUMULATIVO: lo prohibido por la marca sigue prohibido aunque el canal sume.
  */
 async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
-  const brandId     = req.brandId ?? 'DEFAULT';
-  // #95-D — antes era `.toUpperCase()` a secas: no resolvía alias legacy y el lookup contra la DB
-  // no alcanzaba las filas en minúscula (las 4 de NeuroneSCF).
-  const canalRaw    = req.params.canal;
-  const canal       = normalizeCanal(canalRaw);
+  const brandId  = req.brandId ?? 'DEFAULT';
+  const canalRaw = req.params.canal;
+  const canal    = normalizeCanal(canalRaw);
   if (canalRaw && canal !== String(canalRaw).trim().toUpperCase()) {
     console.log(`[ImageLab][#95-D] canal '${canalRaw}' → '${canal}' (alias legacy)`);
   }
-  const psychoId    = req.params.psycho_preset;
-  // STORY entra junto a REEL y TIKTOK: las tres superficies son verticales. Antes solo miraba
-  // REEL, así que una story caía a 1:1 — el formato equivocado para pantalla completa.
-  const aspectRatio = req.params.aspect_ratio
-    ?? (canal.includes('REEL') || canal.includes('STORY') || canal === 'TIKTOK' ? '9:16' : '1:1');
+  const psychoId = req.params.psycho_preset;
 
-  // Concept text: same heuristic the legacy path used (subject → stage description → fallback).
-  const copyOutput = req.previousOutputs?.copylab ?? req.previousOutputs?.CopyLab ?? '';
+  const copyOutput  = req.previousOutputs?.copylab ?? req.previousOutputs?.CopyLab ?? '';
   const conceptText = (req.params.subject ?? req.stage.description ?? '').trim();
 
-  // ── Preset injection (v6) ────────────────────────────────────────────
-  const preset = await loadImagelabPreset(brandId, canal);
-  if (preset) {
-    const built = buildPromptFromPreset(preset, conceptText, aspectRatio);
-    return {
-      ...built,
-      brandName: brandId,
-      canal,
-    };
-  }
-
-  console.log(`[ImageLab v6] No preset found for brand_id=${brandId} canal=${canal}, using raw prompt`);
-
-  // ── Legacy generic builder (no preset) ───────────────────────────────
-  //
-  // #95-A — este `select` pedía CUATRO columnas que no existen en `public.brands`:
-  //   `name` · `imagelab_style` · `imagelab_negative` · `imagelab_palette`
-  // PostgREST devuelve 400 ante una columna desconocida, así que la consulta **fallaba entera** y
-  // `brand` era SIEMPRE `null`. Resultado: ni estilo, ni paleta, ni negativo de marca — el prompt
-  // salía genérico para TODAS las marcas que caen a esta rama. Hasta #95-B eso ni siquiera se
-  // logueaba. Ninguno de los cuatro nombres aparece en migración alguna: eran un supuesto.
-  //
-  // Los reemplazos, uno por uno:
-  //   `name`              → `display_name`. Es como se llama la columna.
-  //   `imagelab_style`    → `imagelab_visual_identity`. El equivalente a NIVEL DE MARCA, y es el
-  //                         mismo campo que ya lee el loader del modo sync (`src/lib/brandLoader`).
-  //                         Existe además un `person_blueprints.imagelab_style` — ver nota abajo.
-  //   `imagelab_negative` → `default_negative_prompt`. Equivalente exacto; el sync ya lo lee.
-  //   `imagelab_palette`  → SE DESCARTA. No existe en ninguna tabla del esquema. Crear una columna
-  //                         para satisfacer un `select` roto es hacerlo al revés, y derivarla de
-  //                         `imagelab_visual_identity` sería inventar semántica que nadie definió.
-  //                         Si algún día hace falta una paleta explícita se diseña y se siembra,
-  //                         con el consumidor ya funcionando. Decisión de Sam.
-  //
-  // Se suman `imagelab_compliance_rules` e `imagelab_industry`: existen, están pobladas y el modo
-  // sync ya las carga en su `BrandProfile`. Traerlas acá es lo que empieza a darle a los dos
-  // caminos el mismo insumo — el objetivo declarado de "mismo ADN venga de donde venga".
-  //
-  // NOTA sobre `person_blueprints.imagelab_style` (existe, y NO se usa acá a propósito):
-  // es un blueprint de PERSONA (el host/modelo que aparece en la imagen), no el estilo de la
-  // marca. Hay 5 filas, una por marca, y **solo NeuroneSCF de las 4 marcas del carril IID tiene
-  // una** — y esa marca ya trae `imagelab_visual_identity` a nivel de marca. Además, en el modo
-  // sync el blueprint lo ELIGE UN HUMANO en la UI (hasta dos personas por pieza); no hay
-  // equivalente automático, y decidir cuándo una persona entra en una pieza de marca es diseño,
-  // no cableado. Queda anotado, fuera de A.
-  const [brand, psychoPreset] = await Promise.all([
+  // Las cuatro capas, en paralelo. `sb()` grita ante fallo de query desde #95-B, así que una capa
+  // que no llegue por error deja rastro; una que no llegue por ausencia legítima, no.
+  const [brand, brandPreset, globalPreset, psycho] = await Promise.all([
     sb<any>(
       `brands?id=eq.${encodeURIComponent(brandId)}&select=` +
-      `id,display_name,market,imagelab_visual_identity,imagelab_compliance_rules,imagelab_industry,default_negative_prompt`,
+      `id,display_name,imagelab_visual_identity,imagelab_compliance_rules,imagelab_industry,` +
+      `imagelab_realism_level,imagelab_film_look,imagelab_lens_preset,imagelab_depth_of_field,` +
+      `imagelab_framing,imagelab_skin_detail,imagelab_imperfections,imagelab_humidity_level,` +
+      `imagelab_sweat_level,imagelab_grain_level,default_negative_prompt`,
     ),
+    loadImagelabPreset(brandId, canal),
+    loadGlobalPreset(canal),
+    // DEGRADACIÓN LIMPIA (#99): sin `psycho_preset` no se consulta y el prompt sale sin capa
+    // psicológica. Es el estado ESPERADO del camino sync — el estímulo pertenece al flujo async.
     psychoId ? sb<any>(`psycho_presets?id=eq.${encodeURIComponent(psychoId)}&select=*`) : null,
   ]);
 
-  const brandName = brand?.display_name ?? brandId;
-  const subject = conceptText || `producto de ${brandName}`;
+  if (psychoId && !psycho) {
+    // Se PIDIÓ un estímulo y no se encontró: eso no es degradación esperada, es un id que no
+    // resuelve. Distinto de "no se pidió" — y por eso se avisa solo en este caso.
+    console.warn(`[ImageLab][#95-C] psycho_preset '${psychoId}' no resuelve a ninguna fila activa; la pieza sale sin capa psicológica`);
+  }
 
-  const parts: string[] = [subject];
-  if (brand?.imagelab_visual_identity)  parts.push(brand.imagelab_visual_identity);
-  if (brand?.imagelab_industry)         parts.push(`industry context: ${brand.imagelab_industry}`);
-  if (psychoPreset?.injection_visual)   parts.push(psychoPreset.injection_visual);
-  if (req.params.style_notes)           parts.push(req.params.style_notes);
-  if (copyOutput) parts.push(`Visual must reinforce this copy theme: ${copyOutput.slice(0, 150)}`);
-  // Las reglas de compliance van AL FINAL y como restricción explícita: son un candado de marca
-  // («sin texto», «sin claims absolutos»), no un rasgo estético que deba mezclarse con el estilo.
-  if (brand?.imagelab_compliance_rules) parts.push(`Brand constraints: ${brand.imagelab_compliance_rules}`);
-  parts.push('professional photography, high quality, 8k, sharp focus, commercial grade');
+  const spec = mergeVisualSpec(brand, brandPreset, globalPreset, psycho);
 
-  const negativePrompt = brand?.default_negative_prompt ?? FALLBACK_NEGATIVE;
+  const aspectRatio = req.params.aspect_ratio
+    ?? spec.aspect_ratio
+    ?? (canal.includes('REEL') || canal.includes('STORY') || canal === 'TIKTOK' ? '9:16' : '1:1');
+
+  const prompt = composeVisualPrompt(spec, conceptText || `producto de ${brand?.display_name ?? brandId}`, {
+    styleNotes: req.params.style_notes ?? null,
+    copyTheme:  copyOutput ? String(copyOutput).slice(0, 150) : null,
+  });
+
+  console.log(
+    `[ImageLab][#95-C] brand=${brandId} canal=${canal} preset=${spec.preset_source}` +
+    `${spec.preset_id ? `(${spec.preset_id})` : ''} identidad=${spec.visual_identity ? 'sí' : 'NO'} ` +
+    `ejes=${Object.keys(spec.ejes).length}/10 psycho=${spec.psycho_id ?? 'ninguno'}`,
+  );
 
   return {
-    prompt: parts.filter(Boolean).join(', '),
-    negativePrompt,
+    prompt,
+    negativePrompt: spec.negative,
     aspectRatio,
-    brandName,
+    brandName: brand?.display_name ?? brandId,
     canal,
-    presetUsed: false,
-    presetId: null,
+    presetUsed: spec.preset_source !== 'none',
+    presetId: spec.preset_id,
   };
 }
 
