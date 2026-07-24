@@ -186,13 +186,72 @@ interface ImageGenInput {
 
 const FALLBACK_NEGATIVE = 'blurry, low quality, amateur, stock photo look, watermark, text overlay, logo';
 
-/** Load the imagelab_presets row for (brand_id, canal). Returns null if none. */
+// --- Canal: normalización (#95-D) -----------------------------------------
+//
+// ImageLab es el ÚNICO punto donde convergen los tres caminos, así que el vocabulario visual se
+// normaliza acá y no en cada emisor:
+//
+//   [A] UI            → elige el canal en la interfaz
+//   [B] Orchestrator → lab-worker  → `normalizeCanal()` sube a MAYÚSCULAS y cae a INSTAGRAM_FEED
+//   [C] IID          → content-run-stage → alias explícito (bloque CANAL, #95-D)
+//
+// Dos problemas que esto cierra:
+//
+// 1. CASE. `lab-worker` manda MAYÚSCULAS y las filas de `imagelab_presets` NO son homogéneas: las
+//    globales y la de UnrealvilleStudio están en mayúsculas, pero **las 4 de NeuroneSCF están en
+//    minúscula** (`blog_featured`). Con `canal=eq.X` ese preset era inalcanzable desde los dos
+//    caminos — no por el canal, sino por el case.
+// 2. VOCABULARIO LEGACY. Jobs viejos de `lab_jobs` pueden traer literales previos a la convención
+//    (`LINKEDIN` sin sufijo, el plural `INSTAGRAM_STORIES`). Se traducen en vez de fallar.
+//
+// NO se renombra ninguna fila de la DB: el alias las alcanza donde están. Y `META`, `LANDING` y
+// `WEB` se dejan pasar tal cual — son canales legítimos del camino [B] con presets globales
+// sembrados, no valores a corregir.
+const CANAL_ALIAS: Record<string, string> = {
+  INSTAGRAM_STORIES: 'INSTAGRAM_STORY',   // el plural era código muerto en content-run-stage; se acepta por si un job viejo lo trae
+  LINKEDIN:          'LINKEDIN_FEED',     // sin sufijo, anterior a la convención de superficie
+  FACEBOOK:          'FACEBOOK_FEED',
+  INSTAGRAM:         'INSTAGRAM_FEED',
+  BLOG:              'BLOG_FEATURED',
+};
+
+/** Canal canónico: MAYÚSCULAS, sin espacios, con los alias legacy resueltos. */
+function normalizeCanal(canal: string | null | undefined): string {
+  const up = String(canal ?? '').trim().toUpperCase();
+  if (!up) return 'INSTAGRAM_FEED';
+  return CANAL_ALIAS[up] ?? up;
+}
+
+/**
+ * Load the imagelab_presets row for (brand_id, canal). Returns null if none.
+ *
+ * Busca el canal en MAYÚSCULAS y, si no hay fila, reintenta en minúsculas — porque las filas de la
+ * DB no son homogéneas (ver arriba: las 4 de NeuroneSCF están en minúscula).
+ *
+ * DOS CONSULTAS `eq` SECUENCIALES, deliberadamente, en vez de un solo `or=(...)` o un `ilike`:
+ *   · `ilike` no sirve: en LIKE el guion bajo es COMODÍN, así que `BLOG_FEATURED` matchearía
+ *     también `BLOGXFEATURED`. Silencioso y difícil de ver.
+ *   · `or=(...)` haría una sola llamada, pero **ese operador no se usa en ninguna parte de este
+ *     stack**: sería sintaxis de PostgREST sin precedente verificado. Este ecosistema ya perdió
+ *     tiempo con un `order=` por columna inexistente que se tragaba en silencio (10-jul); no vale
+ *     la pena ahorrar un round-trip a cambio de estrenar un operador acá.
+ * `eq` es el que usa todo el archivo y está probado. La segunda llamada solo ocurre en el miss.
+ */
 async function loadImagelabPreset(brandId: string, canal: string): Promise<any | null> {
   if (!brandId || !canal) return null;
   const b = encodeURIComponent(brandId);
-  const c = encodeURIComponent(canal);
-  const row = await sb<any>(`imagelab_presets?brand_id=eq.${b}&canal=eq.${c}&select=*&limit=1`);
-  return row ?? null;
+  const upper = canal.toUpperCase();
+  const lower = canal.toLowerCase();
+
+  const hit = await sb<any>(`imagelab_presets?brand_id=eq.${b}&canal=eq.${encodeURIComponent(upper)}&select=*&limit=1`);
+  if (hit) return hit;
+  if (lower === upper) return null;
+
+  const hitLower = await sb<any>(`imagelab_presets?brand_id=eq.${b}&canal=eq.${encodeURIComponent(lower)}&select=*&limit=1`);
+  if (hitLower) {
+    console.log(`[ImageLab][#95-D] preset de ${brandId} encontrado con canal en minúscula ('${lower}'); la convención es MAYÚSCULAS`);
+  }
+  return hitLower ?? null;
 }
 
 /**
@@ -241,15 +300,24 @@ function buildPromptFromPreset(preset: any, conceptText: string, aspectRatioFall
 /**
  * Orchestrator-path prompt builder.
  *
- * 1. Normalize canal to UPPERCASE (matches imagelab_presets.canal convention).
+ * 1. Normalize canal (#95-D): UPPERCASE + alias legacy. Ver `normalizeCanal`.
  * 2. Try to load preset for (brand_id, canal). If found → preset-driven prompt.
  * 3. Else fall back to the legacy generic builder (preserves prior behavior).
  */
 async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
   const brandId     = req.brandId ?? 'DEFAULT';
-  const canal       = (req.params.canal ?? 'INSTAGRAM_FEED').toUpperCase();
+  // #95-D — antes era `.toUpperCase()` a secas: no resolvía alias legacy y el lookup contra la DB
+  // no alcanzaba las filas en minúscula (las 4 de NeuroneSCF).
+  const canalRaw    = req.params.canal;
+  const canal       = normalizeCanal(canalRaw);
+  if (canalRaw && canal !== String(canalRaw).trim().toUpperCase()) {
+    console.log(`[ImageLab][#95-D] canal '${canalRaw}' → '${canal}' (alias legacy)`);
+  }
   const psychoId    = req.params.psycho_preset;
-  const aspectRatio = req.params.aspect_ratio ?? (canal.includes('REEL') || canal === 'TIKTOK' ? '9:16' : '1:1');
+  // STORY entra junto a REEL y TIKTOK: las tres superficies son verticales. Antes solo miraba
+  // REEL, así que una story caía a 1:1 — el formato equivocado para pantalla completa.
+  const aspectRatio = req.params.aspect_ratio
+    ?? (canal.includes('REEL') || canal.includes('STORY') || canal === 'TIKTOK' ? '9:16' : '1:1');
 
   // Concept text: same heuristic the legacy path used (subject → stage description → fallback).
   const copyOutput = req.previousOutputs?.copylab ?? req.previousOutputs?.CopyLab ?? '';
