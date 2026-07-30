@@ -1,5 +1,13 @@
 /**
  * ImageLab — POST /api/execute
+ * v8 (M-3 / Unidad 1, 2026-07-30) — el productor devuelve PROCEDENCIA: el `model` realmente
+ *   usado (la constante GEMINI_IMAGE_MODEL, no un literal que el consumidor adivina) y el `usage`
+ *   facturable TAL COMO Vertex lo reporta en `usageMetadata` de la respuesta :generateContent
+ *   (crudo, sin remapear a un esquema inventado; null si Vertex no lo trae — nunca un número
+ *   fabricado). Hasta v7 ambos se descartaban: extractInlineImage leía sólo la imagen y tiraba el
+ *   resto del body, así que content-run-stage etiquetaba las filas del ledger con el modelo Imagen 3
+ *   ya apagado y un costo constante. La presencia/forma de usageMetadata se loguea una vez por
+ *   llamada para confirmarla en vivo (era indecidible desde el código: se descartaba antes de mirarla).
  * v7 — Gemini 2.5 Flash Image (migrated off Vertex Imagen 3, shut down 2026-06-24).
  *
  * All image generation runs on `gemini-2.5-flash-image` via Vertex AI's
@@ -610,6 +618,26 @@ function extractInlineImage(data: any): string {
   return `data:${mime};base64,${imgPart.inlineData.data}`;
 }
 
+// M-3 / Unidad 1 — el consumo facturable, TAL COMO Vertex lo reporta. La respuesta de
+// :generateContent trae `usageMetadata` con { promptTokenCount, candidatesTokenCount,
+// totalTokenCount }; para gemini-2.5-flash-image la imagen se factura como un bloque fijo de
+// tokens de SALIDA (candidatesTokenCount), no por unidad. Se devuelve el objeto CRUDO (o null si
+// no viene): el productor no inventa un esquema ni fabrica ceros — el consumidor decide el mapeo
+// con el dato real. El log deja la forma exacta a la vista en cada llamada: hasta v7 el body se
+// descartaba antes de mirarlo, así que si `usageMetadata` está o no era indecidible desde el código.
+function extractUsage(data: any): Record<string, number> | null {
+  const um = data?.usageMetadata;
+  console.log(`[ImageLab][M-3] Vertex usageMetadata: ${um ? JSON.stringify(um) : 'ABSENT'}`);
+  if (!um || typeof um !== 'object') return null;
+  return um as Record<string, number>;
+}
+
+// Lo que un generador de imagen devuelve puertas adentro: la imagen + la procedencia del consumo.
+interface ImageWithUsage {
+  image_data_url: string;
+  usage: Record<string, number> | null;
+}
+
 /**
  * Text-to-image via gemini-2.5-flash-image:generateContent.
  * (Name retained from the Imagen era to keep call sites stable.)
@@ -618,7 +646,7 @@ async function vertexPredictImagen(params: {
   prompt: string;
   negativePrompt?: string;
   aspectRatio?: string;
-}): Promise<string> {
+}): Promise<ImageWithUsage> {
   if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
 
   const token = await getAccessToken();
@@ -648,7 +676,8 @@ async function vertexPredictImagen(params: {
 
     if (!res.ok) throw new Error(`Gemini image error ${res.status}: ${await res.text()}`);
 
-    return extractInlineImage(await res.json());
+    const data = await res.json();
+    return { image_data_url: extractInlineImage(data), usage: extractUsage(data) };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
@@ -707,7 +736,7 @@ async function vertexPredictImagenCapability(params: {
   negativePrompt?: string;
   aspectRatio?: string;
   images: InlineImage[];
-}): Promise<string> {
+}): Promise<ImageWithUsage> {
   if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
 
   const token = await getAccessToken();
@@ -740,7 +769,8 @@ async function vertexPredictImagenCapability(params: {
 
     if (!res.ok) throw new Error(`Gemini image (multimodal) error ${res.status}: ${await res.text()}`);
 
-    return extractInlineImage(await res.json());
+    const data = await res.json();
+    return { image_data_url: extractInlineImage(data), usage: extractUsage(data) };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
@@ -755,6 +785,7 @@ interface DirectImageResult {
   image_data_url: string;
   preset_used: boolean;
   preset_id: string | null;
+  usage: Record<string, number> | null;   // M-3 — usageMetadata crudo de Vertex (o null)
 }
 
 async function generateImageDirect(req: DirectImageRequest): Promise<DirectImageResult> {
@@ -785,12 +816,12 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
 
   // No images → text-to-image fast path.
   if (!hasSource && !hasRefs) {
-    const dataUrl = await vertexPredictImagen({
+    const { image_data_url, usage } = await vertexPredictImagen({
       prompt: basePrompt,
       negativePrompt,
       aspectRatio,
     });
-    return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
+    return { image_data_url, preset_used: presetUsed, preset_id: presetId, usage };
   }
 
   // Multimodal → gemini-2.5-flash-image: pass each reference as an inlineData
@@ -836,13 +867,13 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
     ? `${roleClauses.join(' ')} ${basePrompt}`
     : basePrompt;
 
-  const dataUrl = await vertexPredictImagenCapability({
+  const { image_data_url, usage } = await vertexPredictImagenCapability({
     prompt: finalPrompt,
     negativePrompt,
     aspectRatio,
     images,
   });
-  return { image_data_url: dataUrl, preset_used: presetUsed, preset_id: presetId };
+  return { image_data_url, preset_used: presetUsed, preset_id: presetId, usage };
 }
 
 // --- HTTP handler ----------------------------------------------------------
@@ -885,6 +916,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         image_data_url: result.image_data_url,
         preset_used:    result.preset_used,
         preset_id:      result.preset_id,
+        // M-3 / Unidad 1 — procedencia: el modelo REALMENTE ejecutado (constante, no un literal que
+        // el consumidor adivina) y el usage crudo de Vertex (o null si no vino). El consumidor
+        // (content-run-stage, Unidad 2) los asienta en el ledger en vez de hardcodear Imagen 3.
+        model:          GEMINI_IMAGE_MODEL,
+        usage:          result.usage,
         status:         'ok',
       });
       return;
@@ -899,7 +935,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   try {
     const built = await buildVisualPrompt(body as ExecuteRequest);
-    const imageDataUrl = await vertexPredictImagen({
+    const { image_data_url: imageDataUrl, usage } = await vertexPredictImagen({
       prompt:         built.prompt,
       negativePrompt: built.negativePrompt,
       aspectRatio:    built.aspectRatio,
@@ -912,6 +948,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       preset_id:      built.presetId,
       brand:          built.brandName,
       canal:          built.canal,
+      // M-3 / Unidad 1 — procedencia para el ledger del consumidor (Orchestrator path, el que usa
+      // content-run-stage vía execLab): modelo real + usage crudo de Vertex (o null).
+      model:          GEMINI_IMAGE_MODEL,
+      usage,
       status:         'ok',
     });
   } catch (err) {
