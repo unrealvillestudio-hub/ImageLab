@@ -75,6 +75,21 @@ const ANCHORS: Record<string, { y: 'flex-start' | 'center' | 'flex-end'; x: 'fle
 };
 
 const SCRIM_MODES = new Set(['none', 'solid', 'gradient_bottom', 'gradient_top']);
+
+// ── BRIEF 8 · D · LA FRANJA DE IDENTIDAD ───────────────────────────────────────────────────────
+// El sello de la marca en la imagen. Es MECÁNICA DEL EJE: los cuatro modos son geometría —de qué
+// borde nace la franja—, y nada más. El color, el grosor y la PRESENCIA son instancia: viven en la
+// fila de la marca (`tokens.identity`), como todo lo demás de este compositor.
+//
+// REGLA DURA, y es de diseño, no de código: la franja es A SANGRE COMPLETA del borde elegido y
+// DELGADA. Jamás un marco cerrado — un rectángulo alrededor de la imagen se lee como un anuncio
+// publicitario, y esta franja existe para lo contrario: firmar sin gritar. Por eso no hay ningún
+// modo de marco ni combinación de bordes: la enumeración lo hace imposible, no lo desaconseja.
+//
+// Y se dibuja SIEMPRE que la marca la declare, con titular o sin él: es el sello de la marca, no un
+// adorno del texto. De ahí sale la capacidad de SELLAR retroactivamente una escena limpia cuyo
+// título todavía no existe.
+const IDENTITY_MODES = new Set(['none', 'edge_left', 'edge_right', 'edge_bottom']);
 const SLOTS = ['headline', 'subheadline'] as const;
 type Slot = (typeof SLOTS)[number];
 
@@ -209,6 +224,7 @@ export function resolveOverlayStyle(args: {
   }>;
   scrim: null | { mode: string; color: string; opacity: number; coveragePct: number };
   rule: null | { color: string; widthPct: number; thicknessPx: number; gapPct: number };
+  identity: null | { mode: string; color: string; widthPct: number; fullBleed: boolean };
   markers: string[];
 } {
   const missing: string[] = [];
@@ -316,6 +332,37 @@ export function resolveOverlayStyle(args: {
     }
   }
 
+  // BRIEF 8 · D — la franja de identidad. Ausente ⇒ null y la escena queda como antes de este brief:
+  // aditivo, igual que todo lo demás. Declarada a medias (modo desconocido, rol de paleta que la
+  // marca no tiene) ⇒ falla nombrando, como el resto del bloque: el sello de una marca no se dibuja
+  // «aproximadamente».
+  let identity: ReturnType<typeof resolveOverlayStyle>['identity'] = null;
+  const identityTok = (t.identity ?? null) as Record<string, any> | null;
+  if (identityTok && String(identityTok.mode ?? 'none') !== 'none') {
+    const mode = String(identityTok.mode);
+    if (!IDENTITY_MODES.has(mode)) missing.push(`identity.mode='${mode}' (válidos: ${[...IDENTITY_MODES].join(', ')})`);
+    const role = String(identityTok.palette ?? '');
+    const pal = palBy.get(role);
+    if (!role) missing.push('identity.palette');
+    else if (!pal) missing.push(`brand_palette.role='${role}' (pedido por identity.palette)`);
+    const widthPct = Number(identityTok.width_pct);
+    if (!Number.isFinite(widthPct) || widthPct <= 0) missing.push('identity.width_pct');
+    if (pal && IDENTITY_MODES.has(mode) && Number.isFinite(widthPct) && widthPct > 0) {
+      identity = {
+        mode,
+        color: hexToRgba(String(pal.hex), 1),
+        widthPct,
+        // `full_bleed: false` NO es "más corta": es una declaración que este motor todavía no sabe
+        // dibujar de otra manera, y se dice en vez de silenciarse. La franja siempre corre el borde
+        // entero; un día que exista un modo parcial, este flag es donde vive.
+        fullBleed: identityTok.full_bleed !== false,
+      };
+      if (identityTok.full_bleed === false) {
+        markers.push('IDENTITY_FULL_BLEED_IGNORED: identity.full_bleed=false no está implementado; la franja se dibuja a sangre completa (nunca un marco cerrado)');
+      }
+    }
+  }
+
   if (missing.length) {
     throw new CompositorError(
       'COMPOSITOR_TOKENS_INCOMPLETE',
@@ -335,6 +382,7 @@ export function resolveOverlayStyle(args: {
     slots,
     scrim,
     rule,
+    identity,
     markers,
   };
 }
@@ -384,6 +432,32 @@ export function buildOverlayScene(args: {
     });
   }
 
+  // BRIEF 8 · D — la franja de identidad, ENCIMA del velo (que si no se la comería) y debajo del
+  // texto. D.1 — el grosor se calcula sobre el LADO CORTO, no sobre el ancho: con el ancho, un 1,8%
+  // rinde 18px en un 1:1 de 1024 y 18px en un 9:16 de 1024×1792 pero 34px en un 16:9 de 1920×1080 —
+  // la misma marca se vería tres grosores distintos según el formato. Con el lado corto, el sello se
+  // lee IGUAL en 1:1, 4:5, 9:16 y 16:9. Y el borde elegido es constante entre formatos: la franja no
+  // se reposiciona ni se deforma porque cambie el aspecto.
+  if (style.identity) {
+    const shortSide = Math.min(width, height);
+    const thickness = Math.max(1, Math.round(px(style.identity.widthPct, shortSide)));
+    const vertical = style.identity.mode === 'edge_left' || style.identity.mode === 'edge_right';
+    children.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute',
+          backgroundColor: style.identity.color,
+          // A sangre completa del borde elegido: 100% del lado que recorre. Nunca dos bordes a la
+          // vez — eso sería un marco, que es exactamente lo que la regla dura prohíbe.
+          ...(vertical
+            ? { top: 0, height, width: thickness, ...(style.identity.mode === 'edge_left' ? { left: 0 } : { right: 0 }) }
+            : { left: 0, width, height: thickness, bottom: 0 }),
+        },
+      },
+    });
+  }
+
   const textChildren: Array<Record<string, any>> = [];
   const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => ({
     type: 'div',
@@ -406,7 +480,9 @@ export function buildOverlayScene(args: {
   });
 
   if (style.slots.headline) textChildren.push(slotNode(style.slots.headline, 0));
-  if (style.rule) {
+  // El filete acompaña al TITULAR: sin titular no hay nada que subrayar. (La franja de identidad es
+  // otra cosa y sí se dibuja sola — una firma la marca, un filete separa texto.)
+  if (style.rule && style.slots.headline) {
     textChildren.push({
       type: 'div',
       props: {
@@ -421,6 +497,13 @@ export function buildOverlayScene(args: {
   }
   if (style.slots.subheadline) {
     textChildren.push(slotNode(style.slots.subheadline, px(style.layout.gapPct, width)));
+  }
+
+  // Sin ninguna ranura de texto no se emite el contenedor: la escena queda SELLADA (franja) y sin
+  // tipografía. Es el caso de una pieza cuyo título todavía no existe — se sella hoy y se recompone
+  // con el titular cuando lo tenga, sin volver a generar la escena.
+  if (textChildren.length === 0) {
+    return { type: 'div', props: { style: { display: 'flex', position: 'relative', width, height }, children } };
   }
 
   children.push({
@@ -616,10 +699,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const headline = String(body.headline ?? '');
     const subheadline = body.subheadline == null ? null : String(body.subheadline);
     if (!brandId) throw new CompositorError('COMPOSITOR_BRAND_MISSING', 'brand_id es obligatorio: los tokens son por marca', 400);
-    if (!headline.trim()) {
-      throw new CompositorError('COMPOSITOR_TEXT_MISSING',
-        'headline vacío. El compositor NO escribe texto: compone el que le llega, que sale del copy ya juzgado (BRIEF 7, regla a).', 400);
-    }
+    // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
+    // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
+    // de BRIEF 7 sigue viva para el caso en que no habría NADA que dibujar, y se evalúa abajo,
+    // cuando los tokens ya dijeron si hay identidad. Lo que no cambia: acá no se escribe texto.
     if (!body.image_data_url && !body.image_url) {
       throw new CompositorError('COMPOSITOR_IMAGE_MISSING', 'falta image_data_url o image_url (la imagen limpia a componer)', 400);
     }
@@ -633,12 +716,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const picked = pickOverlayTokens(tokenRows as any[], brandId, canal);
     const style = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline } });
+    const sealOnly = !headline.trim();
+    if (sealOnly && !style.identity) {
+      throw new CompositorError('COMPOSITOR_TEXT_MISSING',
+        'headline vacío y la marca no declara franja de identidad: no hay nada que componer. El compositor NO escribe texto — compone el que le llega, que sale del copy ya juzgado (BRIEF 7, regla a).', 400);
+    }
+    if (sealOnly) {
+      style.markers.push('OVERLAY_SEALED_WITHOUT_TITLE: se compuso la franja de identidad sin titular; recomponer cuando la pieza tenga título (no hace falta regenerar la escena)');
+    }
 
     const cleanBytes = body.image_data_url
       ? dataUrlToBytes(String(body.image_data_url))
       : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
     const dims = imageDimensions(cleanBytes);
 
+    // Sin ranuras de texto no se baja ninguna fuente: sellar una escena no debería costar una
+    // descarga ni fallar por un css_import que la marca todavía no sembró.
     const fonts = await Promise.all(
       SLOTS.filter((s) => style.slots[s]).map(async (s) => ({ slot: s, ...(await loadFont(s, style.slots[s]!)) })),
     );
@@ -657,7 +750,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     console.log(
       `[Compositor][BRIEF7] brand=${brandId} canal=${canal ?? '∅'} piece=${body.piece_id ?? '∅'} ` +
       `tokens=${picked.source} (capas: ${picked.layers.join(' < ')}) ${dims.width}x${dims.height} ` +
-      `fuentes=${fonts.map((f) => `${f.slot}:${f.name}@${f.weight}`).join(', ')} ` +
+      `fuentes=${fonts.map((f) => `${f.slot}:${f.name}@${f.weight}`).join(', ') || '∅ (sello sin titular)'} ` +
+      `identidad=${style.identity ? style.identity.mode : 'ninguna'} ` +
       `markers=${style.markers.length} ${Date.now() - t0}ms`,
     );
 
@@ -669,6 +763,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       tokens_layers: picked.layers,
       width: dims.width, height: dims.height,
       fonts: fonts.map((f) => ({ slot: f.slot, family: f.name, weight: f.weight, source: f.source })),
+      // BRIEF 8 · D — el eco del sello: qué se dibujó y con qué grosor REAL en píxeles, calculado
+      // sobre el lado corto. Sin este número no se puede verificar que el sello se lee igual en los
+      // cuatro formatos, que es justamente lo que D.1 exige.
+      identity: style.identity
+        ? { mode: style.identity.mode, color: style.identity.color, width_pct: style.identity.widthPct,
+            thickness_px: Math.max(1, Math.round((style.identity.widthPct / 100) * Math.min(dims.width, dims.height))),
+            short_side: Math.min(dims.width, dims.height) }
+        : null,
+      sealed_without_title: sealOnly,
       markers: style.markers,
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
       text: { headline, subheadline },
