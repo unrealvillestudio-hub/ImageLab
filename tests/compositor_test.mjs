@@ -75,6 +75,7 @@ const TOK_FPHS = {
         fit_steps: [{ max_chars: 90, size_pct: 3.2 }, { max_chars: 160, size_pct: 2.6 }] },
     },
     palette: { headline: 'cream', subheadline: 'dust' },
+    identity: { mode: 'edge_left', palette: 'primary', width_pct: 1.8, full_bleed: true },
   },
 };
 const TOK_UNRLVL = {
@@ -92,6 +93,7 @@ const TOK_UNRLVL = {
         fit_steps: [{ max_chars: 90, size_pct: 3.0 }, { max_chars: 160, size_pct: 2.4 }] },
     },
     palette: { headline: 'text_primary', subheadline: 'text_primary' },
+    identity: { mode: 'edge_left', palette: 'accent_primary', width_pct: 1.8, full_bleed: true },
   },
 };
 const TOK_GLOBAL = {
@@ -213,6 +215,129 @@ test('fila de otra marca o de otro canal se descarta', () => {
 test('fila desactivada no participa', () => {
   const r = M.pickOverlayTokens([TOK_GLOBAL, { ...TOK_FPHS, active: false }], 'ForumPHs', null);
   assert.deepEqual(r.layers, ['*:*']);
+});
+
+console.log('\n── T7 · BRIEF 8 · D · la franja de identidad: sello de marca, no adorno del texto ──');
+test('la franja se dibuja SIEMPRE que la marca la declare — con titular y sin él', () => {
+  const st = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  assert.equal(st.identity.mode, 'edge_left');
+  assert.equal(st.identity.color, 'rgb(92, 52, 114)');   // primary de la marca, no un hex del motor
+  const conTitular = JSON.stringify(M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x' }));
+  assert.ok(conTitular.includes('"backgroundColor":"rgb(92, 52, 114)"'), 'con titular, la franja está');
+
+  // Sin titular: la escena se SELLA igual y no emite contenedor de texto.
+  const sinTexto = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: { headline: '' } });
+  const sello = M.buildOverlayScene({ style: sinTexto, width: 1024, height: 1024, backgroundSrc: 'x' });
+  const flat = JSON.stringify(sello);
+  assert.ok(flat.includes('"backgroundColor":"rgb(92, 52, 114)"'), 'sin titular, la franja sigue estando');
+  assert.ok(!flat.includes('fontFamily'), 'y no se dibuja tipografía ninguna');
+  assert.equal(sello.props.children.length, 3, 'fondo + velo + franja: nada más');
+});
+
+test('D.1 · el grosor se calcula sobre el LADO CORTO: el sello se lee igual en todo formato', () => {
+  const st = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  const grosor = (w, h) => {
+    const franja = M.buildOverlayScene({ style: st, width: w, height: h, backgroundSrc: 'x' })
+      .props.children.find((c) => c.props?.style?.backgroundColor === st.identity.color);
+    return franja.props.style.width;
+  };
+  // 1:1 · 4:5 · 9:16 — el lado corto es 1024 en los tres, así que el grosor es EL MISMO.
+  assert.equal(grosor(1024, 1024), 18);
+  assert.equal(grosor(1024, 1280), 18, '4:5 — mismo grosor');
+  assert.equal(grosor(1024, 1792), 18, '9:16 — mismo grosor');
+  // 16:9 de 1920×1080: el lado corto es 1080 → 19px. Con el ANCHO habría dado 35: el mismo sello,
+  // casi el doble de grueso, sólo por cambiar de formato. Ése es el defecto que D.1 cierra.
+  assert.equal(grosor(1920, 1080), 19, '16:9 — el lado corto manda, no el ancho');
+  assert.notEqual(Math.round((1.8 / 100) * 1920), 19, 'y con el ancho el número sería otro');
+});
+
+test('D.1 · el borde es constante entre formatos: la franja no se reposiciona ni se deforma', () => {
+  const st = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  for (const [w, h] of [[1024, 1024], [1024, 1280], [1024, 1792], [1920, 1080]]) {
+    const franja = M.buildOverlayScene({ style: st, width: w, height: h, backgroundSrc: 'x' })
+      .props.children.find((c) => c.props?.style?.backgroundColor === st.identity.color);
+    assert.equal(franja.props.style.left, 0, `${w}x${h}: nace del borde izquierdo`);
+    assert.equal(franja.props.style.top, 0, 'y arranca arriba');
+    assert.equal(franja.props.style.height, h, 'a sangre COMPLETA del borde: recorre el alto entero');
+    assert.equal(franja.props.style.right, undefined, 'un solo borde — dos serían un marco');
+  }
+});
+
+test('REGLA DURA: nunca un marco cerrado — la enumeración lo hace imposible', () => {
+  // Los cuatro modos son geometría de UN borde. No existe 'frame' ni combinación; un modo
+  // desconocido no cae a ninguno: grita.
+  const tokens = structuredClone(TOK_FPHS.tokens);
+  tokens.identity.mode = 'frame';
+  assert.throws(
+    () => M.resolveOverlayStyle({ tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /edge_left/.test(e.message),
+  );
+  const block = source.slice(i, j);
+  assert.ok(!/['"]frame['"]/.test(block), 'el motor no conoce ningún modo de marco');
+  // Y una franja dibujada nunca fija dos bordes opuestos a la vez.
+  const st = M.resolveOverlayStyle({ tokens: TOK_UNRLVL.tokens, typography: TYPO_UNRLVL, palette: PAL_UNRLVL, text: TXT });
+  const franja = M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x' })
+    .props.children.find((c) => c.props?.style?.backgroundColor === st.identity.color);
+  const lados = ['left', 'right', 'top', 'bottom'].filter((k) => franja.props.style[k] !== undefined);
+  assert.deepEqual(lados.sort(), ['left', 'top'], 'una franja vertical fija su borde y el origen, nada más');
+});
+
+test('marca N+1: los modos se ejercen con una marca INVENTADA y sus propios roles', () => {
+  // Ni ForumPHs ni UnrealvilleStudio: una marca de otro rubro, con nombres de rol que no existen en
+  // ninguna de las dos. Si el motor conociera algún rol o algún hex, esto fallaría.
+  const TYPO_N1 = [{ role: 'titulo', font_family: 'Inter', css_import: 'https://fonts.googleapis.com/css2?family=Inter' }];
+  const PAL_N1 = [{ role: 'verde_campo', hex: '#2F7A3D' }, { role: 'tinta', hex: '#101010' }];
+  const base = {
+    layout: { anchor: 'bottom_right', margin_pct: 6, max_width_pct: 70, align: 'right' },
+    typography: { headline: { role: 'titulo', weight: 700, fit_steps: [{ max_chars: 60, size_pct: 7 }] } },
+    palette: { headline: 'tinta' },
+  };
+  for (const [mode, esperado] of [
+    ['edge_left', { left: 0, top: 0 }],
+    ['edge_right', { right: 0, top: 0 }],
+    ['edge_bottom', { bottom: 0, left: 0 }],
+  ]) {
+    const tokens = { ...base, identity: { mode, palette: 'verde_campo', width_pct: 2.5, full_bleed: true } };
+    const st = M.resolveOverlayStyle({ tokens, typography: TYPO_N1, palette: PAL_N1, text: { headline: 'Cosecha' } });
+    assert.equal(st.identity.color, 'rgb(47, 122, 61)', `${mode}: el color sale de SU paleta`);
+    const franja = M.buildOverlayScene({ style: st, width: 1000, height: 1500, backgroundSrc: 'x' })
+      .props.children.find((c) => c.props?.style?.backgroundColor === st.identity.color);
+    for (const [k, v] of Object.entries(esperado)) assert.equal(franja.props.style[k], v, `${mode}: ${k}`);
+    if (mode === 'edge_bottom') {
+      assert.equal(franja.props.style.width, 1000, 'horizontal: recorre el ancho entero');
+      assert.equal(franja.props.style.height, 25, '2,5% del lado corto (1000)');
+    } else {
+      assert.equal(franja.props.style.height, 1500, 'vertical: recorre el alto entero');
+      assert.equal(franja.props.style.width, 25, '2,5% del lado corto (1000)');
+    }
+  }
+  // mode 'none' = la marca decide no sellar. No es un error ni un default.
+  const sinSello = M.resolveOverlayStyle({
+    tokens: { ...base, identity: { mode: 'none' } }, typography: TYPO_N1, palette: PAL_N1, text: { headline: 'Cosecha' },
+  });
+  assert.equal(sinSello.identity, null);
+});
+
+test('identidad declarada a medias grita; ausente no rompe nada (aditivo)', () => {
+  const sinRol = structuredClone(TOK_FPHS.tokens);
+  delete sinRol.identity.palette;
+  assert.throws(
+    () => M.resolveOverlayStyle({ tokens: sinRol, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /identity\.palette/.test(e.message),
+  );
+  const sinAncho = structuredClone(TOK_FPHS.tokens);
+  sinAncho.identity.width_pct = 0;
+  assert.throws(
+    () => M.resolveOverlayStyle({ tokens: sinAncho, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT }),
+    (e) => /identity\.width_pct/.test(e.message),
+  );
+  // Sin la clave `identity` la escena es EXACTAMENTE la de BRIEF 7.
+  const previo = structuredClone(TOK_FPHS.tokens);
+  delete previo.identity;
+  const st = M.resolveOverlayStyle({ tokens: previo, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  assert.equal(st.identity, null);
+  assert.equal(M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x' }).props.children.length, 3,
+    'fondo + velo + texto: ninguna franja de más');
 });
 
 console.log('\n── T3 · DETERMINISMO: misma entrada ⇒ mismo PNG (misma escena, clave por clave) ──');
