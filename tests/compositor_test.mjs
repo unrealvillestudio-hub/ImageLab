@@ -125,6 +125,24 @@ test('un titular larguísimo NO se recorta: baja de tamaño y deja marcador', ()
   assert.equal(style.slots.headline.sizePct, 5.2, 'cae al último escalón declarado');
   assert.match(style.markers[0], /OVERLAY_TEXT_OVERFLOW/);
 });
+test('una marca que NO declara la ranura de bajada compone sin ella, sin fallar', () => {
+  // La bajada la OFRECE el carril; que se dibuje lo decide la marca en sus tokens. Una marca cuya
+  // composición es sólo titular no puede fallar por recibir una bajada que no pidió.
+  const tokens = structuredClone(TOK_FPHS.tokens);   // clon: el merge comparte referencias de la capa base
+  delete tokens.typography.subheadline;
+  const style = M.resolveOverlayStyle({ tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  assert.equal(style.slots.subheadline, null);
+  assert.equal(style.slots.headline.text, TXT.headline);
+  assert.match(style.markers[0], /OVERLAY_SLOT_NOT_DECLARED/);
+});
+test('pero una ranura declarada A MEDIAS sí es error (rol sin fit_steps)', () => {
+  const tokens = structuredClone(TOK_FPHS.tokens);
+  delete tokens.typography.subheadline.fit_steps;
+  assert.throws(
+    () => M.resolveOverlayStyle({ tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /typography\.subheadline\.fit_steps/.test(e.message),
+  );
+});
 test('sin bajada compone igual (subheadline es opcional por contrato)', () => {
   const style = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: { headline: 'Corto' } });
   assert.equal(style.slots.subheadline, null);

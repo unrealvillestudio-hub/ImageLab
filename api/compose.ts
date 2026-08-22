@@ -233,6 +233,13 @@ export function resolveOverlayStyle(args: {
     if (!value.trim()) continue;
 
     const st = ((t.typography ?? {})[slot] ?? {}) as Record<string, any>;
+    // Ranura NO DECLARADA por la marca —distinto de declarada a medias, que sí es un error— : la
+    // marca decidió que su composición no la lleva. Se salta con marcador y se compone el resto.
+    // `headline` no admite esta salida: sin titular no hay nada que componer.
+    if (slot !== 'headline' && Object.keys(st).length === 0) {
+      markers.push(`OVERLAY_SLOT_NOT_DECLARED: la marca no declara typography.${slot}; se compone sin esa ranura`);
+      continue;
+    }
     const typoRole = String(st.role ?? '');
     const palRole = String((t.palette ?? {})[slot] ?? '');
     const typo = typoBy.get(typoRole);
