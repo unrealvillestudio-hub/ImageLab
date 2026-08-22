@@ -184,4 +184,37 @@ const PSY_AUTHORITY = {
   }
 }
 
-console.log('✅ visual_spec_test — 9 bloques OK');
+// ── 10 · BRIEF 7 · la cláusula SIN TEXTO es del motor, no del dato ─────────
+// Lo que este bloque prueba es lo único que hace que el compositor tenga sentido: que la imagen
+// llegue LIMPIA. Si el modelo sigue dibujando letras, componer tipografía encima apila dos textos.
+{
+  // (a) sale SIEMPRE — sin marca, sin preset, sin estímulo y sin concepto.
+  const vacio = M.composeVisualPrompt(M.mergeVisualSpec(null, null, null, null), '');
+  assert.match(vacio, /must contain NO text of any kind/,
+    'la cláusula no depende de que una marca la declare: es del eje');
+  assert.match(vacio, /FORBIDDEN:[^.]*\btext\b/, 'y también viaja por el negativo');
+
+  // (b) posición: pegada al concepto, antes de identidad, estilo y estímulo.
+  const spec = M.mergeVisualSpec(LUCIEN, null, GLOBAL_TIKTOK, PSY_AUTHORITY);
+  const p = M.composeVisualPrompt(spec, 'tema');
+  assert.ok(p.indexOf('Concept: tema') < p.indexOf('NO text of any kind'));
+  assert.ok(p.indexOf('NO text of any kind') < p.indexOf('Brand visual identity:'),
+    'la restricción que define qué CLASE de imagen es va antes que el estilo');
+
+  // (c) cero vocabulario de marca (test de la marca N+1 sobre el literal del motor).
+  const clausula = (source.match(/const NO_TEXT_CLAUSE =[\s\S]*?;\n/) ?? [''])[0]
+    + (source.match(/const NO_TEXT_NEGATIVE =[\s\S]*?;\n/) ?? [''])[0];
+  for (const marca of ['ForumPHs', 'Unrealville', 'Lucien', 'Neurone', 'Ley 284', 'Panam', 'espa\u00f1ol']) {
+    assert.ok(!clausula.includes(marca), `la cláusula del eje nombra '${marca}' — sería instancia, no eje`);
+  }
+
+  // (d) el negativo del eje no se duplica cuando la marca ya prohibía lo mismo, y el de la marca
+  //     sobrevive (acumulativo, no excluyente).
+  const conTexto = { ...LUCIEN, default_negative_prompt: 'text, plastic perfection' };
+  const neg = M.mergeVisualSpec(conTexto, null, null, null).negative;
+  assert.equal(neg.split(', ').filter((t) => t === 'text').length, 1, 'sin duplicar términos');
+  assert.ok(neg.includes('plastic perfection'), 'lo que la marca prohíbe sigue prohibido');
+  assert.ok(neg.startsWith('text, letters, words'), 'el eje encabeza el negativo');
+}
+
+console.log('✅ visual_spec_test — 10 bloques OK');

@@ -309,6 +309,33 @@ const EJES_COMPARTIDOS = [
   'skin_detail', 'imperfections', 'humidity_level', 'sweat_level', 'grain_level',
 ] as const;
 
+// ── BRIEF 7 · LA CLÁUSULA SIN TEXTO — la imagen se genera, la tipografía se compone ──
+//
+// MEDIDO EN PRODUCCIÓN (2026-08-22): el modelo de imagen corrompe sistemáticamente la tipografía
+// española que dibuja dentro de la imagen ("EXACTEMENTE", "CUANDA", "APAPSRIENTA", "FRACIÓN") e
+// insertó "LEY 284" en una pieza — texto normativo dentro del plano visual, que el Watcher NO juzga
+// (juzga el COPY, no los píxeles). Dos piezas aprobadas quedaron bloqueadas por eso.
+//
+// HALLAZGO QUE LO AGRAVA, verificado hoy contra `public.brands`: hay marcas que llevan PROSA en
+// `default_negative_prompt` (ForumPHs: "…compliant with Ley 284 de Propiedad Horizontal (Panamá)…").
+// Esa prosa entra al prompt por la puerta FORBIDDEN / "Avoid:", y un generador de imagen que ve un
+// nombre propio y un número tiende a DIBUJARLOS. O sea: el candado de compliance venía alimentando
+// al defecto. Esta cláusula lo cierra por el lado que pesa —la instrucción afirmativa— sin tocar el
+// dato de ninguna marca.
+//
+// DECISIÓN (Sam): la imagen se genera SIN texto y el texto se compone determinísticamente encima
+// (ver `api/compose.ts`). Es cláusula del EJE: no nombra marca, canal, idioma ni jurisdicción, y
+// gobierna a toda marca que pase por este builder. Va en las DOS direcciones del prompt porque el
+// modelo las pesa distinto: la afirmativa (qué ES la imagen) y la negativa (qué está prohibido).
+const NO_TEXT_CLAUSE =
+  'CRITICAL: the image must contain NO text of any kind — no letters, no words, no numbers, ' +
+  'no typography, no captions, no subtitles, no headlines, no labels, no signage, no watermarks, ' +
+  'no lettered logos, no UI overlays, no handwriting. Pure scene only: the typography is composed ' +
+  'afterwards by code, so leave the composition clean and legible without it';
+const NO_TEXT_NEGATIVE =
+  'text, letters, words, typography, captions, subtitles, headlines, numbers, lettering, ' +
+  'watermark, signage, labels, on-image copy, UI overlay';
+
 export interface VisualSpec {
   // Ejes que viven en los dos niveles. Valor efectivo tras la fusión.
   ejes: Record<string, string>;
@@ -374,7 +401,10 @@ export function mergeVisualSpec(
 
   // Negativo ACUMULATIVO, no excluyente: lo prohibido por la marca sigue prohibido aunque el canal
   // agregue lo suyo. Un `??` acá dejaría caer el candado de marca al aparecer un preset.
-  const negParts: string[] = [];
+  // BRIEF 7 — el eje va PRIMERO y siempre: el negativo del motor no depende de que una marca lo
+  // haya declarado. El dedup por término de abajo hace que una marca que ya prohibía "text" (hoy:
+  // NeuroneSCF, VivoseMask, VizosCosmetics, UnrealvilleStudio, LucienSael) no lo duplique.
+  const negParts: string[] = [NO_TEXT_NEGATIVE];
   const forbidden = Array.isArray(ep.forbidden_elements) ? ep.forbidden_elements.join(', ')
     : (typeof ep.forbidden_elements === 'string' ? ep.forbidden_elements : '');
   if (forbidden)                     negParts.push(forbidden);
@@ -426,6 +456,10 @@ export function composeVisualPrompt(
   const p: string[] = [];
 
   if (conceptText)             p.push(`Concept: ${conceptText}.`);
+  // BRIEF 7 — segunda posición, pegada al concepto: los generadores pesan más lo que viene primero,
+  // y esto no es un matiz estético sino la restricción que define qué clase de imagen es. Va aunque
+  // no haya concepto, identidad ni preset: es del motor, no de la pieza.
+  p.push(`${NO_TEXT_CLAUSE}.`);
   if (spec.visual_identity)    p.push(`Brand visual identity: ${spec.visual_identity}.`);
   if (spec.reference_aesthetic) p.push(`${spec.reference_aesthetic} aesthetic.`);
   if (spec.composition_rule)   p.push(`${spec.composition_rule}.`);
