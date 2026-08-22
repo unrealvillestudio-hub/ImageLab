@@ -12,7 +12,24 @@ Antes de cualquier acción en este repositorio, Claude Code DEBE cargar y obedec
 
 1. **CONTEXT FILES NUNCA SE REEMPLAZAN.** Se actualizan preservando historia: lo nuevo al tope, lo anterior archivado debajo, nunca borrado. Aplica a todo `.json`/`.md` de contexto. Antes de commitear: verificar que el diff no BORRA historia.
 
-2. **PUSH:** `unrlvl-context` → nunca push directo, nunca por CC (solo Sam vía GitHub Desktop). Este repo y demás repos de código → branch + PR, nunca merge propio. CC nunca mergea por su cuenta. CC limpia sus worktrees al cerrar un PR.
+2. **PUSH (redacción vigente — corregida 2026-08-22):**
+   - **Este repo y demás repos de código** → **branch + PR**, nunca push directo a `main`, nunca merge propio. CC limpia sus worktrees al cerrar un PR (`CC_PROTOCOL.md` §7.2).
+   - **`unrlvl-context`** → CC trabaja **igual: branch + PR**. CC **crea la rama, commitea y PUSHEA esa rama de PR**, y abre el PR contra `main`. Su restricción es **no pushear a `main` y no mergear** — nada más. Sam revisa, mergea y borra la rama **por GitHub Web UI**. CC **nunca crea worktrees** en ese repo (`CC_PROTOCOL.md` §7.1).
+   - **CC nunca mergea un PR por su cuenta**, en ningún repo. El merge es decisión de Sam.
+
+   > **⛔ NO OPERATIVO — redacción anterior, derogada.** Se conserva sólo por trazabilidad
+   > (`CC_PROTOCOL.md` §0 y §6) y **no se obedece**:
+   > *«PUSH: `unrlvl-context` → nunca push directo, nunca por CC (solo Sam vía GitHub Desktop).
+   > Este repo y demás repos de código → branch + PR, nunca merge propio. CC nunca mergea por su
+   > cuenta. CC limpia sus worktrees al cerrar un PR.»*
+   >
+   > Estaba **vencida desde el 2026-07-31**, cuando `CC_PROTOCOL.md` v2026-07-31 corrigió el punto
+   > de push de CC según la instrucción de Sam del 29-jul, y arrastraba además que Sam usa **GitHub
+   > Web UI** desde el 2026-07-29, no GitHub Desktop. Este `CLAUDE.md` nunca se sincronizó, y en
+   > sesión **trabó a CC**: leyó «nunca por CC» como imperativo vigente. Fuente de verdad:
+   > `https://unrlvl-context.vercel.app/protocols/CC_PROTOCOL.md` §1 + «Flujo de entrega de context
+   > files». Los `CLAUDE.md` de cada repo **sólo apuntan** al protocolo; cuando duplican una regla,
+   > divergen — que es exactamente lo que pasó acá.
 
 3. **VERIFICACIÓN REFORZADA POR COMPLEJIDAD:** cambios que afecten `lab_jobs`, `lab_configs`, Edge Functions, o el flujo del pipeline requieren mensaje de verificación EXPLÍCITO a Sam antes de commitear (objetivo, pasos, archivos, repos y EFs afectados), porque un error se propaga aguas abajo a CopyLab/ImageLab/Meta y a todas las marcas. Reportar al final con el formato de CC_PROTOCOL (incluida PRESERVACIÓN DE CONTEXTO).
 
