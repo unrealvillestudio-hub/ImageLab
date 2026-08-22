@@ -118,8 +118,10 @@ const CASOS = [
   {
     marca: 'LucienSael',
     typography: [
-      { role: 'display', font_family: 'Cormorant Garamond', css_import: 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&display=swap' },
-      { role: 'body', font_family: 'Crimson Pro', css_import: 'https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;500&display=swap' },
+      // Pesos según el documento canónico de identidad de la marca (§02) — el import los amplía en
+      // la migración de BRIEF 8; sin eso, el 300 no resuelve y cae al 400 más cercano.
+      { role: 'display', font_family: 'Cormorant Garamond', css_import: 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,600&display=swap' },
+      { role: 'body', font_family: 'Crimson Pro', css_import: 'https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,600&display=swap' },
     ],
     palette: [{ role: 'bone', hex: '#EDE8DF' }, { role: 'parchment', hex: '#C4BDB0' }, { role: 'obsidian', hex: '#0D0D0B' }, { role: 'ember', hex: '#D4622A' }],
     tokens: {
@@ -127,7 +129,7 @@ const CASOS = [
         scrim: { mode: 'gradient_bottom', palette: 'obsidian', opacity: 0.86, coverage_pct: 58 },
         rule: { enabled: true, palette: 'ember', width_pct: 10, thickness_px: 3, gap_pct: 2.4 } },
       typography: {
-        headline: { role: 'display', weight: 500, line_height: 1.04, letter_spacing_em: 0, transform: 'none',
+        headline: { role: 'display', weight: 300, line_height: 1.04, letter_spacing_em: 0.01, transform: 'none',
           fit_steps: [{ max_chars: 40, size_pct: 9.2 }, { max_chars: 70, size_pct: 7.2 }, { max_chars: 110, size_pct: 5.6 }] },
         subheadline: { role: 'body', weight: 400, line_height: 1.34, letter_spacing_em: 0, transform: 'none',
           fit_steps: [{ max_chars: 90, size_pct: 3.1 }, { max_chars: 160, size_pct: 2.5 }] },
