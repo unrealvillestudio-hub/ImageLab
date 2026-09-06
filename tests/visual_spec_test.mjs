@@ -203,9 +203,23 @@ const PSY_AUTHORITY = {
 
   // (c) cero vocabulario de marca (test de la marca N+1 sobre el literal del motor).
   const clausula = (source.match(/const NO_TEXT_CLAUSE =[\s\S]*?;\n/) ?? [''])[0]
-    + (source.match(/const NO_TEXT_NEGATIVE =[\s\S]*?;\n/) ?? [''])[0];
+    + (source.match(/const NO_TEXT_NEGATIVE =[\s\S]*?;\n/) ?? [''])[0]
+    // BRIEF-N06 — la cláusula de sujetos distintos entra al MISMO barrido: es del mismo eje y
+    // corre el mismo riesgo de que alguien le cuele el vocabulario de la marca que la pidió.
+    + (source.match(/const DISTINCT_SUBJECTS_CLAUSE =[\s\S]*?;\n/) ?? [''])[0];
   for (const marca of ['ForumPHs', 'Unrealville', 'Lucien', 'Neurone', 'Ley 284', 'Panam', 'espa\u00f1ol']) {
     assert.ok(!clausula.includes(marca), `la cláusula del eje nombra '${marca}' — sería instancia, no eje`);
+  }
+  // BRIEF-N06 — y tampoco el vocabulario del RUBRO ni del caso que la originó: el defecto medido
+  // fue una mujer repetida, y el eje es «personas distintas». Si el literal dijera 'woman' o
+  // 'hair', el motor quedaría bautizado con el accidente de una pieza de una marca de belleza.
+  const clausulaSujetos = (source.match(/const DISTINCT_SUBJECTS_CLAUSE =[\s\S]*?;\n/) ?? [''])[0];
+  // `hair` NO está en esta lista, y la ausencia es deliberada: el pelo es un atributo físico
+  // universal para distinguir a dos personas —del mismo orden que `skin tone`— y no vocabulario
+  // del rubro capilar. Lo que delataría al caso es `woman`, `salon` o `Florida`, no `hair`.
+  for (const caso of ['woman', 'women', 'female', 'salon', 'stylist', 'Florida', 'colour-treated']) {
+    assert.ok(!clausulaSujetos.includes(caso),
+      `DISTINCT_SUBJECTS_CLAUSE nombra '${caso}' — es el CASO, no la FUNCIÓN`);
   }
 
   // (d) el negativo del eje no se duplica cuando la marca ya prohibía lo mismo, y el de la marca
@@ -217,4 +231,44 @@ const PSY_AUTHORITY = {
   assert.ok(neg.startsWith('text, letters, words'), 'el eje encabeza el negativo');
 }
 
-console.log('✅ visual_spec_test — 10 bloques OK');
+// ── 11 · BRIEF-N06 · sujetos distintos (EJE) y directriz de dominio (INSTANCIA) ──
+// Las dos cosas viven en el mismo prompt y NO son la misma clase de cosa. Este bloque prueba
+// justamente eso: una sale siempre y no la declara nadie; la otra sólo si un dominio la escribió.
+{
+  // (a) la cláusula de sujetos distintos sale SIEMPRE — sin marca, sin preset, sin concepto.
+  const vacio = M.composeVisualPrompt(M.mergeVisualSpec(null, null, null, null), '');
+  assert.match(vacio, /each person must be a visibly different individual/,
+    'la cláusula de sujetos es del eje: no depende de que una marca la declare');
+
+  // (b) POSICIÓN: detrás de la cláusula sin texto, nunca delante. Desplazar aquélla degrada la
+  //     restricción que hace que la imagen llegue limpia, que es de lo que depende el compositor.
+  const spec = M.mergeVisualSpec(LUCIEN, null, GLOBAL_TIKTOK, PSY_AUTHORITY);
+  const p = M.composeVisualPrompt(spec, 'tema');
+  assert.ok(p.indexOf('NO text of any kind') < p.indexOf('visibly different individual'),
+    'la cláusula sin texto conserva su segunda posición');
+  assert.ok(p.indexOf('visibly different individual') < p.indexOf('Brand visual identity:'),
+    'las dos cláusulas del eje van antes que el estilo de la marca');
+
+  // (c) la directriz de dominio NO sale si nadie la escribió. Sin directriz, el prompt es el de
+  //     hoy: no hay genérico por defecto, porque un genérico inventado degrada en silencio.
+  assert.ok(!vacio.includes('Scene directive:'),
+    'sin directriz no se inventa ninguna: NULL es comportamiento actual');
+
+  // (d) …y cuando llega, viaja VERBATIM y detrás de las dos del eje.
+  const conDirectriz = M.composeVisualPrompt(spec, 'tema', {
+    sceneDirective: 'Subjects must have visibly colour-treated hair.',
+  });
+  assert.match(conDirectriz, /Scene directive: Subjects must have visibly colour-treated hair\./,
+    'la directriz del dominio viaja literal: el motor la transporta, no la interpreta');
+  assert.ok(conDirectriz.indexOf('visibly different individual') < conDirectriz.indexOf('Scene directive:'),
+    'el eje va antes que la instancia');
+  assert.ok(conDirectriz.indexOf('Scene directive:') < conDirectriz.indexOf('Brand visual identity:'),
+    'la directriz describe QUÉ muestra la escena: va antes del estilo');
+
+  // (e) la directriz NO desactiva la cláusula sin texto. Es lo que el COMMENT de la columna promete
+  //     y lo que el compositor necesita: si la escena llegara con letras, se apilarían dos textos.
+  assert.match(conDirectriz, /must contain NO text of any kind/,
+    'la directriz SUMA, no sustituye');
+}
+
+console.log('✅ visual_spec_test — 11 bloques OK');

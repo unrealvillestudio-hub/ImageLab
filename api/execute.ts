@@ -120,6 +120,9 @@ interface ExecuteRequest {
     style_notes?: string;
     subject?: string;
     extra_instructions?: string;
+    // BRIEF-N06 — directriz visual del DOMINIO de la pieza (`intel.brand_topics.visual_directive`).
+    // La emite el cable del carril; el lab no la deduce ni la inventa.
+    visual_directive?: string;
   };
   previousOutputs: Record<string, string>;
 }
@@ -336,6 +339,24 @@ const NO_TEXT_NEGATIVE =
   'text, letters, words, typography, captions, subtitles, headlines, numbers, lettering, ' +
   'watermark, signage, labels, on-image copy, UI overlay';
 
+// ── BRIEF-N06 · LA CLÁUSULA DE SUJETOS DISTINTOS — si hay más de una persona, son personas ──
+//
+// MEDIDO EN PRODUCCIÓN (2026-09-06): la pieza `d9a45427` salió con la MISMA mujer dos veces en el
+// mismo plano. No es un defecto de una marca ni de un rubro: ninguna marca, en ningún país, quiere
+// dos personas que se leen como la misma persona. Por eso es cláusula del EJE y vive en el bloque
+// puro, donde el test la cubre y no puede evaporarse en un refactor.
+//
+// EL NOMBRE ES LA FUNCIÓN, NO EL CASO. Se llama DISTINCT_SUBJECTS, no NO_SAME_WOMAN: el defecto
+// medido fue una mujer repetida, pero el eje es «si hay más de una persona, son distintas». Un
+// nombre tomado del caso habría bautizado un motor de N marcas con el accidente de una pieza.
+//
+// POSICIÓN: DESPUÉS de NO_TEXT_CLAUSE, nunca antes. Esa cláusula está en segunda posición a
+// propósito —define qué CLASE de imagen es— y desplazarla degrada lo que ya funciona.
+const DISTINCT_SUBJECTS_CLAUSE =
+  'When the scene includes more than one person, each person must be a visibly different ' +
+  'individual: different facial structure, age range, skin tone and hair. Never repeat the same ' +
+  'face, and never render two people who read as the same person';
+
 export interface VisualSpec {
   // Ejes que viven en los dos niveles. Valor efectivo tras la fusión.
   ejes: Record<string, string>;
@@ -451,7 +472,7 @@ export function mergeVisualSpec(
 export function composeVisualPrompt(
   spec: VisualSpec,
   conceptText: string,
-  opts: { styleNotes?: string | null; copyTheme?: string | null } = {},
+  opts: { styleNotes?: string | null; copyTheme?: string | null; sceneDirective?: string | null } = {},
 ): string {
   const p: string[] = [];
 
@@ -460,6 +481,15 @@ export function composeVisualPrompt(
   // y esto no es un matiz estético sino la restricción que define qué clase de imagen es. Va aunque
   // no haya concepto, identidad ni preset: es del motor, no de la pieza.
   p.push(`${NO_TEXT_CLAUSE}.`);
+  // BRIEF-N06 — tercera posición, detrás de la cláusula sin texto y delante de todo lo demás: es
+  // del motor igual que aquélla, y sale aunque no haya marca, preset ni concepto.
+  p.push(`${DISTINCT_SUBJECTS_CLAUSE}.`);
+  // BRIEF-N06 — la directriz del DOMINIO. Es INSTANCIA: el motor no sabe qué dice ni la interpreta,
+  // sólo la transporta. Llega de `intel.brand_topics.visual_directive` por el cable del carril. Va
+  // aquí porque describe QUÉ muestra la escena, y los generadores pesan más lo que viene primero;
+  // detrás de las dos cláusulas del eje, que no se negocian. Ausente = prompt de hoy, sin cambios:
+  // no hay directriz por defecto, porque un genérico inventado degradaría en silencio.
+  if (opts.sceneDirective)     p.push(`Scene directive: ${opts.sceneDirective}.`);
   if (spec.visual_identity)    p.push(`Brand visual identity: ${spec.visual_identity}.`);
   if (spec.reference_aesthetic) p.push(`${spec.reference_aesthetic} aesthetic.`);
   if (spec.composition_rule)   p.push(`${spec.composition_rule}.`);
@@ -600,6 +630,7 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
   const prompt = composeVisualPrompt(spec, conceptText || `producto de ${brand?.display_name ?? brandId}`, {
     styleNotes: req.params.style_notes ?? null,
     copyTheme:  copyOutput ? String(copyOutput).slice(0, 150) : null,
+    sceneDirective: req.params.visual_directive ?? null,
   });
 
   console.log(
