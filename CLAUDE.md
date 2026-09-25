@@ -137,7 +137,8 @@ config/ utils/           <- legacy en root (los activos estan en src/)
 
 ## Conexiones (verificadas: codigo + ecosystem_graph + access_map)
 - **Recibe de:** lab-worker EF (pipeline `lab_jobs`) y modo direct desde la UI.
-- **Lee de Supabase (service_role):** `imagelab_presets` (preset por brand+canal), `brands` (fallback), `psycho_presets`. Tambien consume `person_blueprints`/`location_blueprints` para identity params (grafo: provides_params_to).
+- **Lee de Supabase (service_role):** `imagelab_presets` (preset por brand+canal), `brands` (fallback), `psycho_presets` e `imagelab_prompt_builder_versions` (la version ACTIVA de las instrucciones del constructor de prompt, BRIEF-IMG-01 fase 2). **NO lee `person_blueprints` ni `location_blueprints`** [medido 2026-09-25: ninguna referencia en `api/` ni en `src/`]. La persona llega como dato en `params.persona`, resuelta por el carril.
+  > **⛔ NO OPERATIVO — redaccion anterior, desmentida por el codigo el 2026-09-25.** Se conserva por trazabilidad y no se obedece: *«Tambien consume `person_blueprints`/`location_blueprints` para identity params (grafo: provides_params_to).»* Venia del grafo del ecosistema, no del codigo.
 - **Front (anon read-only):** solo SELECT.
 - **Llama a:** Google Vertex AI Imagen 3.0 (`{location}-aiplatform.googleapis.com`).
 - **GCP:** proyecto en `GOOGLE_CLOUD_PROJECT`, billing con creditos del proyecto.

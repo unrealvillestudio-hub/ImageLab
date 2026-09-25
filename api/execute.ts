@@ -123,9 +123,97 @@ interface ExecuteRequest {
     // BRIEF-N06 — directriz visual del DOMINIO de la pieza (`intel.brand_topics.visual_directive`).
     // La emite el cable del carril; el lab no la deduce ni la inventa.
     visual_directive?: string;
+    // BRIEF-IMG-01 fase 2 — TODAS OPCIONALES. Sin `copy_full`, el camino es exactamente el de antes.
+    copy_full?: string;                  // el cuerpo ENTERO de la pieza, no su cabeza
+    title?: string;
+    image_hook?: string;
+    visual_directives?: string[];        // las directrices humanas ACUMULADAS, en orden
+    persona?: PromptPersona | null;      // dato de `public.person_blueprints`, resuelto por el carril
+    generation_mode?: GenerationMode;    // 'edit_from_current' exige `source_image_url`
+    source_image_url?: string;           // la imagen actual, para editar en vez de repintar
+    prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
   };
   previousOutputs: Record<string, string>;
 }
+
+// --- BRIEF-IMG-01 fase 2 · I/O del constructor de prompt -------------------
+
+interface PromptBuilderVersion {
+  version: string;
+  model_id: string;
+  instructions: string;
+  max_output_tokens: number | null;
+}
+
+/**
+ * La versión ACTIVA de las instrucciones del constructor. Es DATO (una fila activa a la vez), no
+ * literal: mejorar el constructor es publicar una versión nueva con su motivo, no desplegar código.
+ */
+async function loadActivePromptBuilderVersion(): Promise<PromptBuilderVersion | null> {
+  return sb<PromptBuilderVersion>(
+    'imagelab_prompt_builder_versions?active=eq.true&select=version,model_id,instructions,max_output_tokens&limit=1',
+  );
+}
+
+const TEXT_MODEL_URL = (model: string) =>
+  `https://${GCP_LOCATION()}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT()}/locations/${GCP_LOCATION()}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+
+/** Un modelo de TEXTO de Vertex. Sin razonamiento extendido: el constructor redacta, no delibera. */
+async function vertexGenerateText(params: {
+  model: string; system: string; user: string; maxOutputTokens: number;
+}): Promise<{ text: string; usage: Record<string, number> | null }> {
+  if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+  const token = await getAccessToken();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    const res = await fetch(TEXT_MODEL_URL(params.model), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: params.system }] },
+        contents: [{ role: 'user', parts: [{ text: params.user }] }],
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens: params.maxOutputTokens,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`PROMPT_BUILDER_MODEL_ERROR ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const text = (data?.candidates?.[0]?.content?.parts ?? [])
+      .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+      .join('')
+      .trim();
+    if (!text) {
+      const why = data?.candidates?.[0]?.finishReason ?? data?.promptFeedback?.blockReason ?? 'sin texto';
+      throw new Error(`PROMPT_BUILDER_EMPTY: el modelo no devolvió prompt (${why})`);
+    }
+    return { text, usage: extractUsage(data) };
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`PROMPT_BUILDER_TIMEOUT after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Una imagen por URL, lista para ir como `inlineData`. Falla en voz alta: una referencia que no
+ *  llega cambiaría el resultado sin que nadie lo supiera. */
+async function fetchImageInline(url: string): Promise<InlineImage> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`IMAGE_FETCH_FAILED ${res.status}: ${url}`);
+  const mimeType = (res.headers.get('content-type') ?? 'image/png').split(';')[0].trim() || 'image/png';
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { mimeType, data: buf.toString('base64') };
+}
+
+/** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
+const MAX_PERSONA_REFS = 3;
 
 /**
  * Lector de PostgREST. Devuelve la primera fila, o `null`.
@@ -521,6 +609,128 @@ export function composeVisualPrompt(
   return p.join(' ');
 }
 // ── C:END ──
+
+// ── PB:BEGIN ── (BRIEF-IMG-01 fase 2, 2026-09-25) bloque PURO: el CONSTRUCTOR DE PROMPT.
+//
+// EL DEFECTO QUE CIERRA, medido el 2026-09-25:
+//   · El carril sembraba la imagen con el título + los PRIMEROS 180 caracteres del copy
+//     (`content-run-stage/index.ts:6929` y `:7679`), y este lab añadía otros 150
+//     (`copyTheme`). Nada leía el texto entero: la imagen ilustraba el arranque de la pieza.
+//   · Al corregir, sólo viajaba la ÚLTIMA directriz de Sam: cada una pisaba a la anterior.
+//   · El prompt con el que nació una imagen no se guardaba: `output` sólo decía «[IMAGE_GENERATED]».
+//
+// LO QUE HACE ESTE BLOQUE: decide si hay que sintetizar, arma el mensaje para el modelo de texto,
+// resuelve si la PERSONA de la marca aparece, y garantiza que las cláusulas del motor sobreviven a la
+// síntesis. La llamada al modelo vive FUERA (es I/O); acá sólo hay forma y decisión, y el test
+// `tests/prompt_builder_test.mjs` la extrae y la ejecuta tal cual se despliega.
+//
+// MULTIMARCA: cero marcas, cero canales, cero idiomas. La persona llega como DATO (`params.persona`,
+// que el carril resuelve de `public.person_blueprints`), y las instrucciones del constructor son dato
+// versionado (`public.imagelab_prompt_builder_versions`). Este bloque no sabe cómo se llama nadie.
+
+export type GenerationMode = 'edit_from_current' | 'regenerate_full';
+
+export interface PromptPersona {
+  name: string;
+  aliases?: string[];
+  description: string;
+  reference_image_urls?: string[];
+}
+
+export interface PromptBuilderInput {
+  basePrompt: string;
+  copyFull: string;
+  title?: string | null;
+  imageHook?: string | null;
+  domainDirective?: string | null;
+  directives?: string[];
+  persona?: PromptPersona | null;
+  mode?: GenerationMode | null;
+}
+
+/** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
+export function shouldSynthesize(params: { copy_full?: unknown } | null | undefined): boolean {
+  return typeof params?.copy_full === 'string' && params.copy_full.trim().length > 0;
+}
+
+/** Directrices limpias y en orden: se descartan vacías y duplicadas CONSECUTIVAS, nunca se reordenan. */
+export function normalizeDirectives(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const d of raw) {
+    const s = typeof d === 'string' ? d.trim() : '';
+    if (!s) continue;
+    if (out.length && out[out.length - 1] === s) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * ¿La pieza o alguna directriz NOMBRA a la persona? Por nombre o por alias declarado, palabra
+ * completa y sin distinguir mayúsculas. Si no se nombra, la persona NO entra en la escena: una marca
+ * con persona no obliga a que la persona salga en todas sus imágenes.
+ */
+export function personaMentioned(persona: PromptPersona | null | undefined, texts: Array<string | null | undefined>): boolean {
+  if (!persona?.name?.trim()) return false;
+  const names = [persona.name, ...(persona.aliases ?? [])].map((n) => (n ?? '').trim()).filter(Boolean);
+  const hay = texts.filter((t): t is string => typeof t === 'string' && t.length > 0).join('\n');
+  if (!hay) return false;
+  return names.some((n) => new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(n)}($|[^\\p{L}\\p{N}])`, 'iu').test(hay));
+}
+
+/** El mensaje de usuario para el modelo de texto. Rotulado, para que el modelo sepa qué es cada cosa. */
+export function buildBuilderUserMessage(input: PromptBuilderInput): string {
+  const directives = normalizeDirectives(input.directives ?? []);
+  const withPersona = personaMentioned(input.persona, [input.copyFull, input.title, input.imageHook, ...directives]);
+  const parts: string[] = [];
+  parts.push(`MODE: ${input.mode ?? 'regenerate_full'}`);
+  parts.push(`BASE PROMPT (engine-composed; keep every constraint in it):\n${input.basePrompt}`);
+  if (input.title?.trim()) parts.push(`PIECE — TITLE:\n${input.title.trim()}`);
+  if (input.imageHook?.trim()) parts.push(`PIECE — TEXT ON IMAGE (composed later by code, never drawn):\n${input.imageHook.trim()}`);
+  parts.push(`PIECE — FULL BODY:\n${input.copyFull.trim()}`);
+  if (input.domainDirective?.trim()) parts.push(`DOMAIN DIRECTIVE:\n${input.domainDirective.trim()}`);
+  if (directives.length) {
+    parts.push(`HUMAN DIRECTIVES (chronological; later ones refine earlier ones; if two conflict, the later wins):\n${directives.map((d, k) => `${k + 1}. ${d}`).join('\n')}`);
+  }
+  if (withPersona && input.persona) {
+    const refs = (input.persona.reference_image_urls ?? []).length;
+    parts.push(
+      `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. Whenever the piece or a directive ` +
+      `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
+    );
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Las cláusulas del motor NO se negocian con el modelo de texto: si la síntesis las pierde o las
+ * parafrasea, se reponen literales al frente. Van en el orden del bloque C —primero la de sin texto,
+ * después la de sujetos distintos— y después la síntesis.
+ */
+export function enforceEngineClauses(synth: string, clauses: string[]): string {
+  const body = (synth ?? '').trim();
+  const missing = clauses.filter((c) => c && !body.includes(c));
+  return [...missing.map((c) => `${c}.`), body].filter(Boolean).join(' ');
+}
+
+/** Rol de las imágenes adjuntas, en lenguaje natural: Gemini-image no tiene bindings de tipo. */
+export function imageRoleClause(args: { hasSource: boolean; personaName?: string | null; personaRefs: number }): string {
+  const c: string[] = [];
+  if (args.hasSource) {
+    c.push('The FIRST attached image is the current version of this image: edit it. Keep its composition, subjects, lighting and style, and change only what the instructions ask for.');
+  }
+  if (args.personaName && args.personaRefs > 0) {
+    const which = args.hasSource ? 'The other attached image(s)' : 'The attached image(s)';
+    c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+  }
+  return c.join(' ');
+}
+// ── PB:END ──
 
 /**
  * Assemble the preset-driven prompt per the spec:
@@ -999,12 +1209,84 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
 
   try {
-    const built = await buildVisualPrompt(body as ExecuteRequest);
-    const { image_data_url: imageDataUrl, usage } = await vertexPredictImagen({
-      prompt:         built.prompt,
-      negativePrompt: built.negativePrompt,
-      aspectRatio:    built.aspectRatio,
-    });
+    const request = body as ExecuteRequest;
+    const params = request.params ?? {};
+    const built = await buildVisualPrompt(request);
+
+    // ── BRIEF-IMG-01 fase 2 · el constructor ────────────────────────────────────────────────
+    // Sin `copy_full` no se sintetiza y el prompt es el de siempre: el cambio es inerte hasta que el
+    // carril (fase 3) mande el copy entero. Con él, se sintetiza UN prompt con todo.
+    const mode: GenerationMode = params.generation_mode === 'edit_from_current' ? 'edit_from_current' : 'regenerate_full';
+    if (mode === 'edit_from_current' && !params.source_image_url) {
+      res.status(400).json({ error: "EDIT_WITHOUT_SOURCE: generation_mode 'edit_from_current' exige source_image_url", status: 'error' });
+      return;
+    }
+    const directives = normalizeDirectives(params.visual_directives);
+    const persona = params.persona ?? null;
+    const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
+
+    let finalPrompt = built.prompt;
+    let builder: { version: string; model: string; usage: Record<string, number> | null } | null = null;
+    if (shouldSynthesize(params)) {
+      const v = await loadActivePromptBuilderVersion();
+      // FAIL-LOUD: quien manda el copy entero pidió síntesis. Degradar al prompt de 180 caracteres sin
+      // decirlo sería volver al defecto que esto cierra, con la apariencia de haberlo cerrado.
+      if (!v) {
+        res.status(500).json({ error: 'PROMPT_BUILDER_VERSION_MISSING: no hay fila activa en imagelab_prompt_builder_versions', status: 'error' });
+        return;
+      }
+      const synth = await vertexGenerateText({
+        model: v.model_id,
+        system: v.instructions,
+        user: buildBuilderUserMessage({
+          basePrompt: built.prompt,
+          copyFull: String(params.copy_full),
+          title: params.title ?? null,
+          imageHook: params.image_hook ?? null,
+          domainDirective: params.visual_directive ?? null,
+          directives,
+          persona,
+          mode,
+        }),
+        maxOutputTokens: v.max_output_tokens ?? 700,
+      });
+      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE]);
+      builder = { version: v.version, model: v.model_id, usage: synth.usage };
+      console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
+    }
+
+    // Medición en seco: el prompt y su coste, sin pagar una imagen.
+    if (params.prompt_only === true) {
+      res.status(200).json({
+        prompt_full: finalPrompt,
+        prompt_builder_version: builder?.version ?? null,
+        prompt_builder_model:   builder?.model ?? null,
+        prompt_builder_usage:   builder?.usage ?? null,
+        generation_mode: mode,
+        persona_used:    personaUsed,
+        status: 'ok',
+      });
+      return;
+    }
+
+    // Las imágenes que acompañan al prompt: la actual (editar) y las de la persona, si se la nombra.
+    const images: InlineImage[] = [];
+    if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
+    const personaRefs = personaUsed ? (persona?.reference_image_urls ?? []).slice(0, MAX_PERSONA_REFS) : [];
+    for (const u of personaRefs) images.push(await fetchImageInline(u));
+
+    const { image_data_url: imageDataUrl, usage } = images.length
+      ? await vertexPredictImagenCapability({
+          prompt: [imageRoleClause({ hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length }), finalPrompt].filter(Boolean).join(' '),
+          negativePrompt: built.negativePrompt,
+          aspectRatio: built.aspectRatio,
+          images,
+        })
+      : await vertexPredictImagen({
+          prompt:         finalPrompt,
+          negativePrompt: built.negativePrompt,
+          aspectRatio:    built.aspectRatio,
+        });
 
     res.status(200).json({
       output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
@@ -1017,6 +1299,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // content-run-stage vía execLab): modelo real + usage crudo de Vertex (o null).
       model:          GEMINI_IMAGE_MODEL,
       usage,
+      // BRIEF-IMG-01 fase 2 — el prompt ENTERO con el que nació esta imagen, SIEMPRE, sintetizado o
+      // no. Sin esto no hay forma de regenerar «con todo el prompt + la corrección».
+      prompt_full:            finalPrompt,
+      prompt_builder_version: builder?.version ?? null,
+      prompt_builder_model:   builder?.model ?? null,
+      prompt_builder_usage:   builder?.usage ?? null,
+      generation_mode:        mode,
+      persona_used:           personaUsed,
+      reference_images:       images.length,
       status:         'ok',
     });
   } catch (err) {
