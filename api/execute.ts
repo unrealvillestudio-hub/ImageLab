@@ -445,6 +445,26 @@ const DISTINCT_SUBJECTS_CLAUSE =
   'individual: different facial structure, age range, skin tone and hair. Never repeat the same ' +
   'face, and never render two people who read as the same person';
 
+// ── UNA SOLA IMAGEN, UN SOLO MOMENTO — nunca paneles ──
+//
+// MEDIDO EN PRODUCCIÓN (2026-09-25): 3 de 11 imágenes de prueba salieron partidas en dos paneles
+// («antes / después», «la misma mujer por la mañana y por la tarde»). Sam: «el panel partido no me
+// gusta, complica la imagen». No lo pedía sólo el estímulo PSY-CONTRAST: tras corregir su texto
+// (migración 20260925130000) el CONSTRUCTOR volvió a escribir «lado izquierdo… lado derecho, la misma
+// mujer más tarde», porque el copy narraba dos momentos. Por eso es cláusula del MOTOR, no de un dato:
+// ninguna marca quiere un díptico que se lee como collage, y la regla tiene que sobrevivir a cualquier
+// copy, estímulo o síntesis. Nombre por la FUNCIÓN (un solo encuadre), no por el caso.
+//
+// POSICIÓN: detrás de DISTINCT_SUBJECTS_CLAUSE. Las dos primeras definen qué clase de imagen es y quién
+// aparece; ésta define cuántos encuadres hay.
+const SINGLE_FRAME_CLAUSE =
+  'The image is ONE single photograph of ONE moment, in ONE continuous frame: never a split screen, ' +
+  'diptych, triptych, collage, grid, side-by-side or before-and-after panels, and never the same ' +
+  'person shown twice. If the idea contrasts two states, show the contrast inside that single scene';
+const SINGLE_FRAME_NEGATIVE =
+  'split screen, diptych, triptych, collage, grid layout, side-by-side panels, before and after panels, ' +
+  'picture in picture, same person twice';
+
 export interface VisualSpec {
   // Ejes que viven en los dos niveles. Valor efectivo tras la fusión.
   ejes: Record<string, string>;
@@ -513,7 +533,7 @@ export function mergeVisualSpec(
   // BRIEF 7 — el eje va PRIMERO y siempre: el negativo del motor no depende de que una marca lo
   // haya declarado. El dedup por término de abajo hace que una marca que ya prohibía "text" (hoy:
   // NeuroneSCF, VivoseMask, VizosCosmetics, UnrealvilleStudio, LucienSael) no lo duplique.
-  const negParts: string[] = [NO_TEXT_NEGATIVE];
+  const negParts: string[] = [NO_TEXT_NEGATIVE, SINGLE_FRAME_NEGATIVE];
   const forbidden = Array.isArray(ep.forbidden_elements) ? ep.forbidden_elements.join(', ')
     : (typeof ep.forbidden_elements === 'string' ? ep.forbidden_elements : '');
   if (forbidden)                     negParts.push(forbidden);
@@ -572,6 +592,8 @@ export function composeVisualPrompt(
   // BRIEF-N06 — tercera posición, detrás de la cláusula sin texto y delante de todo lo demás: es
   // del motor igual que aquélla, y sale aunque no haya marca, preset ni concepto.
   p.push(`${DISTINCT_SUBJECTS_CLAUSE}.`);
+  // Un solo encuadre: detrás de los sujetos distintos, delante de todo lo demás. Es del motor.
+  p.push(`${SINGLE_FRAME_CLAUSE}.`);
   // BRIEF-N06 — la directriz del DOMINIO. Es INSTANCIA: el motor no sabe qué dice ni la interpreta,
   // sólo la transporta. Llega de `intel.brand_topics.visual_directive` por el cable del carril. Va
   // aquí porque describe QUÉ muestra la escena, y los generadores pesan más lo que viene primero;
@@ -1250,7 +1272,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
-      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE]);
+      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
     }

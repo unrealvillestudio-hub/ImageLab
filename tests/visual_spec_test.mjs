@@ -271,4 +271,23 @@ const PSY_AUTHORITY = {
     'la directriz SUMA, no sustituye');
 }
 
-console.log('✅ visual_spec_test — 11 bloques OK');
+// ── 12 · UN SOLO ENCUADRE (2026-09-25) — nunca paneles, en todo prompt y todo negativo ──
+{
+  const spec = M.mergeVisualSpec(LUCIEN, null, GLOBAL_TIKTOK, PSY_AUTHORITY);
+  const p = M.composeVisualPrompt(spec, 'concepto de prueba');
+  assert.match(p, /ONE single photograph of ONE moment/, 'la cláusula de encuadre único va en todo prompt');
+  assert.ok(p.indexOf('visibly different individual') < p.indexOf('ONE single photograph'),
+    'va detrás de la cláusula de sujetos distintos');
+  assert.ok(p.indexOf('ONE single photograph') < p.indexOf('Brand visual identity:'), 'y delante del estilo de marca');
+  for (const t of ['split screen', 'diptych', 'before and after panels']) {
+    assert.ok(spec.negative.includes(t), `el negativo del motor prohíbe «${t}» aunque ninguna marca lo declare`);
+  }
+  const vacio = M.mergeVisualSpec(null, null, null, null);
+  assert.ok(vacio.negative.includes('diptych'), 'sin marca ni preset, el negativo del motor sigue ahí');
+  const cl = (source.match(/const SINGLE_FRAME_CLAUSE =[\s\S]*?;\n/) ?? [''])[0];
+  for (const caso of ['PSY', 'CONTRAST', 'Neurone', 'frizz']) assert.ok(!cl.includes(caso), `la cláusula nombra el caso '${caso}'`);
+  assert.match(source, /enforceEngineClauses\(synth\.text, \[NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE\]\)/,
+    'la síntesis del constructor no puede quitarla');
+}
+
+console.log('✅ visual_spec_test — 12 bloques OK');
