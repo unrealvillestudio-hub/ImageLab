@@ -134,6 +134,7 @@ interface ExecuteRequest {
     prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
     location?: PromptLocation | null;    // dato de `public.location_blueprints`, resuelto por el carril
     product_composited?: boolean;        // el compositor pegará el PNG real: el modelo no dibuja producto
+    product?: PromptProduct | null;      // opción (c): el producto se PINTA desde su foto y a su tamaño
   };
   previousOutputs: Record<string, string>;
 }
@@ -214,10 +215,21 @@ async function fetchImageInline(url: string): Promise<InlineImage> {
   return { mimeType, data: buf.toString('base64') };
 }
 
+/** Cómo entra el producto a la imagen para esta marca: DATO en `imagelab_overlay_tokens.product.mode`.
+ *  `composite` = lo pega el compositor; cualquier otro valor o ausencia = se pinta en la escena (opción c). */
+async function loadProductMode(brandId: string | undefined): Promise<'composite' | 'in_scene'> {
+  if (!brandId) return 'in_scene';
+  const row = await sb<any>(`imagelab_overlay_tokens?brand_id=eq.${encodeURIComponent(brandId)}&canal=is.null&select=tokens`);
+  return row?.tokens?.product?.mode === 'composite' ? 'composite' : 'in_scene';
+}
+
 /** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
 const MAX_PERSONA_REFS = 3;
 /** Tope de fotos de locación por llamada: dos ángulos bastan para anclar el lugar. */
-const MAX_LOCATION_REFS = 2;
+const MAX_LOCATION_REFS = 1;
+/** Con lugar o producto, la persona viaja con 2 fotos: más fotos adjuntas empujan al modelo al collage. */
+const MAX_PERSONA_REFS_WITH_OTHERS = 2;
+const MAX_PRODUCT_REFS = 2;
 
 /**
  * Lector de PostgREST. Devuelve la primera fila, o `null`.
@@ -671,6 +683,29 @@ export interface PromptLocation {
   reference_image_urls?: string[];
 }
 
+/** Un producto REAL que aparece en la escena (opción (c), Sam 2026-09-27): el generador lo PINTA a partir
+ *  de su foto real y a su tamaño físico. Llega resuelto por el carril desde la ficha del producto. */
+export interface PromptProduct {
+  name: string;
+  items: Array<{ name: string; image_url: string; height_cm?: number | null; width_cm?: number | null }>;
+}
+
+/** Referencia humana para la escala: el alto medio de una cara adulta, del nacimiento del pelo al mentón. */
+export const FACE_HEIGHT_CM = 18.5;
+
+/** Una línea de tamaño por envase, en cm y en «caras»: el modelo entiende mejor la proporción con una persona. */
+export function productSizeLine(it: { name: string; height_cm?: number | null; width_cm?: number | null }): string {
+  const h = Number(it.height_cm); const w = Number(it.width_cm);
+  if (!Number.isFinite(h) || h <= 0) return `"${it.name}": keep its real proportions relative to a human hand`;
+  const faces = Math.round((h / FACE_HEIGHT_CM) * 10) / 10;
+  return `"${it.name}": about ${h} cm tall${Number.isFinite(w) && w > 0 ? ` and ${w} cm wide` : ''} (about ${faces}× the height of an adult face)`;
+}
+
+/** Las referencias son REFERENCIAS, no capas. Medido el 2026-09-27: con 5 fotos adjuntas (persona recortada
+ *  con alfa + lugar), el modelo pegó las fotos en collage en vez de pintar una escena nueva. */
+export const REFERENCE_PHOTOS_CLAUSE =
+  'The attached photos are references only (identity, place, product). Paint ONE new photograph from scratch: never cut out, paste, collage or reuse any reference photo as a layer or as the background';
+
 /** La orden al modelo cuando el PRODUCTO se pega después por código (compositor, capa de producto):
  *  un frasco inventado al lado del real sería dos productos, y el inventado siempre miente. */
 export const PRODUCT_COMPOSITED_CLAUSE =
@@ -687,6 +722,7 @@ export interface PromptBuilderInput {
   mode?: GenerationMode | null;
   location?: PromptLocation | null;
   productComposited?: boolean;
+  product?: PromptProduct | null;
 }
 
 /** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
@@ -753,7 +789,13 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `do not invent another place:\n${input.location.description.trim()}`,
     );
   }
-  if (input.productComposited) parts.push(`PRODUCT:\n${PRODUCT_COMPOSITED_CLAUSE}.`);
+  if (input.product?.items?.length) {
+    parts.push(
+      `PRODUCT — the real packaging of ${input.product.items.map((i) => `"${i.name}"`).join(', ')} appears in the scene` +
+      ' (held in a hand or placed naturally on a surface), reproduced faithfully from the attached product photo(s): same shape, colours and label layout.' +
+      ` Real physical size — ${input.product.items.map(productSizeLine).join('; ')}. Do not add any other product or packaging.`,
+    );
+  } else if (input.productComposited) parts.push(`PRODUCT:\n${PRODUCT_COMPOSITED_CLAUSE}.`);
   return parts.join('\n\n');
 }
 
@@ -772,16 +814,19 @@ export function enforceEngineClauses(synth: string, clauses: string[]): string {
 export function imageRoleClause(args: {
   hasSource: boolean; personaName?: string | null; personaRefs: number;
   locationName?: string | null; locationRefs?: number;
+  productNames?: string[] | null; productRefs?: number;
 }): string {
   const c: string[] = [];
   const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
   const perRefs = args.personaName ? Math.max(0, args.personaRefs) : 0;
+  const prodRefs = args.productNames?.length ? Math.max(0, args.productRefs ?? 0) : 0;
+  if (perRefs + locRefs + prodRefs > 0) c.push(`${REFERENCE_PHOTOS_CLAUSE}.`);
   if (args.hasSource) {
     c.push('The FIRST attached image is the current version of this image: edit it. Keep its composition, subjects, lighting and style, and change only what the instructions ask for.');
   }
   // Sin locación, la redacción de siempre. Con locación, las imágenes se nombran por POSICIÓN: el
   // modelo no tiene otra forma de saber cuál es la persona y cuál el lugar.
-  if (!locRefs) {
+  if (!locRefs && !prodRefs) {
     if (perRefs > 0) {
       const which = args.hasSource ? 'The other attached image(s)' : 'The attached image(s)';
       c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
@@ -794,7 +839,13 @@ export function imageRoleClause(args: {
     c.push(`${span(perRefs)} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
     at += perRefs;
   }
-  c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there and keep its architecture, materials, colours and layout. Do not copy any person from those photos.`);
+  if (locRefs > 0) {
+    c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there and keep its architecture, materials, colours and layout. Do not copy any person from those photos.`);
+    at += locRefs;
+  }
+  if (prodRefs > 0) {
+    c.push(`${span(prodRefs)} show the real product packaging (${args.productNames!.join(', ')}): paint it into the scene at its real size, faithful to that photo.`);
+  }
   return c.join(' ');
 }
 // ── PB:END ──
@@ -1295,7 +1346,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const location: PromptLocation | null =
       params.location && typeof params.location.name === 'string' && typeof params.location.description === 'string'
         ? params.location as PromptLocation : null;
-    const productComposited = params.product_composited === true;
+    // Opción (c) (Sam, 2026-09-27): el producto se PINTA en la escena. Sólo se pega por código si la
+    // marca lo declara (`imagelab_overlay_tokens.product.mode = 'composite'`), y entonces no se pinta.
+    const productIn: PromptProduct | null =
+      params.product && Array.isArray(params.product.items) && params.product.items.length
+        ? { name: String(params.product.name ?? ''), items: params.product.items.filter((i: any) => i && typeof i.image_url === 'string' && /^https?:\/\//.test(i.image_url)) }
+        : null;
+    const productMode = productIn ? await loadProductMode(request.brandId) : null;
+    const productComposited = params.product_composited === true || productMode === 'composite';
+    const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
 
     let finalPrompt = built.prompt;
@@ -1322,17 +1381,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           mode,
           location,
           productComposited,
+          product: productInScene,
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE,
-        ...(productComposited ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
+        ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
     }
 
     // Sin síntesis, la orden de no dibujar producto también viaja: la capa la pega el compositor igual.
-    if (!builder && productComposited) finalPrompt = enforceEngineClauses(finalPrompt, [PRODUCT_COMPOSITED_CLAUSE]);
+    if (!builder && productComposited && !productInScene) finalPrompt = enforceEngineClauses(finalPrompt, [PRODUCT_COMPOSITED_CLAUSE]);
 
     // Medición en seco: el prompt y su coste, sin pagar una imagen.
     if (params.prompt_only === true) {
@@ -1351,16 +1411,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // Las imágenes que acompañan al prompt: la actual (editar) y las de la persona, si se la nombra.
     const images: InlineImage[] = [];
     if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
-    const personaRefs = personaUsed ? (persona?.reference_image_urls ?? []).slice(0, MAX_PERSONA_REFS) : [];
-    for (const u of personaRefs) images.push(await fetchImageInline(u));
     const locationRefs = location ? (location.reference_image_urls ?? []).filter((u) => /^https?:\/\//.test(u)).slice(0, MAX_LOCATION_REFS) : [];
+    const productRefs = productInScene ? productInScene.items.map((i) => i.image_url).slice(0, MAX_PRODUCT_REFS) : [];
+    const personaCap = locationRefs.length || productRefs.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
+    const personaRefs = personaUsed ? (persona?.reference_image_urls ?? []).slice(0, personaCap) : [];
+    for (const u of personaRefs) images.push(await fetchImageInline(u));
     for (const u of locationRefs) images.push(await fetchImageInline(u));
+    for (const u of productRefs) images.push(await fetchImageInline(u));
 
     const { image_data_url: imageDataUrl, usage } = images.length
       ? await vertexPredictImagenCapability({
           prompt: [imageRoleClause({
             hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
             locationName: location?.name ?? null, locationRefs: locationRefs.length,
+            productNames: productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+            productRefs: productRefs.length,
           }), finalPrompt].filter(Boolean).join(' '),
           negativePrompt: built.negativePrompt,
           aspectRatio: built.aspectRatio,
@@ -1393,7 +1458,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       persona_used:           personaUsed,
       location_used:          location ? location.name : null,
       location_refs:          locationRefs.length,
-      product_composited:     productComposited,
+      product_composited:     productComposited && !productInScene,
+      product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+      product_refs:           productRefs.length,
       reference_images:       images.length,
       status:         'ok',
     });

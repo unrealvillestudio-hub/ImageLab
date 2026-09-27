@@ -58,7 +58,7 @@ declare const process: { env: Record<string, string | undefined> };
 
 // La versión viaja al eco de la pieza (`builder_meta.image.compositor_version`). Sube cuando cambia
 // lo que el compositor DIBUJA — no cuando cambia un token de marca (eso es dato) ni un comentario.
-export const COMPOSITOR_VERSION = '1.1.0';
+export const COMPOSITOR_VERSION = '1.2.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -393,7 +393,8 @@ export function resolveOverlayStyle(args: {
 // igual que no redibuja el titular. Misma disciplina que el resto del bloque: la POSICIÓN y el TAMAÑO
 // son dato de la marca (`tokens.product`); el motor sólo sabe de anclas y porcentajes.
 //
-//   tokens.product = { anchor, height_pct, margin_pct, max_items?, overlap_pct? }
+//   tokens.product = { mode: 'composite', anchor, height_pct, margin_pct, max_items?, overlap_pct? }
+//   (sin `mode: 'composite'` el producto NO se pega: lo pinta el generador — opción (c), 2026-09-27)
 //
 // · Ausente ⇒ la marca no compone producto: se omite con marcador, la escena sale como antes.
 // · Declarada a medias ⇒ falla nombrando, como la tipografía.
@@ -411,6 +412,12 @@ export function resolveProductLayer(args: {
   const tok = (args.tokens ?? {}).product as Record<string, any> | undefined;
   if (!tok || Object.keys(tok).length === 0) {
     markers.push('PRODUCT_LAYER_NOT_DECLARED: llegaron productos pero la marca no declara tokens.product; se compone sin producto');
+    return { layer: null, markers };
+  }
+  // Opción (c) (Sam, 2026-09-27): por defecto el producto lo PINTA el generador en la escena, a su
+  // tamaño real. El compositor sólo lo pega si la marca lo pide explícitamente con `mode: 'composite'`.
+  if (tok.mode !== 'composite') {
+    markers.push(`PRODUCT_IN_SCENE: la marca declara product.mode='${tok.mode ?? '∅'}' — el producto va pintado en la escena, no se pega`);
     return { layer: null, markers };
   }
   const missing: string[] = [];

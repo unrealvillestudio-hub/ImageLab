@@ -92,7 +92,7 @@ ok('imageRoleClause', () => {
   assert.ok(M.imageRoleClause({ hasSource: true, personaName: null, personaRefs: 0 }).startsWith('The FIRST attached image'));
   const both = M.imageRoleClause({ hasSource: true, personaName: 'P', personaRefs: 2 });
   assert.ok(both.includes('The other attached image(s) show P'));
-  assert.ok(M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 }).startsWith('The attached image(s) show P'));
+  assert.ok(M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 }).includes('The attached image(s) show P'));
 });
 
 // 6b · LOCACIÓN y PRODUCTO (2026-09-27)
@@ -101,7 +101,7 @@ ok('imageRoleClause con locación nombra las imágenes por posición', () => {
   assert.ok(all.includes('Attached images 2 to 4 show P'));
   assert.ok(all.includes('Attached images 5 to 6 show the real place "Lugar X"'));
   const solo = M.imageRoleClause({ hasSource: false, personaName: null, personaRefs: 0, locationName: 'Lugar X', locationRefs: 1 });
-  assert.ok(solo.startsWith('Attached image 1 show the real place "Lugar X"'));
+  assert.ok(solo.includes('Attached image 1 show the real place "Lugar X"'));
   assert.ok(solo.includes('Do not copy any person'));
   // sin locación, la redacción de siempre (compatibilidad)
   assert.equal(M.imageRoleClause({ hasSource: true, personaName: 'P', personaRefs: 2, locationName: 'L', locationRefs: 0 }),
@@ -119,6 +119,29 @@ ok('buildBuilderUserMessage lleva la locación y el aviso de producto sólo si l
 ok('la cláusula de producto sobrevive a la síntesis (enforceEngineClauses)', () => {
   const out = M.enforceEngineClauses('una escena', [M.PRODUCT_COMPOSITED_CLAUSE]);
   assert.ok(out.startsWith(M.PRODUCT_COMPOSITED_CLAUSE));
+});
+
+// 6c · OPCIÓN (c) — el producto se pinta en la escena, a su tamaño real
+ok('productSizeLine da cm y caras; sin medida, pide proporción con la mano', () => {
+  assert.equal(M.productSizeLine({ name: 'P', height_cm: 24, width_cm: 8.5 }), '"P": about 24 cm tall and 8.5 cm wide (about 1.3× the height of an adult face)');
+  assert.ok(M.productSizeLine({ name: 'P' }).includes('relative to a human hand'));
+});
+ok('buildBuilderUserMessage: con producto en escena manda tamaño y NO la cláusula de pegado', () => {
+  const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'c', productComposited: true,
+    product: { name: 'Kit', items: [{ name: 'P1', image_url: 'https://x/p1.png', height_cm: 24, width_cm: 8.5 }] } });
+  assert.ok(msg.includes('PRODUCT — the real packaging of "P1" appears in the scene'));
+  assert.ok(msg.includes('about 24 cm tall'));
+  assert.ok(!msg.includes(M.PRODUCT_COMPOSITED_CLAUSE));
+});
+ok('imageRoleClause: anti-collage siempre que hay referencias, y producto por posición', () => {
+  const c = M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 2, locationName: 'L', locationRefs: 1, productNames: ['X'], productRefs: 1 });
+  assert.ok(c.startsWith(M.REFERENCE_PHOTOS_CLAUSE));
+  assert.ok(c.includes('Attached images 1 to 2 show P'));
+  assert.ok(c.includes('Attached image 3 show the real place "L"'));
+  assert.ok(c.includes('Attached image 4 show the real product packaging (X)'));
+  const soloPersona = M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 });
+  assert.ok(soloPersona.includes(M.REFERENCE_PHOTOS_CLAUSE) && soloPersona.includes('The attached image(s) show P'));
+  assert.equal(M.imageRoleClause({ hasSource: false, personaName: null, personaRefs: 0 }), '');
 });
 
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
