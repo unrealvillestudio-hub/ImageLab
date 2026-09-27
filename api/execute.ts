@@ -132,6 +132,8 @@ interface ExecuteRequest {
     generation_mode?: GenerationMode;    // 'edit_from_current' exige `source_image_url`
     source_image_url?: string;           // la imagen actual, para editar en vez de repintar
     prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
+    location?: PromptLocation | null;    // dato de `public.location_blueprints`, resuelto por el carril
+    product_composited?: boolean;        // el compositor pegará el PNG real: el modelo no dibuja producto
   };
   previousOutputs: Record<string, string>;
 }
@@ -214,6 +216,8 @@ async function fetchImageInline(url: string): Promise<InlineImage> {
 
 /** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
 const MAX_PERSONA_REFS = 3;
+/** Tope de fotos de locación por llamada: dos ángulos bastan para anclar el lugar. */
+const MAX_LOCATION_REFS = 2;
 
 /**
  * Lector de PostgREST. Devuelve la primera fila, o `null`.
@@ -659,6 +663,19 @@ export interface PromptPersona {
   reference_image_urls?: string[];
 }
 
+/** Una locación real de la marca (`public.location_blueprints`, enlazada por `public.brand_locations`).
+ *  Llega resuelta por el carril: acá no se decide cuál, sólo cómo se cuenta al modelo. */
+export interface PromptLocation {
+  name: string;
+  description: string;
+  reference_image_urls?: string[];
+}
+
+/** La orden al modelo cuando el PRODUCTO se pega después por código (compositor, capa de producto):
+ *  un frasco inventado al lado del real sería dos productos, y el inventado siempre miente. */
+export const PRODUCT_COMPOSITED_CLAUSE =
+  'A photo of the real product will be composited onto this image later, by code: do NOT draw any product, bottle, jar, tube, box, packaging or label anywhere in the scene';
+
 export interface PromptBuilderInput {
   basePrompt: string;
   copyFull: string;
@@ -668,6 +685,8 @@ export interface PromptBuilderInput {
   directives?: string[];
   persona?: PromptPersona | null;
   mode?: GenerationMode | null;
+  location?: PromptLocation | null;
+  productComposited?: boolean;
 }
 
 /** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
@@ -726,6 +745,15 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
   }
+  if (input.location?.name?.trim() && input.location.description?.trim()) {
+    const refs = (input.location.reference_image_urls ?? []).length;
+    parts.push(
+      `LOCATION — the scene takes place at "${input.location.name.trim()}", a real place of this brand` +
+      `${refs ? ' shown in the attached location photo(s)' : ''}. Keep its architecture, materials, colours and layout; ` +
+      `do not invent another place:\n${input.location.description.trim()}`,
+    );
+  }
+  if (input.productComposited) parts.push(`PRODUCT:\n${PRODUCT_COMPOSITED_CLAUSE}.`);
   return parts.join('\n\n');
 }
 
@@ -741,15 +769,32 @@ export function enforceEngineClauses(synth: string, clauses: string[]): string {
 }
 
 /** Rol de las imágenes adjuntas, en lenguaje natural: Gemini-image no tiene bindings de tipo. */
-export function imageRoleClause(args: { hasSource: boolean; personaName?: string | null; personaRefs: number }): string {
+export function imageRoleClause(args: {
+  hasSource: boolean; personaName?: string | null; personaRefs: number;
+  locationName?: string | null; locationRefs?: number;
+}): string {
   const c: string[] = [];
+  const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
+  const perRefs = args.personaName ? Math.max(0, args.personaRefs) : 0;
   if (args.hasSource) {
     c.push('The FIRST attached image is the current version of this image: edit it. Keep its composition, subjects, lighting and style, and change only what the instructions ask for.');
   }
-  if (args.personaName && args.personaRefs > 0) {
-    const which = args.hasSource ? 'The other attached image(s)' : 'The attached image(s)';
-    c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+  // Sin locación, la redacción de siempre. Con locación, las imágenes se nombran por POSICIÓN: el
+  // modelo no tiene otra forma de saber cuál es la persona y cuál el lugar.
+  if (!locRefs) {
+    if (perRefs > 0) {
+      const which = args.hasSource ? 'The other attached image(s)' : 'The attached image(s)';
+      c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+    }
+    return c.join(' ');
   }
+  let at = args.hasSource ? 2 : 1;
+  const span = (n: number) => (n === 1 ? `Attached image ${at}` : `Attached images ${at} to ${at + n - 1}`);
+  if (perRefs > 0) {
+    c.push(`${span(perRefs)} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+    at += perRefs;
+  }
+  c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there and keep its architecture, materials, colours and layout. Do not copy any person from those photos.`);
   return c.join(' ');
 }
 // ── PB:END ──
@@ -1245,6 +1290,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     const directives = normalizeDirectives(params.visual_directives);
     const persona = params.persona ?? null;
+    // Locación y producto: DATO resuelto por el carril. La locación viaja con sus fotos; el producto
+    // sólo como aviso, porque su PNG real lo pega el compositor después.
+    const location: PromptLocation | null =
+      params.location && typeof params.location.name === 'string' && typeof params.location.description === 'string'
+        ? params.location as PromptLocation : null;
+    const productComposited = params.product_composited === true;
     const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
 
     let finalPrompt = built.prompt;
@@ -1269,13 +1320,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           directives,
           persona,
           mode,
+          location,
+          productComposited,
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
-      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE]);
+      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE,
+        ...(productComposited ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
     }
+
+    // Sin síntesis, la orden de no dibujar producto también viaja: la capa la pega el compositor igual.
+    if (!builder && productComposited) finalPrompt = enforceEngineClauses(finalPrompt, [PRODUCT_COMPOSITED_CLAUSE]);
 
     // Medición en seco: el prompt y su coste, sin pagar una imagen.
     if (params.prompt_only === true) {
@@ -1296,10 +1353,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
     const personaRefs = personaUsed ? (persona?.reference_image_urls ?? []).slice(0, MAX_PERSONA_REFS) : [];
     for (const u of personaRefs) images.push(await fetchImageInline(u));
+    const locationRefs = location ? (location.reference_image_urls ?? []).filter((u) => /^https?:\/\//.test(u)).slice(0, MAX_LOCATION_REFS) : [];
+    for (const u of locationRefs) images.push(await fetchImageInline(u));
 
     const { image_data_url: imageDataUrl, usage } = images.length
       ? await vertexPredictImagenCapability({
-          prompt: [imageRoleClause({ hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length }), finalPrompt].filter(Boolean).join(' '),
+          prompt: [imageRoleClause({
+            hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
+            locationName: location?.name ?? null, locationRefs: locationRefs.length,
+          }), finalPrompt].filter(Boolean).join(' '),
           negativePrompt: built.negativePrompt,
           aspectRatio: built.aspectRatio,
           images,
@@ -1329,6 +1391,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       prompt_builder_usage:   builder?.usage ?? null,
       generation_mode:        mode,
       persona_used:           personaUsed,
+      location_used:          location ? location.name : null,
+      location_refs:          locationRefs.length,
+      product_composited:     productComposited,
       reference_images:       images.length,
       status:         'ok',
     });

@@ -39,7 +39,8 @@
  *
  * CONTRATO
  *   POST /api/compose
- *   { brand_id, canal?, image_url? | image_data_url?, headline, subheadline?, piece_id? }
+ *   { brand_id, canal?, image_url? | image_data_url?, headline, subheadline?, piece_id?,
+ *     products?: [{ image_url, name? }] }   ← capa de producto (2026-09-27), PNG real con alfa
  *   → 200 { status:'ok', image_data_url, compositor_version, tokens_source, width, height,
  *           fonts:[…], markers:[…], text:{ headline, subheadline } }
  *   → 4xx/5xx { error, error_label, status:'error' }  ← `error_label` es lo que lee execLab.
@@ -57,7 +58,7 @@ declare const process: { env: Record<string, string | undefined> };
 
 // La versión viaja al eco de la pieza (`builder_meta.image.compositor_version`). Sube cuando cambia
 // lo que el compositor DIBUJA — no cuando cambia un token de marca (eso es dato) ni un comentario.
-export const COMPOSITOR_VERSION = '1.0.0';
+export const COMPOSITOR_VERSION = '1.1.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -387,6 +388,49 @@ export function resolveOverlayStyle(args: {
   };
 }
 
+// ── CAPA DE PRODUCTO (2026-09-27) ──────────────────────────────────────────────────────────────
+// El PNG REAL del producto, pegado por código sobre la escena limpia: el generador no lo redibuja,
+// igual que no redibuja el titular. Misma disciplina que el resto del bloque: la POSICIÓN y el TAMAÑO
+// son dato de la marca (`tokens.product`); el motor sólo sabe de anclas y porcentajes.
+//
+//   tokens.product = { anchor, height_pct, margin_pct, max_items?, overlap_pct? }
+//
+// · Ausente ⇒ la marca no compone producto: se omite con marcador, la escena sale como antes.
+// · Declarada a medias ⇒ falla nombrando, como la tipografía.
+// · Misma ancla que el titular ⇒ falla: dos capas en la misma esquina se tapan, y esa colisión no se
+//   resuelve "aproximadamente".
+// Un kit llega como VARIOS productos (sus componentes): se dibujan en fila, solapados `overlap_pct`
+// sobre su propio ancho, hasta `max_items`.
+export interface ProductImageIn { src: string; width: number; height: number; name?: string | null }
+
+export function resolveProductLayer(args: {
+  tokens: Record<string, any>; textAnchor: string | null; count: number;
+}): { layer: null | { anchor: string; heightPct: number; marginPct: number; maxItems: number; overlapPct: number }; markers: string[] } {
+  const markers: string[] = [];
+  if (!args.count) return { layer: null, markers };
+  const tok = (args.tokens ?? {}).product as Record<string, any> | undefined;
+  if (!tok || Object.keys(tok).length === 0) {
+    markers.push('PRODUCT_LAYER_NOT_DECLARED: llegaron productos pero la marca no declara tokens.product; se compone sin producto');
+    return { layer: null, markers };
+  }
+  const missing: string[] = [];
+  const anchor = String(tok.anchor ?? '');
+  if (!ANCHORS[anchor]) missing.push(`product.anchor='${anchor || '∅'}' (válidos: ${Object.keys(ANCHORS).join(', ')})`);
+  else if (args.textAnchor && anchor === args.textAnchor) missing.push(`product.anchor='${anchor}' coincide con layout.anchor del titular: las dos capas se taparían`);
+  const heightPct = Number(tok.height_pct);
+  if (!Number.isFinite(heightPct) || heightPct <= 0 || heightPct > 100) missing.push('product.height_pct');
+  const marginPct = Number(tok.margin_pct);
+  if (!Number.isFinite(marginPct) || marginPct < 0) missing.push('product.margin_pct');
+  if (missing.length) {
+    throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
+      `faltan datos de marca para la capa de producto: ${missing.join(' · ')}.`);
+  }
+  const maxItems = Math.max(1, Math.floor(Number(tok.max_items ?? 1)));
+  const overlapPct = Math.min(90, Math.max(0, Number(tok.overlap_pct ?? 0)));
+  if (args.count > maxItems) markers.push(`PRODUCT_LAYER_TRIMMED: llegaron ${args.count} productos y la marca compone hasta ${maxItems}; se dibujan los primeros`);
+  return { layer: { anchor, heightPct, marginPct, maxItems, overlapPct }, markers };
+}
+
 /**
  * La escena que come satori: un árbol JSON plano (`{type, props}`), sin JSX y sin dependencias.
  * Función PURA de (estilo, dimensiones, fondo) — misma entrada ⇒ mismo árbol, clave por clave.
@@ -398,6 +442,8 @@ export function resolveOverlayStyle(args: {
 export function buildOverlayScene(args: {
   style: ReturnType<typeof resolveOverlayStyle>;
   width: number; height: number; backgroundSrc: string;
+  products?: ProductImageIn[];
+  productLayer?: ReturnType<typeof resolveProductLayer>['layer'];
 }): Record<string, any> {
   const { style, width, height, backgroundSrc } = args;
   const px = (pct: number, base: number) => Math.round((pct / 100) * base * 100) / 100;
@@ -454,6 +500,42 @@ export function buildOverlayScene(args: {
             ? { top: 0, height, width: thickness, ...(style.identity.mode === 'edge_left' ? { left: 0 } : { right: 0 }) }
             : { left: 0, width, height: thickness, bottom: 0 }),
         },
+      },
+    });
+  }
+
+  // CAPA DE PRODUCTO — encima del velo y del sello, debajo del texto. El alto sale del ALTO de la
+  // escena (un frasco se mide de pie); el ancho, del aspecto REAL del PNG: nunca se deforma.
+  const pl = args.productLayer ?? null;
+  const prods = (args.products ?? []).slice(0, pl?.maxItems ?? 0);
+  if (pl && prods.length) {
+    const pa = ANCHORS[pl.anchor];
+    const h = px(pl.heightPct, height);
+    children.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', top: 0, left: 0, width, height,
+          display: 'flex', flexDirection: 'row',
+          justifyContent: pa.x, alignItems: pa.y,
+          padding: px(pl.marginPct, width),
+        },
+        children: [{
+          type: 'div',
+          props: {
+            style: { display: 'flex', flexDirection: 'row', alignItems: 'flex-end' },
+            children: prods.map((p, k) => {
+              const w = Math.round((h * p.width / p.height) * 100) / 100;
+              return {
+                type: 'img',
+                props: {
+                  src: p.src, width: w, height: h,
+                  style: { width: w, height: h, ...(k > 0 ? { marginLeft: -Math.round((pl.overlapPct / 100) * w) } : {}) },
+                },
+              };
+            }),
+          },
+        }],
       },
     });
   }
@@ -725,6 +807,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       style.markers.push('OVERLAY_SEALED_WITHOUT_TITLE: se compuso la franja de identidad sin titular; recomponer cuando la pieza tenga título (no hace falta regenerar la escena)');
     }
 
+    // CAPA DE PRODUCTO — `products: [{ image_url, name? }]`. Lo resuelve el carril desde la ficha
+    // (`product_blueprints`); acá sólo se baja, se mide y se pega.
+    const productsIn = (Array.isArray(body.products) ? body.products : [])
+      .filter((p: any) => p && typeof p.image_url === 'string' && /^https?:\/\//.test(p.image_url));
+    const prodPick = resolveProductLayer({ tokens: picked.tokens, textAnchor: style.slots.headline ? style.layout.anchor : null, count: productsIn.length });
+    style.markers.push(...prodPick.markers);
+    const productImgs: ProductImageIn[] = [];
+    if (prodPick.layer) {
+      for (const p of productsIn.slice(0, prodPick.layer.maxItems)) {
+        const bytes = await fetchBytes(String(p.image_url), 'COMPOSITOR_PRODUCT_FETCH_FAILED');
+        const d = imageDimensions(bytes);
+        if (d.mime !== 'image/png') style.markers.push(`PRODUCT_NOT_PNG: ${String(p.image_url).slice(0, 120)} no es PNG — sin alfa se verá su fondo`);
+        productImgs.push({ src: `data:${d.mime};base64,${b64(bytes)}`, width: d.width, height: d.height, name: p.name ?? null });
+      }
+    }
+
     const cleanBytes = body.image_data_url
       ? dataUrlToBytes(String(body.image_data_url))
       : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
@@ -739,6 +837,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const scene = buildOverlayScene({
       style, width: dims.width, height: dims.height,
       backgroundSrc: `data:${dims.mime};base64,${b64(cleanBytes)}`,
+      products: productImgs, productLayer: prodPick.layer,
     });
 
     const svg = await satori(scene as any, {
@@ -752,6 +851,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       `tokens=${picked.source} (capas: ${picked.layers.join(' < ')}) ${dims.width}x${dims.height} ` +
       `fuentes=${fonts.map((f) => `${f.slot}:${f.name}@${f.weight}`).join(', ') || '∅ (sello sin titular)'} ` +
       `identidad=${style.identity ? style.identity.mode : 'ninguna'} ` +
+      `producto=${productImgs.length ? `${productImgs.length}@${prodPick.layer!.anchor}` : 'ninguno'} ` +
       `markers=${style.markers.length} ${Date.now() - t0}ms`,
     );
 
@@ -772,6 +872,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             short_side: Math.min(dims.width, dims.height) }
         : null,
       sealed_without_title: sealOnly,
+      // Eco de la capa de producto: qué se pegó y dónde. Sin esto no se puede auditar la imagen.
+      product_layer: prodPick.layer && productImgs.length
+        ? { anchor: prodPick.layer.anchor, height_pct: prodPick.layer.heightPct, items: productImgs.map((p) => p.name ?? null) }
+        : null,
       markers: style.markers,
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
       text: { headline, subheadline },

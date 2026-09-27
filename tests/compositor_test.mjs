@@ -34,7 +34,7 @@ const modPath = join(dir, 'compositor_block.mts');
 writeFileSync(modPath, `${source.slice(i, j + END.length)}\n`, 'utf8');
 const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
-  'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens']) {
+  'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
 
@@ -433,6 +433,55 @@ test('el velo usa el color de la marca con su alfa, degradado a transparente', (
   const st = M.resolveOverlayStyle({ tokens: TOK_UNRLVL.tokens, typography: TYPO_UNRLVL, palette: PAL_UNRLVL, text: TXT });
   const flat = JSON.stringify(M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x' }));
   assert.ok(flat.includes('linear-gradient(180deg, rgba(8, 8, 8, 0.86) 0%, rgba(8, 8, 8, 0) 100%)'));
+});
+
+console.log('\n── T7 · capa de producto: el PNG real, pegado por código ──');
+test('sin productos no hay capa ni marcador', () => {
+  const r = M.resolveProductLayer({ tokens: TOK_FPHS.tokens, textAnchor: 'bottom_left', count: 0 });
+  assert.equal(r.layer, null); assert.deepEqual(r.markers, []);
+});
+test('marca sin tokens.product → se compone sin producto, con marcador (no falla)', () => {
+  const r = M.resolveProductLayer({ tokens: TOK_FPHS.tokens, textAnchor: 'bottom_left', count: 1 });
+  assert.equal(r.layer, null);
+  assert.ok(r.markers.some((m) => m.startsWith('PRODUCT_LAYER_NOT_DECLARED')));
+});
+test('declarada a medias → falla nombrando lo que falta', () => {
+  const tokens = M.deepMergeTokens(TOK_FPHS.tokens, { product: { anchor: 'bottom_right' } });
+  assert.throws(() => M.resolveProductLayer({ tokens, textAnchor: 'bottom_left', count: 1 }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /product\.height_pct/.test(e.message) && /product\.margin_pct/.test(e.message));
+});
+test('misma ancla que el titular → falla: las capas se taparían', () => {
+  const tokens = M.deepMergeTokens(TOK_FPHS.tokens, { product: { anchor: 'bottom_left', height_pct: 40, margin_pct: 5 } });
+  assert.throws(() => M.resolveProductLayer({ tokens, textAnchor: 'bottom_left', count: 1 }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /coincide con layout\.anchor/.test(e.message));
+});
+test('kit: se recorta a max_items y se avisa', () => {
+  const tokens = M.deepMergeTokens(TOK_FPHS.tokens, { product: { anchor: 'bottom_right', height_pct: 40, margin_pct: 5, max_items: 3, overlap_pct: 20 } });
+  const r = M.resolveProductLayer({ tokens, textAnchor: 'bottom_left', count: 5 });
+  assert.equal(r.layer.maxItems, 3); assert.equal(r.layer.overlapPct, 20);
+  assert.ok(r.markers.some((m) => m.startsWith('PRODUCT_LAYER_TRIMMED')));
+});
+test('la escena pega el PNG con su aspecto REAL, al alto declarado, debajo del texto', () => {
+  const tokens = M.deepMergeTokens(TOK_FPHS.tokens, { product: { anchor: 'bottom_right', height_pct: 40, margin_pct: 5, max_items: 2, overlap_pct: 25 } });
+  const st = M.resolveOverlayStyle({ tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  const { layer } = M.resolveProductLayer({ tokens, textAnchor: st.layout.anchor, count: 2 });
+  const scene = M.buildOverlayScene({ style: st, width: 1000, height: 1250, backgroundSrc: 'bg',
+    products: [{ src: 'p1', width: 400, height: 1000 }, { src: 'p2', width: 500, height: 1000 }], productLayer: layer });
+  const flat = JSON.stringify(scene);
+  const i1 = flat.indexOf('"src":"p1"'); const i2 = flat.indexOf('"src":"p2"');
+  assert.ok(i1 > 0 && i2 > i1, 'los dos productos, en orden');
+  assert.ok(flat.includes('"width":200,"height":500'), 'p1: alto 40% de 1250 = 500; ancho por su aspecto 0,4 = 200');
+  assert.ok(flat.includes('"marginLeft":-63'), 'p2 (ancho 250) se solapa 25% = 62,5 → 63');
+  const kids = scene.props.children;
+  const prodIdx = kids.findIndex((c) => JSON.stringify(c).includes('"src":"p1"'));
+  const textIdx = kids.findIndex((c) => JSON.stringify(c).includes(TXT.headline));
+  assert.ok(prodIdx > 0 && textIdx > prodIdx, 'el producto va encima del fondo y debajo del texto');
+});
+test('sin capa de producto, la escena no cambia (aditivo)', () => {
+  const st = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  const a = JSON.stringify(M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x' }));
+  const b = JSON.stringify(M.buildOverlayScene({ style: st, width: 1024, height: 1024, backgroundSrc: 'x', products: [{ src: 'p', width: 1, height: 1 }], productLayer: null }));
+  assert.equal(a, b);
 });
 
 console.log(`\n${'─'.repeat(72)}`);

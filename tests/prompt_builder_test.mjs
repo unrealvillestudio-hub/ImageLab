@@ -95,6 +95,32 @@ ok('imageRoleClause', () => {
   assert.ok(M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 }).startsWith('The attached image(s) show P'));
 });
 
+// 6b · LOCACIÓN y PRODUCTO (2026-09-27)
+ok('imageRoleClause con locación nombra las imágenes por posición', () => {
+  const all = M.imageRoleClause({ hasSource: true, personaName: 'P', personaRefs: 3, locationName: 'Lugar X', locationRefs: 2 });
+  assert.ok(all.includes('Attached images 2 to 4 show P'));
+  assert.ok(all.includes('Attached images 5 to 6 show the real place "Lugar X"'));
+  const solo = M.imageRoleClause({ hasSource: false, personaName: null, personaRefs: 0, locationName: 'Lugar X', locationRefs: 1 });
+  assert.ok(solo.startsWith('Attached image 1 show the real place "Lugar X"'));
+  assert.ok(solo.includes('Do not copy any person'));
+  // sin locación, la redacción de siempre (compatibilidad)
+  assert.equal(M.imageRoleClause({ hasSource: true, personaName: 'P', personaRefs: 2, locationName: 'L', locationRefs: 0 }),
+    M.imageRoleClause({ hasSource: true, personaName: 'P', personaRefs: 2 }));
+});
+ok('buildBuilderUserMessage lleva la locación y el aviso de producto sólo si llegan', () => {
+  const base = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'c' });
+  assert.ok(!base.includes('LOCATION') && !base.includes('PRODUCT:'));
+  const con = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'c',
+    location: { name: 'Lugar X', description: 'desc del lugar', reference_image_urls: ['https://x/1.jpg'] }, productComposited: true });
+  assert.ok(con.includes('LOCATION — the scene takes place at "Lugar X"'));
+  assert.ok(con.includes('desc del lugar'));
+  assert.ok(con.includes(M.PRODUCT_COMPOSITED_CLAUSE));
+});
+ok('la cláusula de producto sobrevive a la síntesis (enforceEngineClauses)', () => {
+  const out = M.enforceEngineClauses('una escena', [M.PRODUCT_COMPOSITED_CLAUSE]);
+  assert.ok(out.startsWith(M.PRODUCT_COMPOSITED_CLAUSE));
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');
