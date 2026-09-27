@@ -144,6 +144,16 @@ ok('imageRoleClause: anti-collage siempre que hay referencias, y producto por po
   assert.equal(M.imageRoleClause({ hasSource: false, personaName: null, personaRefs: 0 }), '');
 });
 
+ok('encuadre: el sujeto manda y la locación es fondo; la cláusula sólo al generar desde cero', () => {
+  assert.ok(M.SUBJECT_FRAMING_CLAUSE.includes('no large empty area'));
+  const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'c',
+    location: { name: 'L', description: 'd', reference_image_urls: ['https://x/l.jpg'] } });
+  assert.ok(msg.includes('It is the BACKDROP') && !msg.includes('architecture, materials, colours and layout'));
+  const c = M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1, locationName: 'L', locationRefs: 1 });
+  assert.ok(c.includes('frame the subject, not the room'));
+  assert.match(source, /mode === 'edit_from_current' \? \[\] : \[SUBJECT_FRAMING_CLAUSE\]/);
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');

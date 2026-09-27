@@ -706,6 +706,12 @@ export function productSizeLine(it: { name: string; height_cm?: number | null; w
 export const REFERENCE_PHOTOS_CLAUSE =
   'The attached photos are references only (identity, place, product). Paint ONE new photograph from scratch: never cut out, paste, collage or reuse any reference photo as a layer or as the background';
 
+/** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
+ *  superior»; «PO se ve menos que el salón»). Cláusula del EJE: no nombra marca, persona ni lugar.
+ *  Sólo al generar desde cero: al editar la imagen actual manda su composición. */
+export const SUBJECT_FRAMING_CLAUSE =
+  'Frame tightly around the main subject: it fills most of the frame, with only a small margin above the head or the top of the subject — no large empty area of ceiling, wall or sky above it. When a person is present, the person is the subject and the place is the backdrop behind them, never the other way round';
+
 /** La orden al modelo cuando el PRODUCTO se pega después por código (compositor, capa de producto):
  *  un frasco inventado al lado del real sería dos productos, y el inventado siempre miente. */
 export const PRODUCT_COMPOSITED_CLAUSE =
@@ -785,8 +791,9 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
     const refs = (input.location.reference_image_urls ?? []).length;
     parts.push(
       `LOCATION — the scene takes place at "${input.location.name.trim()}", a real place of this brand` +
-      `${refs ? ' shown in the attached location photo(s)' : ''}. Keep its architecture, materials, colours and layout; ` +
-      `do not invent another place:\n${input.location.description.trim()}`,
+      `${refs ? ' shown in the attached location photo(s)' : ''}. It is the BACKDROP: keep its materials, colours and style ` +
+      `recognizable and do not invent another place, but the camera frames the subject, not the room — the place never ` +
+      `dominates the person:\n${input.location.description.trim()}`,
     );
   }
   if (input.product?.items?.length) {
@@ -840,7 +847,7 @@ export function imageRoleClause(args: {
     at += perRefs;
   }
   if (locRefs > 0) {
-    c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there and keep its architecture, materials, colours and layout. Do not copy any person from those photos.`);
+    c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there as the backdrop, keeping its materials, colours and style recognizable; frame the subject, not the room. Do not copy any person from those photos.`);
     at += locRefs;
   }
   if (prodRefs > 0) {
@@ -1386,6 +1393,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE,
+        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE]),
         ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
