@@ -154,6 +154,14 @@ ok('encuadre: el sujeto manda y la locación es fondo; la cláusula sólo al gen
   assert.match(source, /mode === 'edit_from_current' \? \[\] : \[SUBJECT_FRAMING_CLAUSE\]/);
 });
 
+ok('la expresión de la persona sigue el tono del gancho, sólo cuando la persona sale', () => {
+  const persona = { name: 'P', description: 'd', reference_image_urls: ['https://x/p.jpg'] };
+  const con = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'con P', imageHook: 'Tu cabello dañado', persona });
+  assert.ok(con.includes('PERSONA EXPRESSION') && con.includes(M.PERSONA_EXPRESSION_CLAUSE));
+  const sin = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'sin nombre', imageHook: 'x', persona });
+  assert.ok(!sin.includes('PERSONA EXPRESSION'), 'si la persona no se nombra no hay gesto que dictar');
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');

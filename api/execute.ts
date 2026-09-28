@@ -706,6 +706,14 @@ export function productSizeLine(it: { name: string; height_cm?: number | null; w
 export const REFERENCE_PHOTOS_CLAUSE =
   'The attached photos are references only (identity, place, product). Paint ONE new photograph from scratch: never cut out, paste, collage or reuse any reference photo as a layer or as the background';
 
+/** EXPRESIÓN DE LA PERSONA (Sam, 2026-09-27): el gesto acompaña lo que dice el texto de la imagen.
+ *  Mostrar un producto → sonríe; hablar de un daño o un problema → preocupación; celebrar un buen
+ *  resultado → satisfacción. Cláusula del EJE: el tono se lee del gancho de CADA pieza, no de la marca. */
+export const PERSONA_EXPRESSION_CLAUSE =
+  'The person\'s facial expression and body language match the emotional tone of the TEXT ON IMAGE (and, without it, of the TITLE): ' +
+  'when presenting or holding a product, a warm genuine smile; when the text names a problem or damage, an empathetic, concerned expression ' +
+  '(never exaggerated or theatrical); when it celebrates a good result, visible satisfaction and confidence. Natural, never a stock-photo grin';
+
 /** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
  *  superior»; «PO se ve menos que el salón»). Cláusula del EJE: no nombra marca, persona ni lugar.
  *  Sólo al generar desde cero: al editar la imagen actual manda su composición. */
@@ -786,6 +794,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. Whenever the piece or a directive ` +
       `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
+    parts.push(`PERSONA EXPRESSION:\n${PERSONA_EXPRESSION_CLAUSE}.`);
   }
   if (input.location?.name?.trim() && input.location.description?.trim()) {
     const refs = (input.location.reference_image_urls ?? []).length;
