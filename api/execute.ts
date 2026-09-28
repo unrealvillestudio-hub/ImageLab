@@ -785,6 +785,23 @@ export function textZoneClause(layout: any): string {
     `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces.` + pose;
 }
 
+/** DÓNDE VA EL PRODUCTO cuando la marca declara su franja de texto. Medido el 2026-09-28 (pasada NSCF,
+ *  4 de 6 piezas): con la cláusula de zona sola, la síntesis ponía el envase «on a salon counter in the
+ *  foreground», es decir, en la franja baja, y el titular lo tapaba. La cláusula de zona dice qué
+ *  franja evitar; ésta dice dónde SÍ va el producto. Cláusula del EJE: sale del mismo dato de layout. */
+export function productPlacementClause(layout: any, withPerson: boolean): string {
+  const pct = Number(layout?.text_zone_pct);
+  const anchor = String(layout?.anchor ?? '');
+  if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
+  if (anchor.startsWith('bottom')) {
+    return withPerson
+      ? 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame'
+      : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame';
+  }
+  if (anchor.startsWith('top')) return 'The product sits in the lower part of the frame, below the area reserved for text';
+  return '';
+}
+
 /** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
  *  superior»; «PO se ve menos que el salón»). Cláusula del EJE: no nombra marca, persona ni lugar.
  *  Sólo al generar desde cero: al editar la imagen actual manda su composición. */
@@ -1476,8 +1493,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
+      // Identidad y lugar del producto también se reponen (medido 2026-09-28: la síntesis perdía la
+      // cláusula de identidad y la persona salía con la ropa exacta de sus fotos, o el envase en la
+      // franja del titular).
+      const placement = productInScene ? productPlacementClause(overlayTokens?.layout, personaUsed) : '';
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,
-        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : [])]),
+        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : []),
+          ...(personaUsed ? [PERSONA_IDENTITY_ONLY_CLAUSE] : []), ...(placement ? [placement] : [])]),
         ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);

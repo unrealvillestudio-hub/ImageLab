@@ -170,7 +170,7 @@ ok('zona de texto: sale del dato de la marca, y sin dato no hay cláusula', () =
   assert.equal(M.textZoneClause({ anchor: 'bottom_left' }), '', 'sin porcentaje declarado, nada');
   assert.equal(M.textZoneClause({ anchor: 'center', text_zone_pct: 40 }), '', 'anclaje sin lado, nada');
   assert.equal(M.textZoneClause(null), '');
-  assert.match(source, /\[SUBJECT_FRAMING_CLAUSE, \.\.\.\(textZone \? \[textZone\] : \[\]\)\]/);
+  assert.match(source, /\[SUBJECT_FRAMING_CLAUSE, \.\.\.\(textZone \? \[textZone\] : \[\]\),/);
 });
 
 ok('gesto: el catálogo de la persona manda; sin catálogo, la regla general', () => {
@@ -202,6 +202,15 @@ ok('vestuario: las fotos son identidad, no ropa; el catálogo de la persona mand
   const sin = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'sin nombre', imageHook: 'h', persona });
   assert.ok(!sin.includes('PERSONA WARDROBE'), 'si la persona no sale, no hay ropa que dictar');
   assert.ok(M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 }).includes('never copy their clothing or pose'));
+});
+
+ok('lugar del producto: sale de la franja de texto de la marca, y se repone con la identidad', () => {
+  const abajo = { anchor: 'bottom_left', text_zone_pct: 40 };
+  assert.ok(M.productPlacementClause(abajo, true).includes('held in the person\'s hand') );
+  assert.ok(M.productPlacementClause(abajo, false).includes('raised surface in the upper part'));
+  assert.ok(M.productPlacementClause({ anchor: 'top_right', text_zone_pct: 30 }, true).includes('lower part of the frame'));
+  assert.equal(M.productPlacementClause({ anchor: 'bottom_left' }, true), '', 'sin franja declarada, nada');
+  assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_IDENTITY_ONLY_CLAUSE\] : \[\]\), \.\.\.\(placement \? \[placement\] : \[\]\)/);
 });
 
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
