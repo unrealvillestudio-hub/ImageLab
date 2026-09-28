@@ -173,6 +173,20 @@ ok('zona de texto: sale del dato de la marca, y sin dato no hay cláusula', () =
   assert.match(source, /\[SUBJECT_FRAMING_CLAUSE, \.\.\.\(textZone \? \[textZone\] : \[\]\)\]/);
 });
 
+ok('gesto: el catálogo de la persona manda; sin catálogo, la regla general', () => {
+  const persona = { name: 'P', description: 'd', reference_image_urls: ['https://x/p.jpg'],
+    expressions: [{ when: 'she holds a product', face: 'warm smile' }], expression_avoid: ['forced grin'] };
+  const b = M.personaExpressionBlock(persona);
+  assert.ok(b.includes("Pick P's facial expression from this catalog") && b.includes('- when she holds a product: warm smile') && b.includes('Never: forced grin.'));
+  assert.equal(M.personaExpressionBlock({ name: 'P', description: 'd' }), `${M.PERSONA_EXPRESSION_CLAUSE}.`);
+  const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'con P', imageHook: 'h', persona });
+  assert.ok(msg.includes('- when she holds a product: warm smile'));
+});
+ok('luz coherente: cláusula del motor que se repone siempre', () => {
+  assert.ok(M.LIGHTING_COHERENCE_CLAUSE.includes('same light as the scene'));
+  assert.match(source, /SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,/);
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');

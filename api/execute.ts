@@ -673,6 +673,9 @@ export interface PromptPersona {
   aliases?: string[];
   description: string;
   reference_image_urls?: string[];
+  // Catálogo de gestos de ESTA persona (dato del carril, `person_blueprints.raw_config.expression_catalog`).
+  expressions?: Array<{ when: string; face: string }>;
+  expression_avoid?: string[];
 }
 
 /** Una locación real de la marca (`public.location_blueprints`, enlazada por `public.brand_locations`).
@@ -713,6 +716,23 @@ export const PERSONA_EXPRESSION_CLAUSE =
   'The person\'s facial expression and body language match the emotional tone of the TEXT ON IMAGE (and, without it, of the TITLE): ' +
   'when presenting or holding a product, a warm genuine smile; when the text names a problem or damage, an empathetic, concerned expression ' +
   '(never exaggerated or theatrical); when it celebrates a good result, visible satisfaction and confidence. Natural, never a stock-photo grin';
+
+/** El gesto de la persona: su CATÁLOGO si la marca lo declara (Sam, 2026-09-28: «gestos que no
+ *  coinciden con el carácter de la pieza»); si no, la regla general. El tono se lee del texto de la
+ *  imagen de cada pieza. */
+export function personaExpressionBlock(persona: PromptPersona | null | undefined): string {
+  const entries = (persona?.expressions ?? []).filter((e) => e?.when?.trim() && e?.face?.trim());
+  if (!entries.length) return `${PERSONA_EXPRESSION_CLAUSE}.`;
+  const avoid = (persona?.expression_avoid ?? []).filter((a) => a?.trim());
+  return `Pick ${persona!.name.trim()}'s facial expression from this catalog, by the tone of the TEXT ON IMAGE (or of the TITLE when there is none):\n` +
+    entries.map((e) => `- when ${e.when.trim()}: ${e.face.trim()}`).join('\n') +
+    (avoid.length ? `\nNever: ${avoid.join('; ')}.` : '');
+}
+
+/** LUZ COHERENTE (Sam, 2026-09-28: la persona iluminada de una forma y el fondo de otra). Con fotos de persona, lugar y producto de sesiones distintas, el modelo tiende a
+ *  pegar la luz de cada referencia: sujeto de estudio sobre fondo de exterior. Cláusula del EJE. */
+export const LIGHTING_COHERENCE_CLAUSE =
+  'One single light for the whole photograph: the person, their skin, hair and clothing, and any product are lit by the same light as the scene around them — same direction, color temperature, intensity and shadows as the background. Never a studio-lit subject over a background with different light, never a cut-out or pasted look';
 
 /** ZONA DE TEXTO (Sam, 2026-09-28: el titular tapaba el producto en dos piezas). El compositor pone el
  *  texto donde la marca lo declara (`imagelab_overlay_tokens.layout`); el generador no lo sabía y
@@ -815,7 +835,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. Whenever the piece or a directive ` +
       `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
-    parts.push(`PERSONA EXPRESSION:\n${PERSONA_EXPRESSION_CLAUSE}.`);
+    parts.push(`PERSONA EXPRESSION:\n${personaExpressionBlock(input.persona)}`);
   }
   if (input.location?.name?.trim() && input.location.description?.trim()) {
     const refs = (input.location.reference_image_urls ?? []).length;
@@ -1425,7 +1445,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
-      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE,
+      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,
         ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : [])]),
         ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
