@@ -676,6 +676,8 @@ export interface PromptPersona {
   // Catálogo de gestos de ESTA persona (dato del carril, `person_blueprints.raw_config.expression_catalog`).
   expressions?: Array<{ when: string; face: string }>;
   expression_avoid?: string[];
+  // Vestuario de ESTA persona (dato del carril, `person_blueprints.raw_config.wardrobe_catalog`).
+  wardrobe?: Array<{ when: string; outfit: string }>;
 }
 
 /** Una locación real de la marca (`public.location_blueprints`, enlazada por `public.brand_locations`).
@@ -729,10 +731,38 @@ export function personaExpressionBlock(persona: PromptPersona | null | undefined
     (avoid.length ? `\nNever: ${avoid.join('; ')}.` : '');
 }
 
+/** LAS FOTOS DE LA PERSONA SON SU IDENTIDAD, NO SU VESTUARIO (Sam, 2026-09-28: «no puede salir con la
+ *  misma foto siempre»). Medido el mismo día: las fotos de referencia de la persona son de UNA sesión,
+ *  con la misma ropa, y el generador copiaba ropa, collar y pose. Cláusula del EJE. */
+export const PERSONA_IDENTITY_ONLY_CLAUSE =
+  'The reference photos of the person define identity only — face, hair, skin tone and build. Do NOT copy their clothing, jewellery, pose, background or lighting: ' +
+  'dress and pose the person for THIS scene, with an outfit different from the one in the reference photos';
+
+/** El vestuario de la persona: su CATÁLOGO si la marca lo declara; si no, sólo la cláusula de identidad.
+ *  Al editar la imagen actual no se dicta: manda la ropa que ya tiene, salvo que una directriz la cambie. */
+export function personaWardrobeBlock(persona: PromptPersona | null | undefined, mode?: GenerationMode | null): string {
+  if (mode === 'edit_from_current') return 'Keep the clothing of the current image unless a directive asks to change it.';
+  const entries = (persona?.wardrobe ?? []).filter((w) => w?.when?.trim() && w?.outfit?.trim());
+  if (!entries.length) return `${PERSONA_IDENTITY_ONLY_CLAUSE}.`;
+  return `${PERSONA_IDENTITY_ONLY_CLAUSE}. Choose ${persona!.name.trim()}'s outfit by the setting of the scene, and vary it from image to image:\n` +
+    entries.map((w) => `- ${w.when.trim()}: ${w.outfit.trim()}`).join('\n');
+}
+
 /** LUZ COHERENTE (Sam, 2026-09-28: la persona iluminada de una forma y el fondo de otra). Con fotos de persona, lugar y producto de sesiones distintas, el modelo tiende a
  *  pegar la luz de cada referencia: sujeto de estudio sobre fondo de exterior. Cláusula del EJE. */
+//
+// Revisada el 2026-09-28 (Sam: «cuidado con aplanar la perspectiva y resulte parecer una polaroid
+// iluminada»). La redacción anterior pedía la MISMA luz para todo, y una luz pareja aplana: sin luz
+// principal en el rostro, sin caída hacia el fondo, sin profundidad. La luz de una foto real se compone
+// por capas —fondo, sujeto, rostro— y lo que comparten es la FUENTE (dirección), la temperatura de
+// color, el grano y la óptica, no la intensidad.
+// ⛔ NO OPERATIVO — redacción anterior, se conserva por trazabilidad:
+// 'One single light for the whole photograph: the person, their skin, hair and clothing, and any product are lit by the same light as the scene around them — same direction, color temperature, intensity and shadows as the background. Never a studio-lit subject over a background with different light, never a cut-out or pasted look'
 export const LIGHTING_COHERENCE_CLAUSE =
-  'One single light for the whole photograph: the person, their skin, hair and clothing, and any product are lit by the same light as the scene around them — same direction, color temperature, intensity and shadows as the background. Never a studio-lit subject over a background with different light, never a cut-out or pasted look';
+  'Lighting is layered like a real photograph, never flat: the scene keeps its own light, depth and perspective, with natural falloff and a background slightly softer in focus; ' +
+  'the person gets a gentle key light on the face with soft modelling shadows, coming from the same side as the scene\'s main light source, so the subject reads in three dimensions. ' +
+  'Subject, product and background share the same light direction, color temperature, white balance, lens, depth of field and film grain. ' +
+  'Never an evenly lit flat image, never a subject lit from a different direction or temperature than the scene, never a cut-out or pasted look';
 
 /** ZONA DE TEXTO (Sam, 2026-09-28: el titular tapaba el producto en dos piezas). El compositor pone el
  *  texto donde la marca lo declara (`imagelab_overlay_tokens.layout`); el generador no lo sabía y
@@ -836,6 +866,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
     parts.push(`PERSONA EXPRESSION:\n${personaExpressionBlock(input.persona)}`);
+    parts.push(`PERSONA WARDROBE:\n${personaWardrobeBlock(input.persona, input.mode)}`);
   }
   if (input.location?.name?.trim() && input.location.description?.trim()) {
     const refs = (input.location.reference_image_urls ?? []).length;
@@ -886,14 +917,14 @@ export function imageRoleClause(args: {
   if (!locRefs && !prodRefs) {
     if (perRefs > 0) {
       const which = args.hasSource ? 'The other attached image(s)' : 'The attached image(s)';
-      c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+      c.push(`${which} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity (never copy their clothing or pose).`);
     }
     return c.join(' ');
   }
   let at = args.hasSource ? 2 : 1;
   const span = (n: number) => (n === 1 ? `Attached image ${at}` : `Attached images ${at} to ${at + n - 1}`);
   if (perRefs > 0) {
-    c.push(`${span(perRefs)} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity.`);
+    c.push(`${span(perRefs)} show ${args.personaName}: whenever ${args.personaName} appears, keep that exact face and identity (never copy their clothing or pose).`);
     at += perRefs;
   }
   if (locRefs > 0) {

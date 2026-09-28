@@ -182,9 +182,26 @@ ok('gesto: el catálogo de la persona manda; sin catálogo, la regla general', (
   const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'con P', imageHook: 'h', persona });
   assert.ok(msg.includes('- when she holds a product: warm smile'));
 });
-ok('luz coherente: cláusula del motor que se repone siempre', () => {
-  assert.ok(M.LIGHTING_COHERENCE_CLAUSE.includes('same light as the scene'));
+ok('luz por capas: fuente, temperatura y grano compartidos, sin aplanar; se repone siempre', () => {
+  const L = M.LIGHTING_COHERENCE_CLAUSE;
+  assert.ok(L.includes('never flat') && L.includes('key light on the face') && L.includes('same light direction, color temperature'));
+  assert.ok(L.includes('film grain') && L.includes('depth and perspective'));
+  assert.ok(!L.includes('same direction, color temperature, intensity'), 'la intensidad pareja es lo que aplanaba');
   assert.match(source, /SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,/);
+});
+
+ok('vestuario: las fotos son identidad, no ropa; el catálogo de la persona manda', () => {
+  const persona = { name: 'P', description: 'd', reference_image_urls: ['https://x/p.jpg'],
+    wardrobe: [{ when: 'outdoors', outfit: 'white linen shirt' }, { when: '', outfit: 'x' }] };
+  const b = M.personaWardrobeBlock(persona, 'regenerate_full');
+  assert.ok(b.startsWith(M.PERSONA_IDENTITY_ONLY_CLAUSE) && b.includes('- outdoors: white linen shirt') && !b.includes('- : x'));
+  assert.equal(M.personaWardrobeBlock({ name: 'P', description: 'd' }, null), `${M.PERSONA_IDENTITY_ONLY_CLAUSE}.`);
+  assert.ok(M.personaWardrobeBlock(persona, 'edit_from_current').startsWith('Keep the clothing of the current image'));
+  const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'con P', imageHook: 'h', persona });
+  assert.ok(msg.includes('PERSONA WARDROBE') && msg.includes('white linen shirt'));
+  const sin = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'sin nombre', imageHook: 'h', persona });
+  assert.ok(!sin.includes('PERSONA WARDROBE'), 'si la persona no sale, no hay ropa que dictar');
+  assert.ok(M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1 }).includes('never copy their clothing or pose'));
 });
 
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
