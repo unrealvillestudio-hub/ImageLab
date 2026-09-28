@@ -217,10 +217,10 @@ async function fetchImageInline(url: string): Promise<InlineImage> {
 
 /** Cómo entra el producto a la imagen para esta marca: DATO en `imagelab_overlay_tokens.product.mode`.
  *  `composite` = lo pega el compositor; cualquier otro valor o ausencia = se pinta en la escena (opción c). */
-async function loadProductMode(brandId: string | undefined): Promise<'composite' | 'in_scene'> {
-  if (!brandId) return 'in_scene';
+async function loadOverlayTokens(brandId: string | undefined): Promise<any | null> {
+  if (!brandId) return null;
   const row = await sb<any>(`imagelab_overlay_tokens?brand_id=eq.${encodeURIComponent(brandId)}&canal=is.null&select=tokens`);
-  return row?.tokens?.product?.mode === 'composite' ? 'composite' : 'in_scene';
+  return row?.tokens ?? null;
 }
 
 /** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
@@ -713,6 +713,21 @@ export const PERSONA_EXPRESSION_CLAUSE =
   'The person\'s facial expression and body language match the emotional tone of the TEXT ON IMAGE (and, without it, of the TITLE): ' +
   'when presenting or holding a product, a warm genuine smile; when the text names a problem or damage, an empathetic, concerned expression ' +
   '(never exaggerated or theatrical); when it celebrates a good result, visible satisfaction and confidence. Natural, never a stock-photo grin';
+
+/** ZONA DE TEXTO (Sam, 2026-09-28: el titular tapaba el producto en dos piezas). El compositor pone el
+ *  texto donde la marca lo declara (`imagelab_overlay_tokens.layout`); el generador no lo sabía y
+ *  dejaba el envase o la cara justo ahí. La franja es DATO (`layout.text_zone_pct` + `layout.anchor`):
+ *  sin ella no hay cláusula. Cláusula del EJE: no nombra marca ni canal. */
+export function textZoneClause(layout: any): string {
+  const pct = Number(layout?.text_zone_pct);
+  const anchor = String(layout?.anchor ?? '');
+  if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
+  const side = anchor.startsWith('bottom') ? 'lower' : anchor.startsWith('top') ? 'upper' : '';
+  if (!side) return '';
+  const other = side === 'lower' ? 'upper' : 'lower';
+  return `The ${side} ${Math.round(pct)}% of the frame will carry text added later: keep the face, the hands and any product ` +
+    `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces`;
+}
 
 /** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
  *  superior»; «PO se ve menos que el salón»). Cláusula del EJE: no nombra marca, persona ni lugar.
@@ -1368,7 +1383,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       params.product && Array.isArray(params.product.items) && params.product.items.length
         ? { name: String(params.product.name ?? ''), items: params.product.items.filter((i: any) => i && typeof i.image_url === 'string' && /^https?:\/\//.test(i.image_url)) }
         : null;
-    const productMode = productIn ? await loadProductMode(request.brandId) : null;
+    // Los tokens de la marca dicen cómo entra el producto y DÓNDE irá el texto (TEXT-ZONE).
+    const overlayTokens = await loadOverlayTokens(request.brandId);
+    const productMode = productIn ? (overlayTokens?.product?.mode === 'composite' ? 'composite' : 'in_scene') : null;
+    const textZone = textZoneClause(overlayTokens?.layout);
     const productComposited = params.product_composited === true || productMode === 'composite';
     const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
@@ -1402,7 +1420,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE,
-        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE]),
+        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : [])]),
         ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
