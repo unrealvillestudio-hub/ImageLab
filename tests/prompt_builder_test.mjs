@@ -215,6 +215,19 @@ ok('lugar del producto: sale de la franja de texto de la marca, y se repone con 
   assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_IDENTITY_ONLY_CLAUSE\] : \[\]\), \.\.\.\(placement \? \[placement\] : \[\]\)/);
 });
 
+ok('producto: del lado contrario al texto, con ángulo estable por semilla; mirada con destino', () => {
+  assert.ok(M.productPlacementClause({ anchor: 'bottom_left', text_zone_pct: 40 }, true).includes('right half of the frame'));
+  assert.ok(M.productPlacementClause({ anchor: 'bottom_right', text_zone_pct: 40 }, true).includes('left half of the frame'));
+  assert.ok(!M.productPlacementClause({ anchor: 'bottom_center', text_zone_pct: 40 }, true).includes('half of the frame'), 'sin esquina, sin lado');
+  const a = M.productAngleClause('pieza-1');
+  assert.equal(a, M.productAngleClause('pieza-1'), 'misma pieza, mismo lado');
+  assert.ok(/turned slightly to the (left|right)/.test(a) && a.includes('label stays fully readable'));
+  const lados = new Set(['a','b','c','d','e','f','g','h'].map((s) => M.productAngleClause(s).includes('to the left') ? 'L' : 'R'));
+  assert.equal(lados.size, 2, 'las semillas reparten los dos lados');
+  assert.ok(M.PERSONA_GAZE_CLAUSE.includes('into the camera, at the other person in the scene, or at the product'));
+  assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_GAZE_CLAUSE\] : \[\]\)/);
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');
