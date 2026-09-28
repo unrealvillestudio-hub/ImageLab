@@ -151,7 +151,7 @@ ok('encuadre: el sujeto manda y la locación es fondo; la cláusula sólo al gen
   assert.ok(msg.includes('It is the BACKDROP') && !msg.includes('architecture, materials, colours and layout'));
   const c = M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1, locationName: 'L', locationRefs: 1 });
   assert.ok(c.includes('frame the subject, not the room'));
-  assert.match(source, /mode === 'edit_from_current' \? \[\] : \[SUBJECT_FRAMING_CLAUSE\]/);
+  assert.match(source, /mode === 'edit_from_current' \? \[\] : \[SUBJECT_FRAMING_CLAUSE[,\]]/);
 });
 
 ok('la expresión de la persona sigue el tono del gancho, sólo cuando la persona sale', () => {
@@ -160,6 +160,16 @@ ok('la expresión de la persona sigue el tono del gancho, sólo cuando la person
   assert.ok(con.includes('PERSONA EXPRESSION') && con.includes(M.PERSONA_EXPRESSION_CLAUSE));
   const sin = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'sin nombre', imageHook: 'x', persona });
   assert.ok(!sin.includes('PERSONA EXPRESSION'), 'si la persona no se nombra no hay gesto que dictar');
+});
+
+ok('zona de texto: sale del dato de la marca, y sin dato no hay cláusula', () => {
+  const c = M.textZoneClause({ anchor: 'bottom_left', text_zone_pct: 40 });
+  assert.ok(c.startsWith('The lower 40% of the frame will carry text') && c.includes('upper 60%'));
+  assert.ok(M.textZoneClause({ anchor: 'top_right', text_zone_pct: 30 }).startsWith('The upper 30%'));
+  assert.equal(M.textZoneClause({ anchor: 'bottom_left' }), '', 'sin porcentaje declarado, nada');
+  assert.equal(M.textZoneClause({ anchor: 'center', text_zone_pct: 40 }), '', 'anclaje sin lado, nada');
+  assert.equal(M.textZoneClause(null), '');
+  assert.match(source, /\[SUBJECT_FRAMING_CLAUSE, \.\.\.\(textZone \? \[textZone\] : \[\]\)\]/);
 });
 
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
