@@ -165,6 +165,7 @@ ok('la expresión de la persona sigue el tono del gancho, sólo cuando la person
 ok('zona de texto: sale del dato de la marca, y sin dato no hay cláusula', () => {
   const c = M.textZoneClause({ anchor: 'bottom_left', text_zone_pct: 40 });
   assert.ok(c.startsWith('The lower 40% of the frame will carry text') && c.includes('upper 60%'));
+  assert.ok(c.includes('raised to shoulder or face height'), 'la altura del envase viaja con la franja');
   assert.ok(M.textZoneClause({ anchor: 'top_right', text_zone_pct: 30 }).startsWith('The upper 30%'));
   assert.equal(M.textZoneClause({ anchor: 'bottom_left' }), '', 'sin porcentaje declarado, nada');
   assert.equal(M.textZoneClause({ anchor: 'center', text_zone_pct: 40 }), '', 'anclaje sin lado, nada');
