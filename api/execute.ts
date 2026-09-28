@@ -476,7 +476,9 @@ const DISTINCT_SUBJECTS_CLAUSE =
 const SINGLE_FRAME_CLAUSE =
   'The image is ONE single photograph of ONE moment, in ONE continuous frame: never a split screen, ' +
   'diptych, triptych, collage, grid, side-by-side or before-and-after panels, and never the same ' +
-  'person shown twice. If the idea contrasts two states, show the contrast inside that single scene';
+  'person shown twice. If the idea contrasts two states, show the contrast inside that single scene. ' +
+  // 2026-09-28 (844f834a, medido): el modelo pintó una franja negra de «cine» arriba de la escena.
+  'The photograph fills the whole frame edge to edge: no black bars, letterbox, borders or frames';
 const SINGLE_FRAME_NEGATIVE =
   'split screen, diptych, triptych, collage, grid layout, side-by-side panels, before and after panels, ' +
   'picture in picture, same person twice';
@@ -793,22 +795,50 @@ export function textZoneClause(layout: any): string {
 // Tanda 2 (2026-09-28, medido): con un envase se cumplió; con KITS de 3 envases, que no caben en una
 // mano, el modelo los bajó al mostrador bajo el titular (3 de 10). Con varios envases, el lugar es un
 // estante a la altura del hombro, al lado de la persona.
+//
+// Tanda 3 (2026-09-28, Sam en 83b65e2f, formato horizontal): «a la altura del hombro» seguía cayendo en la
+// franja del titular. Falta el LADO: el texto se ancla en una esquina (`anchor` = bottom_left…) y el
+// producto va del lado contrario. Sale del mismo dato de layout.
+function productSide(anchor: string): string {
+  if (anchor.endsWith('left')) return ' It sits in the right half of the frame, away from the text corner.';
+  if (anchor.endsWith('right')) return ' It sits in the left half of the frame, away from the text corner.';
+  return '';
+}
 export function productPlacementClause(layout: any, withPerson: boolean, items = 1): string {
   const pct = Number(layout?.text_zone_pct);
   const anchor = String(layout?.anchor ?? '');
   if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
   if (anchor.startsWith('bottom')) {
+    const side = productSide(anchor);
     if (withPerson && items > 1) {
       return 'The products stand together on a high shelf or raised counter at the person\'s shoulder height, right beside her and in the upper part of the frame, ' +
-        'or she holds them up at shoulder height; never on a low counter, table or surface in the lower part of the frame';
+        'or she holds them up at shoulder height; never on a low counter, table or surface in the lower part of the frame.' + side;
     }
-    return withPerson
-      ? 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame'
-      : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame';
+    return (withPerson
+      ? 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame.'
+      : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame.') + side;
   }
   if (anchor.startsWith('top')) return 'The product sits in the lower part of the frame, below the area reserved for text';
   return '';
 }
+
+/** EL PRODUCTO CON VOLUMEN (Sam, 2026-09-28: «un cierto toque de ángulo a los productos… levemente
+ *  menos frontal, hacia ambos lados»). Un envase de frente a cámara parece pegado; girado unos grados
+ *  tiene volumen y se lee igual. El lado sale de una semilla estable, para que varíe entre imágenes sin
+ *  cambiar al recomponer la misma pieza. Cláusula del EJE: no nombra marca ni producto. */
+export function productAngleClause(seed: string): string {
+  let h = 0;
+  for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const side = h % 2 === 0 ? 'left' : 'right';
+  return `Show each product turned slightly to the ${side} (a gentle three-quarter view, about 15 to 25 degrees, never flat to the camera and never in profile), ` +
+    'so its shape has depth while the front label stays fully readable';
+}
+
+/** LA MIRADA DE LA PERSONA (Sam, 2026-09-28: «nunca con mirada perdida; su mirada empuja la atención del
+ *  espectador»). Cláusula del EJE: la mirada va a la cámara, a la otra persona de la escena o al producto. */
+export const PERSONA_GAZE_CLAUSE =
+  'The person\'s gaze is purposeful and leads the viewer\'s attention: they look into the camera, at the other person in the scene, or at the product. ' +
+  'Never a vacant, distant or lost gaze, never looking at nothing';
 
 /** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
  *  superior»; «PO se ve menos que el salón»). Cláusula del EJE: no nombra marca, persona ni lugar.
@@ -1508,6 +1538,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,
         ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : []),
           ...(personaUsed ? [PERSONA_IDENTITY_ONLY_CLAUSE] : []), ...(placement ? [placement] : [])]),
+        ...(personaUsed ? [PERSONA_GAZE_CLAUSE] : []),
+        ...(productInScene && mode !== 'edit_from_current' ? [productAngleClause(String(params.title ?? params.image_hook ?? params.copy_full ?? ''))] : []),
         ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
