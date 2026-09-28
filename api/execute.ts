@@ -789,11 +789,19 @@ export function textZoneClause(layout: any): string {
  *  4 de 6 piezas): con la cláusula de zona sola, la síntesis ponía el envase «on a salon counter in the
  *  foreground», es decir, en la franja baja, y el titular lo tapaba. La cláusula de zona dice qué
  *  franja evitar; ésta dice dónde SÍ va el producto. Cláusula del EJE: sale del mismo dato de layout. */
-export function productPlacementClause(layout: any, withPerson: boolean): string {
+//
+// Tanda 2 (2026-09-28, medido): con un envase se cumplió; con KITS de 3 envases, que no caben en una
+// mano, el modelo los bajó al mostrador bajo el titular (3 de 10). Con varios envases, el lugar es un
+// estante a la altura del hombro, al lado de la persona.
+export function productPlacementClause(layout: any, withPerson: boolean, items = 1): string {
   const pct = Number(layout?.text_zone_pct);
   const anchor = String(layout?.anchor ?? '');
   if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
   if (anchor.startsWith('bottom')) {
+    if (withPerson && items > 1) {
+      return 'The products stand together on a high shelf or raised counter at the person\'s shoulder height, right beside her and in the upper part of the frame, ' +
+        'or she holds them up at shoulder height; never on a low counter, table or surface in the lower part of the frame';
+    }
     return withPerson
       ? 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame'
       : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame';
@@ -1496,7 +1504,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Identidad y lugar del producto también se reponen (medido 2026-09-28: la síntesis perdía la
       // cláusula de identidad y la persona salía con la ropa exacta de sus fotos, o el envase en la
       // franja del titular).
-      const placement = productInScene ? productPlacementClause(overlayTokens?.layout, personaUsed) : '';
+      const placement = productInScene ? productPlacementClause(overlayTokens?.layout, personaUsed, productInScene.items.length) : '';
       finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,
         ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : []),
           ...(personaUsed ? [PERSONA_IDENTITY_ONLY_CLAUSE] : []), ...(placement ? [placement] : [])]),
