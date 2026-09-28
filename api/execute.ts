@@ -476,7 +476,9 @@ const DISTINCT_SUBJECTS_CLAUSE =
 const SINGLE_FRAME_CLAUSE =
   'The image is ONE single photograph of ONE moment, in ONE continuous frame: never a split screen, ' +
   'diptych, triptych, collage, grid, side-by-side or before-and-after panels, and never the same ' +
-  'person shown twice. If the idea contrasts two states, show the contrast inside that single scene';
+  'person shown twice. If the idea contrasts two states, show the contrast inside that single scene. ' +
+  // 2026-09-28 (844f834a, medido): el modelo pintó una franja negra de «cine» arriba de la escena.
+  'The photograph fills the whole frame edge to edge: no black bars, letterbox, borders or frames';
 const SINGLE_FRAME_NEGATIVE =
   'split screen, diptych, triptych, collage, grid layout, side-by-side panels, before and after panels, ' +
   'picture in picture, same person twice';
