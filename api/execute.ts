@@ -725,8 +725,14 @@ export function textZoneClause(layout: any): string {
   const side = anchor.startsWith('bottom') ? 'lower' : anchor.startsWith('top') ? 'upper' : '';
   if (!side) return '';
   const other = side === 'lower' ? 'upper' : 'lower';
+  // Medido el 2026-09-28: con sólo el porcentaje, el modelo siguió poniendo el envase a la altura de
+  // la cintura, justo debajo del titular. Una instrucción de CUERPO (a qué altura se sostiene) se
+  // cumple mejor que una geométrica, así que viajan las dos.
+  const pose = side === 'lower'
+    ? ' If a person holds a product, it is raised to shoulder or face height, next to the face, never at waist or chest level'
+    : ' If a person holds a product, it is held at chest height, below the face';
   return `The ${side} ${Math.round(pct)}% of the frame will carry text added later: keep the face, the hands and any product ` +
-    `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces`;
+    `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces.` + pose;
 }
 
 /** ENCUADRE DEL SUJETO (Sam, 2026-09-27: «las imágenes están dejando mucho espacio inútil en la parte
