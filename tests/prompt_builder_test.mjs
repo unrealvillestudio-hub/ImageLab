@@ -208,6 +208,8 @@ ok('lugar del producto: sale de la franja de texto de la marca, y se repone con 
   const abajo = { anchor: 'bottom_left', text_zone_pct: 40 };
   assert.ok(M.productPlacementClause(abajo, true).includes('held in the person\'s hand') );
   assert.ok(M.productPlacementClause(abajo, false).includes('raised surface in the upper part'));
+  assert.ok(M.productPlacementClause(abajo, true, 3).includes('high shelf or raised counter at the person\'s shoulder height'), 'kit: estante alto');
+  assert.ok(M.productPlacementClause(abajo, true, 1).includes('held in the person\'s hand'), 'un envase: en la mano');
   assert.ok(M.productPlacementClause({ anchor: 'top_right', text_zone_pct: 30 }, true).includes('lower part of the frame'));
   assert.equal(M.productPlacementClause({ anchor: 'bottom_left' }, true), '', 'sin franja declarada, nada');
   assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_IDENTITY_ONLY_CLAUSE\] : \[\]\), \.\.\.\(placement \? \[placement\] : \[\]\)/);
