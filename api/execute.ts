@@ -478,10 +478,18 @@ const SINGLE_FRAME_CLAUSE =
   'diptych, triptych, collage, grid, side-by-side or before-and-after panels, and never the same ' +
   'person shown twice. If the idea contrasts two states, show the contrast inside that single scene. ' +
   // 2026-09-28 (844f834a, medido): el modelo pintó una franja negra de «cine» arriba de la escena.
-  'The photograph fills the whole frame edge to edge: no black bars, letterbox, borders or frames';
+  // 2026-09-30 (medido sobre la imagen limpia, antes del compositor): también pinta franjas BLANCAS o
+  // GRISES y «foto dentro de foto» —una foto más chica sobre un lienzo liso—, sobre todo en 9:16. La
+  // redacción anterior sólo nombraba las negras.
+  // ⛔ NO OPERATIVO — redacción anterior, se conserva por trazabilidad:
+  // 'The photograph fills the whole frame edge to edge: no black bars, letterbox, borders or frames'
+  'The photograph fills the whole frame edge to edge, top to bottom: no black, white or gray bars or bands, ' +
+  'no letterbox, borders, frames or picture-in-picture';
+// ⛔ NO OPERATIVO — negativo anterior (2026-09-28), se conserva por trazabilidad:
+// 'split screen, diptych, triptych, collage, grid layout, side-by-side panels, before and after panels, picture in picture, same person twice'
 const SINGLE_FRAME_NEGATIVE =
   'split screen, diptych, triptych, collage, grid layout, side-by-side panels, before and after panels, ' +
-  'picture in picture, same person twice';
+  'picture in picture, same person twice, letterbox, black bars, blank band, solid color band, empty margin';
 
 export interface VisualSpec {
   // Ejes que viven en los dos niveles. Valor efectivo tras la fusión.
@@ -783,8 +791,14 @@ export function textZoneClause(layout: any): string {
   const pose = side === 'lower'
     ? ' If a person holds a product, it is raised to shoulder or face height, next to the face, never at waist or chest level'
     : ' If a person holds a product, it is held at chest height, below the face';
+  // 2026-09-30 (medido): «the lower area may show only background» se leía como «zona reservada»; en
+  // 5–8 de ~150 imágenes el modelo dejó ahí una placa lisa del tamaño de la franja (473 de 1344 filas
+  // uniformes en una 9:16). La franja es parte de la MISMA fotografía, sólo sin cara, manos ni producto.
+  // ⛔ NO OPERATIVO — redacción anterior, se conserva por trazabilidad:
+  // `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces.` + pose
   return `The ${side} ${Math.round(pct)}% of the frame will carry text added later: keep the face, the hands and any product ` +
-    `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame; the ${side} area may show only background, clothing or surfaces.` + pose;
+    `out of that area, inside the ${other} ${100 - Math.round(pct)}% of the frame. The photograph continues through the ${side} area: ` +
+    `the same scene, light and perspective (background, clothing or surfaces), never an empty, blank or solid-color band.` + pose;
 }
 
 /** DÓNDE VA EL PRODUCTO cuando la marca declara su franja de texto. Medido el 2026-09-28 (pasada NSCF,
