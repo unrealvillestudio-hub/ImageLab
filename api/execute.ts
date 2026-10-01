@@ -79,6 +79,76 @@ function normalizeAspectRatio(ar?: string): string {
 // maxDuration is 60s (see `config` below). Leave ~5s headroom for token + JSON I/O.
 const UPSTREAM_TIMEOUT_MS = 55_000;
 
+// ── FALLO:BEGIN ── bloque puro (sin red): lo extrae `tests/contrato_de_fallo_test.mjs`.
+// ── CONTRATO DE FALLO PARA EL LIBRO MAYOR (2026-10-01) ─────────────────────────────────────────
+// Un 500 de este endpoint ya no es sólo un texto: dice QUÉ llamada paga falló y QUÉ contestó el
+// proveedor, para que el carril asiente el costo REAL de un fallo en vez de una fila sin modelo.
+//
+// EL DEFECTO, medido el 2026-10-01 en `public.ops_generation_ledger`: 187 filas de imagen fallida
+// con `model_id='UNKNOWN'` y `rate_source='UNSEEDED'` desde el 2026-07-30. El carril no podía saber
+// ni qué modelo se llamó, ni si el proveedor llegó a responder, ni cuánto consumió el constructor de
+// prompt que sí corrió antes del fallo: este endpoint devolvía `{ error, status }` y nada más.
+//
+//   · `step`: qué llamada paga falló — el constructor de prompt o la imagen.
+//   · `httpStatus`: el código con el que respondió el proveedor; `null` si no hubo respuesta
+//     (timeout, red caída). Un código fuera de 2xx es un rechazo y no trae consumo.
+//   · `usage`: el `usageMetadata` crudo cuando el proveedor SÍ respondió 2xx pero la respuesta no
+//     sirvió (bloqueo de seguridad, sin imagen, sin texto). Esa respuesta reporta consumo y se
+//     devuelve tal cual: el productor no inventa un esquema ni fabrica ceros.
+//
+// Ninguna regla de facturación vive acá: este archivo informa lo que pasó; el asiento lo decide el
+// carril con la tarifa, que es dato.
+type PaidStep = 'prompt_builder' | 'image';
+class ProviderCallError extends Error {
+  readonly step: PaidStep;
+  readonly httpStatus: number | null;
+  readonly usage: Record<string, number> | null;
+  constructor(message: string, step: PaidStep, httpStatus: number | null, usage: Record<string, number> | null) {
+    super(message);
+    this.name = 'ProviderCallError';
+    this.step = step;
+    this.httpStatus = httpStatus;
+    this.usage = usage;
+  }
+}
+
+/** Lo que una llamada paga deja dicho cuando revienta dentro de su `try`: un ProviderCallError ya
+ *  formado se respeta; un timeout es «llamada hecha, sin respuesta»; cualquier otra cosa (red caída,
+ *  cuerpo ilegible) también lo es, porque la petición salió y no sabemos qué cobró el proveedor. */
+function asProviderCallError(err: unknown, step: PaidStep, timeoutMessage: string): ProviderCallError {
+  if (err instanceof ProviderCallError) return err;
+  if (err instanceof Error && err.name === 'AbortError') return new ProviderCallError(timeoutMessage, step, null, null);
+  return new ProviderCallError(err instanceof Error ? err.message : String(err), step, null, null);
+}
+
+/** El cuerpo de un fallo. `builder` es el constructor de prompt si llegó a llamarse (con su consumo
+ *  si respondió): un constructor que corrió y cobró antes de que la imagen fallara es gasto real. */
+function failurePayload(
+  err: unknown,
+  builder: { version: string; model: string; usage: Record<string, number> | null } | null,
+): Record<string, unknown> {
+  const msg = err instanceof Error ? err.message : String(err);
+  const fallo = err instanceof ProviderCallError ? err : null;
+  const imagen = fallo?.step === 'image' ? fallo : null;
+  const delConstructor = fallo?.step === 'prompt_builder' ? fallo : null;
+  return {
+    error: msg,
+    status: 'error',
+    // El modelo de la llamada de IMAGEN, con o sin fallo: es el que se llamó o el que se iba a llamar.
+    model: GEMINI_IMAGE_MODEL,
+    provider_called: !!imagen,
+    provider_http_status: imagen ? imagen.httpStatus : null,
+    usage: imagen ? imagen.usage : null,
+    prompt_builder_version: builder?.version ?? null,
+    prompt_builder_model: builder?.model ?? null,
+    prompt_builder_usage: builder?.usage ?? delConstructor?.usage ?? null,
+    prompt_builder_called: !!builder,
+    prompt_builder_failed: !!delConstructor,
+    prompt_builder_http_status: delConstructor ? delConstructor.httpStatus : null,
+  };
+}
+// ── FALLO:END ──
+
 // --- Auth ------------------------------------------------------------------
 // Singleton GoogleAuth — reuses cached access tokens across warm invocations.
 let _auth: GoogleAuth | null = null;
@@ -184,22 +254,21 @@ async function vertexGenerateText(params: {
       }),
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`PROMPT_BUILDER_MODEL_ERROR ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new ProviderCallError(`PROMPT_BUILDER_MODEL_ERROR ${res.status}: ${await res.text()}`, 'prompt_builder', res.status, null);
     const data = await res.json();
     const text = (data?.candidates?.[0]?.content?.parts ?? [])
       .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
       .join('')
       .trim();
+    // El consumo se lee ANTES de decidir si sirve: una respuesta 2xx sin texto también se cobra.
+    const usage = extractUsage(data);
     if (!text) {
       const why = data?.candidates?.[0]?.finishReason ?? data?.promptFeedback?.blockReason ?? 'sin texto';
-      throw new Error(`PROMPT_BUILDER_EMPTY: el modelo no devolvió prompt (${why})`);
+      throw new ProviderCallError(`PROMPT_BUILDER_EMPTY: el modelo no devolvió prompt (${why})`, 'prompt_builder', res.status, usage);
     }
-    return { text, usage: extractUsage(data) };
+    return { text, usage };
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`PROMPT_BUILDER_TIMEOUT after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
-    }
-    throw err;
+    throw asProviderCallError(err, 'prompt_builder', `PROMPT_BUILDER_TIMEOUT after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
   } finally {
     clearTimeout(timeout);
   }
@@ -1150,6 +1219,7 @@ function appendNegative(prompt: string, negativePrompt?: string): string {
   return `${prompt} Avoid: ${neg}.`;
 }
 
+// ── RESPUESTA-IMAGEN:BEGIN ── bloque puro (sin red): lo extrae `tests/contrato_de_fallo_test.mjs`.
 /**
  * Pull the first inline image out of a Gemini :generateContent response.
  * Returns a `data:<mime>;base64,<...>` URL. Throws with the block/finish reason
@@ -1188,6 +1258,19 @@ interface ImageWithUsage {
   usage: Record<string, number> | null;
 }
 
+/** Una respuesta 2xx de imagen. El consumo se lee ANTES de buscar la imagen: hasta el 2026-10-01
+ *  `extractInlineImage` lanzaba primero y el `usageMetadata` de una respuesta bloqueada (que el
+ *  proveedor sí reporta) se perdía con la excepción. Ahora viaja dentro del error. */
+function imageFromResponse(data: any, httpStatus: number): ImageWithUsage {
+  const usage = extractUsage(data);
+  try {
+    return { image_data_url: extractInlineImage(data), usage };
+  } catch (err) {
+    throw new ProviderCallError(err instanceof Error ? err.message : String(err), 'image', httpStatus, usage);
+  }
+}
+// ── RESPUESTA-IMAGEN:END ──
+
 /**
  * Text-to-image via gemini-2.5-flash-image:generateContent.
  * (Name retained from the Imagen era to keep call sites stable.)
@@ -1224,15 +1307,12 @@ async function vertexPredictImagen(params: {
       signal: controller.signal,
     });
 
-    if (!res.ok) throw new Error(`Gemini image error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new ProviderCallError(`Gemini image error ${res.status}: ${await res.text()}`, 'image', res.status, null);
 
     const data = await res.json();
-    return { image_data_url: extractInlineImage(data), usage: extractUsage(data) };
+    return imageFromResponse(data, res.status);
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
-    }
-    throw err;
+    throw asProviderCallError(err, 'image', `Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
   } finally {
     clearTimeout(timeout);
   }
@@ -1317,15 +1397,12 @@ async function vertexPredictImagenCapability(params: {
       signal: controller.signal,
     });
 
-    if (!res.ok) throw new Error(`Gemini image (multimodal) error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new ProviderCallError(`Gemini image (multimodal) error ${res.status}: ${await res.text()}`, 'image', res.status, null);
 
     const data = await res.json();
-    return { image_data_url: extractInlineImage(data), usage: extractUsage(data) };
+    return imageFromResponse(data, res.status);
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
-    }
-    throw err;
+    throw asProviderCallError(err, 'image', `Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
   } finally {
     clearTimeout(timeout);
   }
@@ -1458,7 +1535,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (body?.mode === 'direct') {
     try {
       if (!body.prompt || typeof body.prompt !== 'string') {
-        res.status(400).json({ error: 'prompt is required for direct mode' });
+        res.status(400).json(failurePayload(new Error('prompt is required for direct mode'), null));
         return;
       }
       const result = await generateImageDirect(body as DirectImageRequest);
@@ -1475,14 +1552,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       });
       return;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: msg, status: 'error' });
+      res.status(500).json(failurePayload(err, null));
       return;
     }
   }
 
-  if (!body.brandId) { res.status(400).json({ error: 'brandId is required' }); return; }
+  if (!body.brandId) { res.status(400).json(failurePayload(new Error('brandId is required'), null)); return; }
 
+  // El constructor, declarado FUERA del try: si la imagen falla después de que él corrió, su consumo
+  // tiene que llegar al cuerpo del fallo. Dentro del try se perdía con la excepción.
+  let builder: { version: string; model: string; usage: Record<string, number> | null } | null = null;
   try {
     const request = body as ExecuteRequest;
     const params = request.params ?? {};
@@ -1493,7 +1572,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // carril (fase 3) mande el copy entero. Con él, se sintetiza UN prompt con todo.
     const mode: GenerationMode = params.generation_mode === 'edit_from_current' ? 'edit_from_current' : 'regenerate_full';
     if (mode === 'edit_from_current' && !params.source_image_url) {
-      res.status(400).json({ error: "EDIT_WITHOUT_SOURCE: generation_mode 'edit_from_current' exige source_image_url", status: 'error' });
+      res.status(400).json(failurePayload(new Error("EDIT_WITHOUT_SOURCE: generation_mode 'edit_from_current' exige source_image_url"), null));
       return;
     }
     const directives = normalizeDirectives(params.visual_directives);
@@ -1518,15 +1597,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
 
     let finalPrompt = built.prompt;
-    let builder: { version: string; model: string; usage: Record<string, number> | null } | null = null;
     if (shouldSynthesize(params)) {
       const v = await loadActivePromptBuilderVersion();
       // FAIL-LOUD: quien manda el copy entero pidió síntesis. Degradar al prompt de 180 caracteres sin
       // decirlo sería volver al defecto que esto cierra, con la apariencia de haberlo cerrado.
       if (!v) {
-        res.status(500).json({ error: 'PROMPT_BUILDER_VERSION_MISSING: no hay fila activa en imagelab_prompt_builder_versions', status: 'error' });
+        res.status(500).json(failurePayload(new Error('PROMPT_BUILDER_VERSION_MISSING: no hay fila activa en imagelab_prompt_builder_versions'), null));
         return;
       }
+      // Antes de llamar: si la llamada falla, el cuerpo del fallo nombra el constructor que se llamó.
+      builder = { version: v.version, model: v.model_id, usage: null };
       const synth = await vertexGenerateText({
         model: v.model_id,
         system: v.instructions,
@@ -1633,7 +1713,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       status:         'ok',
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: msg, status: 'error' });
+    res.status(500).json(failurePayload(err, builder));
   }
 }
