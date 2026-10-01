@@ -61,6 +61,28 @@ const SB_KEY      = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 // Vertex AI config.
 const GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
 const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
+
+// ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
+// Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
+//
+// Una región (`us-central1`) vive en `{region}-aiplatform.googleapis.com`. La ubicación `global` NO
+// sigue ese patrón: su host es `aiplatform.googleapis.com`, sin prefijo. Construir la URL con la
+// plantilla regional daría `global-aiplatform.googleapis.com`, un host que no existe.
+//
+// Por qué importa: Gemini 2.5 en Vertex usa cuota compartida dinámica y el endpoint `global` reparte
+// la carga entre regiones, en vez de depender de la capacidad de una sola. El carril midió 429
+// «Resource exhausted» en la región fija (138 en agosto, 32 en septiembre, en
+// public.ops_generation_ledger).
+//
+// La ubicación sigue siendo DATO (`GOOGLE_CLOUD_LOCATION`); este bloque no elige ninguna. Sin la
+// variable, el comportamiento es idéntico al de antes (`us-central1`).
+export function vertexBaseUrl(location: string, project: string): string {
+  const loc = String(location ?? '').trim();
+  if (!loc) throw new Error('VERTEX_LOCATION_EMPTY: GOOGLE_CLOUD_LOCATION está vacío.');
+  const host = loc === 'global' ? 'aiplatform.googleapis.com' : `${loc}-aiplatform.googleapis.com`;
+  return `https://${host}/v1/projects/${project}/locations/${loc}`;
+}
+// ── ENDPOINT-VERTEX:END ──
 // Single Gemini-image model handles both roles (text-to-image + multimodal
 // subject/style references) via :generateContent. Replaced the two Imagen 3
 // models (fast-generate + capability), shut down 2026-06-24. If Google
@@ -229,7 +251,7 @@ async function loadActivePromptBuilderVersion(): Promise<PromptBuilderVersion | 
 }
 
 const TEXT_MODEL_URL = (model: string) =>
-  `https://${GCP_LOCATION()}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT()}/locations/${GCP_LOCATION()}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+  `${vertexBaseUrl(GCP_LOCATION(), GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
 
 /** Un modelo de TEXTO de Vertex. Sin razonamiento extendido: el constructor redacta, no delibera. */
 async function vertexGenerateText(params: {
@@ -1207,7 +1229,7 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
 // --- Vertex AI Gemini 2.5 Flash Image -------------------------------------
 
 const GEMINI_IMAGE_URL = () =>
-  `https://${GCP_LOCATION()}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT()}/locations/${GCP_LOCATION()}/publishers/google/models/${GEMINI_IMAGE_MODEL}:generateContent`;
+  `${vertexBaseUrl(GCP_LOCATION(), GCP_PROJECT())}/publishers/google/models/${GEMINI_IMAGE_MODEL}:generateContent`;
 
 /**
  * Gemini-image has no negativePrompt parameter — absorb it into the text body
