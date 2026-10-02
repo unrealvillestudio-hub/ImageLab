@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "node tests/visual_spec_test.mjs && node tests/compositor_test.mjs && node tests/contrato_de_fallo_test.mjs && node tests/endpoint_vertex_test.mjs && node tests/inspeccion_visual_test.mjs",
     "test:render": "node tests/compositor_render_smoke.mjs",
+    "test:carousel": "node tests/compositor_carousel_smoke.mjs",
     "test:comparativa": "node tests/comparativa_95c.mjs"
   },
   "dependencies": {
