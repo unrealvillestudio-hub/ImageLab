@@ -40,9 +40,12 @@
  * CONTRATO
  *   POST /api/compose
  *   { brand_id, canal?, image_url? | image_data_url?, headline, subheadline?, piece_id?,
- *     products?: [{ image_url, name? }] }   ← capa de producto (2026-09-27), PNG real con alfa
+ *     products?: [{ image_url, name? }],    ← capa de producto (2026-09-27), PNG real con alfa
+ *     carousel?: { index, total, role, background?, eyebrow?, keyword?, figure?, steps?, cta? } }
+ *                                           ← F3 (2026-10-02), lámina de carrusel; ver el bloque F3
  *   → 200 { status:'ok', image_data_url, compositor_version, tokens_source, width, height,
- *           fonts:[…], markers:[…], text:{ headline, subheadline } }
+ *           fonts:[…], markers:[…], text:{ headline, subheadline },
+ *           meta:{ carousel_applied, warnings:[…] } }
  *   → 4xx/5xx { error, error_label, status:'error' }  ← `error_label` es lo que lee execLab.
  */
 
@@ -58,7 +61,9 @@ declare const process: { env: Record<string, string | undefined> };
 
 // La versión viaja al eco de la pieza (`builder_meta.image.compositor_version`). Sube cuando cambia
 // lo que el compositor DIBUJA — no cuando cambia un token de marca (eso es dato) ni un comentario.
-export const COMPOSITOR_VERSION = '1.2.0';
+//   1.3.0 (F3, 2026-10-02) — láminas de carrusel según la maqueta v4 (campo `carousel`). Aditivo:
+//         una marca sin `tokens.carousel` compone exactamente como en 1.2.0.
+export const COMPOSITOR_VERSION = '1.3.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -678,6 +683,701 @@ export function pickFontFace(
     (Math.abs(a.weight - want.weight) - Math.abs(b.weight - want.weight)) ||
     (a.weight - b.weight) || a.url.localeCompare(b.url))[0];
 }
+
+// ── F3 (2026-10-02) · LÁMINAS DE CARRUSEL SEGÚN LA MAQUETA v4 ──────────────────────────────────
+// Cada lámina lleva: barra de progreso por lámina, número `i / n`, etiqueta superior, UNA palabra
+// clave del titular resaltada, cifra con barra a escala y su fuente, pasos con uno crítico, CTA de
+// texto subrayado (sólo en el cierre, nunca con forma de botón), el aviso de deslizar con flecha (sólo en la
+// portada) y el logotipo de la marca en el pie.
+//
+// EJE Y INSTANCIA, igual que el resto del bloque:
+//   · EJE (código): qué elemento existe, dónde va y qué FUNCIÓN de color lo pinta — la regla de la
+//     maqueta (`CAROUSEL_ELEMENT_COLOR`). También las proporciones internas, derivadas de los tamaños
+//     de letra (un punto mide media letra de cuerpo en cualquier marca).
+//   · INSTANCIA (dato): qué ROL de `brand_palette` juega cada función (`tokens.palette`), qué ROL de
+//     `brand_typography` y qué tamaño lleva cada familia de texto, el lienzo, el margen, el velo y el
+//     texto del aviso de deslizar, por idioma (`tokens.carousel`), y el logotipo (`public.brand_logo`).
+// Sin `tokens.carousel` en la fila resuelta, el campo `carousel` de la petición se ignora y la escena
+// es la de 1.2.0, byte por byte.
+
+const CAROUSEL_ROLES = new Set(['cover', 'body', 'closing']);
+const CAROUSEL_BACKGROUNDS = new Set(['image', 'surface']);
+const CAROUSEL_MAX_SLIDES = 10;
+const CAROUSEL_MAX_STEPS = 5;
+
+// Funciones de color que una marca con carrusel DEBE declarar en `tokens.palette` (valor: rol de
+// `brand_palette`, o `{ role, alpha }`). Las opcionales tienen un reemplazo declarado abajo.
+const CAROUSEL_COLOR_FUNCTIONS = ['keyword', 'progress_on', 'progress_off', 'counter', 'critical', 'light', 'muted', 'surface', 'figure'];
+
+// EL REPARTO elemento → función de color. Es la regla de la maqueta v4 y es del sistema: acento 1 en
+// la barra de progreso y en la palabra clave; acento 2 en `i / n`, el paso crítico y el punto de la
+// fuente; la «luz» en el aviso de deslizar y el subrayado del CTA. Qué hex es cada acento lo dice la marca.
+const CAROUSEL_ELEMENT_COLOR: Record<string, string> = {
+  progress_done: 'progress_on', progress_todo: 'progress_off',
+  eyebrow: 'muted', counter: 'counter',
+  headline: 'text', keyword: 'keyword', subheadline: 'text_soft',
+  figure: 'figure', bar_track: 'progress_off', bar_from: 'progress_on', bar_to: 'counter',
+  source_text: 'muted', source_mark: 'counter',
+  step_text: 'text_soft', step_mark: 'keyword', step_critical_text: 'text', step_critical_mark: 'critical',
+  cta_text: 'text', cta_underline: 'light', swipe: 'light',
+};
+
+export interface CarouselIn {
+  index: number; total: number; role: 'cover' | 'body' | 'closing'; background: 'image' | 'surface';
+  eyebrow: string | null; keyword: string | null;
+  figure: null | { value: string; bar: null | { from: number; to: number }; source: string };
+  steps: Array<{ text: string; critical: boolean }>;
+  cta: string | null;
+}
+
+/**
+ * Valida el campo `carousel` de la petición contra el contrato F3. Errores 400 con etiqueta estable:
+ * son errores del LLAMADOR (la misma regla la valida el carril antes de llamar). Ausente ⇒ null.
+ * No toca el texto: lo que llega es copy ya juzgado y se devuelve tal cual.
+ */
+export function parseCarouselRequest(raw: unknown): CarouselIn | null {
+  if (raw == null) return null;
+  const bad = (label: string, msg: string) => new CompositorError(label, msg, 400);
+  if (!isPlain(raw)) throw bad('CAROUSEL_BAD_REQUEST', 'carousel debe ser un objeto');
+  const r = raw as Record<string, any>;
+  const index = Number(r.index);
+  const total = Number(r.total);
+  if (!Number.isInteger(index) || index < 1 || !Number.isInteger(total) || total < index || total > CAROUSEL_MAX_SLIDES) {
+    throw bad('CAROUSEL_INDEX_INVALID', `carousel.index/total inválidos (${r.index}/${r.total}): index ≥ 1, index ≤ total ≤ ${CAROUSEL_MAX_SLIDES}`);
+  }
+  const role = String(r.role ?? '');
+  if (!CAROUSEL_ROLES.has(role)) throw bad('CAROUSEL_ROLE_INVALID', `carousel.role='${role || '∅'}' (válidos: ${[...CAROUSEL_ROLES].join(', ')})`);
+  const background = r.background == null ? 'image' : String(r.background);
+  if (!CAROUSEL_BACKGROUNDS.has(background)) {
+    throw bad('CAROUSEL_BACKGROUND_INVALID', `carousel.background='${background}' (válidos: ${[...CAROUSEL_BACKGROUNDS].join(', ')})`);
+  }
+  const optText = (v: unknown, field: string): string | null => {
+    if (v == null) return null;
+    if (typeof v !== 'string') throw bad('CAROUSEL_BAD_REQUEST', `carousel.${field} debe ser texto`);
+    return v.trim() ? v : null;
+  };
+  const eyebrow = optText(r.eyebrow, 'eyebrow');
+  const keyword = optText(r.keyword, 'keyword');
+
+  let figure: CarouselIn['figure'] = null;
+  if (r.figure != null) {
+    if (!isPlain(r.figure)) throw bad('CAROUSEL_FIGURE_INVALID', 'carousel.figure debe ser un objeto { value, bar?, source }');
+    const f = r.figure as Record<string, any>;
+    const value = typeof f.value === 'string' ? f.value : '';
+    if (!value.trim()) throw bad('CAROUSEL_FIGURE_INVALID', 'carousel.figure.value es obligatorio');
+    const source = typeof f.source === 'string' ? f.source : '';
+    if (!source.trim()) {
+      throw bad('CAROUSEL_FIGURE_WITHOUT_SOURCE', 'una cifra sin fuente no se compone: carousel.figure.source es obligatorio');
+    }
+    let bar: { from: number; to: number } | null = null;
+    if (f.bar != null) {
+      const from = Number(f.bar?.from);
+      const to = Number(f.bar?.to);
+      if (!isPlain(f.bar) || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to > 100 || from > to) {
+        throw bad('CAROUSEL_FIGURE_BAR_INVALID', `carousel.figure.bar fuera de escala (${f.bar?.from}..${f.bar?.to}): 0 ≤ from ≤ to ≤ 100`);
+      }
+      bar = { from, to };
+    }
+    figure = { value, bar, source };
+  }
+
+  let steps: CarouselIn['steps'] = [];
+  if (r.steps != null) {
+    if (!Array.isArray(r.steps)) throw bad('CAROUSEL_BAD_REQUEST', 'carousel.steps debe ser una lista');
+    if (r.steps.length > CAROUSEL_MAX_STEPS) throw bad('CAROUSEL_STEPS_TOO_MANY', `carousel.steps trae ${r.steps.length} pasos; el máximo es ${CAROUSEL_MAX_STEPS}`);
+    steps = r.steps.map((s: any, k: number) => {
+      const text = isPlain(s) && typeof s.text === 'string' ? s.text : '';
+      if (!text.trim()) throw bad('CAROUSEL_STEP_INVALID', `carousel.steps[${k}].text es obligatorio`);
+      return { text, critical: s.critical === true };
+    });
+    if (steps.filter((s) => s.critical).length > 1) throw bad('CAROUSEL_STEPS_CRITICAL_MULTIPLE', 'como máximo un paso crítico por lámina');
+  }
+
+  const cta = optText(r.cta, 'cta');
+  if (cta && role !== 'closing') throw bad('CAROUSEL_CTA_OUTSIDE_CLOSING', `el CTA va sólo en la lámina de cierre (role='${role}')`);
+
+  return { index, total, role: role as CarouselIn['role'], background: background as CarouselIn['background'], eyebrow, keyword, figure, steps, cta };
+}
+
+/**
+ * Parte el titular en tramos alrededor de la palabra clave. La clave es una subcadena LITERAL del
+ * titular (como máximo una, la primera aparición); si no está, el titular sale entero sin resaltar.
+ */
+export function splitKeyword(headline: string, keyword: string | null): { parts: Array<{ text: string; keyword: boolean }>; found: boolean } {
+  const h = String(headline ?? '');
+  const k = keyword ?? '';
+  const at = k ? h.indexOf(k) : -1;
+  if (at < 0) return { parts: h ? [{ text: h, keyword: false }] : [], found: false };
+  const parts = [
+    { text: h.slice(0, at), keyword: false },
+    { text: k, keyword: true },
+    { text: h.slice(at + k.length), keyword: false },
+  ].filter((p) => p.text.length > 0);
+  return { parts, found: true };
+}
+
+/** Ancho y alto intrínsecos de un SVG: atributos numéricos o, si no, el viewBox. Puro: recibe el texto. */
+export function svgDimensions(svg: string): { width: number; height: number } | null {
+  const tag = (String(svg ?? '').match(/<svg\b[^>]*>/i) ?? [])[0] ?? '';
+  const attr = (n: string) => (tag.match(new RegExp(`\\s${n}\\s*=\\s*["']([^"']+)["']`, 'i')) ?? [])[1] ?? '';
+  const w = attr('width');
+  const h = attr('height');
+  if (/^[0-9.]+(px)?$/.test(w) && /^[0-9.]+(px)?$/.test(h) && parseFloat(w) > 0 && parseFloat(h) > 0) {
+    return { width: parseFloat(w), height: parseFloat(h) };
+  }
+  const vb = attr('viewBox').trim().split(/[\s,]+/).map(Number);
+  if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) return { width: vb[2], height: vb[3] };
+  return null;
+}
+
+/** `0.04em` / `.04` / 0.04 → 0.04. Lo que no es número cae a 0 (el tracking es un ajuste, no un dato crítico). */
+function emValue(v: unknown): number {
+  const n = parseFloat(String(v ?? '0').replace(/em$/i, ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Color de un elemento: un ROL de `brand_palette` (o `{ role, alpha }`) y, sólo para el logotipo
+ * declarado en `brand_logo`, también un hex literal de la marca (#RGB, #RRGGBB o #RRGGBBAA). Devuelve
+ * null si no resuelve: quien llama decide si eso es un faltante (fail-loud) o un aviso.
+ */
+function carouselColor(
+  spec: unknown, palBy: Map<string, { role: string; hex: string }>, opts: { allowHex: boolean; alpha?: number },
+): string | null {
+  let role = '';
+  let alpha = opts.alpha ?? 1;
+  if (typeof spec === 'string') role = spec;
+  else if (isPlain(spec)) {
+    role = String(spec.role ?? '');
+    if (spec.alpha != null && Number.isFinite(Number(spec.alpha))) alpha = Number(spec.alpha);
+  }
+  if (!role) return null;
+  const pal = palBy.get(role);
+  if (pal) return hexToRgba(String(pal.hex), alpha);
+  if (opts.allowHex && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(role)) {
+    if (role.length === 9) return hexToRgba(role.slice(0, 7), Math.round((parseInt(role.slice(7), 16) / 255) * alpha * 100) / 100);
+    return hexToRgba(role, alpha);
+  }
+  return null;
+}
+
+export interface CarouselLogoIn {
+  kind: string; src?: string | null; spec?: Record<string, any> | null;
+  intrinsic?: { width: number; height: number } | null;
+}
+type CarouselType = { role: string; family: string; cssImport: string | null; weight: number; italic: boolean; transform: string; lineHeight: number; letterSpacingEm: number; sizePct: number };
+type CarouselLogo =
+  | { kind: 'image'; src: string; heightPct: number; aspect: number }
+  | { kind: 'wordmark'; sizePct: number; parts: Array<{ text: string; family: string; weight: number; italic: boolean; color: string; letterSpacingEm: number; scale: number; stretch: { x: number; y: number } | null; spaceBeforeEm: number }> };
+
+/**
+ * Resuelve el «cromo» de una lámina de carrusel: colores por FUNCIÓN, familias y tamaños por ROL,
+ * textos y logotipo. PURO. Devuelve `applied:false` si la marca no declara `tokens.carousel`.
+ * FAIL-LOUD ACUMULATIVO para lo que la marca declaró a medias (como `resolveOverlayStyle`); el
+ * logotipo es la excepción declarada: si su fila está incompleta se avisa y se compone sin él.
+ */
+export function resolveCarouselChrome(args: {
+  tokens: Record<string, any>;
+  typography: Array<{ role: string; font_family: string; css_import?: string | null }>;
+  palette: Array<{ role: string; hex: string }>;
+  carousel: CarouselIn | null;
+  text: OverlayText;
+  logo?: CarouselLogoIn | null;
+}): { applied: false } | {
+  applied: true;
+  slide: CarouselIn;
+  canvas: { width: number; height: number };
+  marginPct: number;
+  colors: Record<string, string>;
+  surface: string;
+  shade: null | Array<{ pos: number; color: string }>;
+  type: Record<'headline' | 'body' | 'label' | 'figure', CarouselType>;
+  headline: Array<{ text: string; keyword: boolean }>;
+  subheadline: string | null;
+  swipeText: string;
+  logo: CarouselLogo | null;
+  fonts: Array<{ role: string; family: string; cssImport: string | null; weight: number; italic: boolean }>;
+  warnings: string[];
+} {
+  const t = args.tokens ?? {};
+  const ctRaw: unknown = t.carousel;
+  if (!args.carousel || !isPlain(ctRaw) || Object.keys(ctRaw).length === 0) return { applied: false };
+  const ct = ctRaw as Record<string, any>;
+  const slide = args.carousel;
+  const missing: string[] = [];
+  const warnings: string[] = [];
+  const typoBy = new Map((args.typography ?? []).map((r) => [String(r.role), r]));
+  const palBy = new Map((args.palette ?? []).map((r) => [String(r.role), r]));
+  const palTok = (t.palette ?? {}) as Record<string, unknown>;
+
+  // ── colores por función ──
+  const fn: Record<string, string> = {};
+  const need = (name: string, spec: unknown, where: string) => {
+    const c = carouselColor(spec, palBy, { allowHex: false });
+    if (c) { fn[name] = c; return; }
+    const role = typeof spec === 'string' ? spec : isPlain(spec) ? String(spec.role ?? '') : '';
+    missing.push(role ? `brand_palette.role='${role}' (pedido por ${where})` : where);
+  };
+  for (const name of CAROUSEL_COLOR_FUNCTIONS) need(name, palTok[name], `palette.${name}`);
+  // Opcionales con reemplazo: el texto del carrusel hereda el de las ranuras de 1.2.0.
+  need('text', palTok.text ?? palTok.headline, palTok.text != null ? 'palette.text' : 'palette.text (o palette.headline)');
+  need('text_soft', palTok.text_soft ?? palTok.subheadline ?? palTok.headline,
+    palTok.text_soft != null ? 'palette.text_soft' : 'palette.text_soft (o palette.subheadline)');
+  if (palTok.surface_closing != null) need('surface_closing', palTok.surface_closing, 'palette.surface_closing');
+
+  // ── lienzo y margen ──
+  const canvasW = Number(ct.canvas?.width);
+  const canvasH = Number(ct.canvas?.height);
+  if (!Number.isInteger(canvasW) || canvasW <= 0 || !Number.isInteger(canvasH) || canvasH <= 0) missing.push('carousel.canvas.width/height');
+  const marginPct = Number(ct.margin_pct);
+  if (!Number.isFinite(marginPct) || marginPct < 0) missing.push('carousel.margin_pct');
+
+  // ── tipografía: cuatro familias de texto, cada una un ROL de la marca ──
+  const fonts: Array<{ role: string; family: string; cssImport: string | null; weight: number; italic: boolean }> = [];
+  const addFont = (f: { role: string; family: string; cssImport: string | null; weight: number; italic: boolean }) => {
+    if (!fonts.some((x) => x.family === f.family && x.weight === f.weight && x.italic === f.italic)) fonts.push(f);
+  };
+  const type = {} as Record<'headline' | 'body' | 'label' | 'figure', CarouselType>;
+  let headlineOverflow = false;
+  for (const kind of ['headline', 'body', 'label', 'figure'] as const) {
+    const st = ((ct.typography ?? {})[kind] ?? {}) as Record<string, any>;
+    const role = String(st.role ?? '');
+    const typo = typoBy.get(role);
+    if (!role) { missing.push(`carousel.typography.${kind}.role`); continue; }
+    if (!typo) { missing.push(`brand_typography.role='${role}' (pedido por carousel.typography.${kind}.role)`); continue; }
+    let sizePct = Number(st.size_pct);
+    if (kind === 'headline') {
+      const steps = Array.isArray(st.fit_steps) ? st.fit_steps : [];
+      if (steps.length === 0) { missing.push('carousel.typography.headline.fit_steps'); continue; }
+      const fit = fitFontSizePct(steps, String(args.text?.headline ?? ''));
+      sizePct = fit.sizePct;
+      headlineOverflow = fit.overflow && !!String(args.text?.headline ?? '').trim();
+    } else if (!Number.isFinite(sizePct) || sizePct <= 0) { missing.push(`carousel.typography.${kind}.size_pct`); continue; }
+    type[kind] = {
+      role, family: String(typo.font_family), cssImport: typo.css_import ? String(typo.css_import) : null,
+      weight: Number(st.weight ?? 400), italic: st.italic === true,
+      transform: String(st.transform ?? 'none'),
+      lineHeight: Number(st.line_height ?? 1.2),
+      letterSpacingEm: Number(st.letter_spacing_em ?? 0),
+      sizePct,
+    };
+    addFont({ role, family: type[kind].family, cssImport: type[kind].cssImport, weight: type[kind].weight, italic: type[kind].italic });
+  }
+  if (headlineOverflow) {
+    warnings.push(`CAROUSEL_HEADLINE_OVERFLOW: el titular excede el último escalón de carousel.typography.headline.fit_steps; se compone entero al tamaño más chico`);
+  }
+
+  // ── aviso de deslizar: el texto es DATO por idioma; la flecha es geometría ──
+  const swipeText = typeof ct.swipe?.text === 'string' ? ct.swipe.text : '';
+  if (!swipeText.trim()) missing.push('carousel.swipe.text');
+
+  // ── velo de las láminas con foto (opcional; sin él, el velo de 1.2.0 de la marca) ──
+  let shade: null | Array<{ pos: number; color: string }> = null;
+  if (ct.shade != null) {
+    const stops = Array.isArray(ct.shade?.stops) ? ct.shade.stops : [];
+    const role = palTok.shade;
+    const ok = stops.length >= 2 && stops.every((s: any) => Array.isArray(s) && s.length === 2 && Number.isFinite(Number(s[0])) && Number.isFinite(Number(s[1])));
+    if (!ok) missing.push('carousel.shade.stops ([[posición %, alfa], …], al menos dos)');
+    const spec = typeof role === 'string' ? role : isPlain(role) ? String(role.role ?? '') : '';
+    if (!spec) missing.push('palette.shade (pedido por carousel.shade)');
+    else if (!palBy.get(spec)) missing.push(`brand_palette.role='${spec}' (pedido por palette.shade)`);
+    if (ok && spec && palBy.get(spec)) {
+      shade = stops.map((s: any) => ({ pos: Number(s[0]), color: hexToRgba(String(palBy.get(spec)!.hex), Number(s[1])) }));
+    }
+  }
+
+  if (missing.length) {
+    throw new CompositorError(
+      'COMPOSITOR_TOKENS_INCOMPLETE',
+      `faltan datos de marca para componer la lámina de carrusel: ${missing.join(' · ')}. ` +
+      'El motor no tiene fuentes ni colores propios con los que rellenar (BRIEF 7, regla b; F3).',
+    );
+  }
+
+  // ── textos ──
+  const split = splitKeyword(String(args.text?.headline ?? ''), slide.keyword);
+  if (slide.keyword && !split.found) {
+    warnings.push('CAROUSEL_KEYWORD_NOT_IN_HEADLINE');
+  }
+  const sub = String(args.text?.subheadline ?? '');
+
+  // ── logotipo del pie: tolerante. Sin fila ⇒ sin logotipo; fila incompleta ⇒ aviso y sin logotipo ──
+  let logo: CarouselLogo | null = null;
+  const lg = args.logo ?? null;
+  const logoTok = (ct.logo ?? {}) as Record<string, any>;
+  if (lg) {
+    if (lg.kind === 'image') {
+      const h = Number(logoTok.height_pct);
+      const iw = Number(lg.intrinsic?.width);
+      const ih = Number(lg.intrinsic?.height);
+      const src = String(lg.src ?? '');
+      if (!/^(https:\/\/|data:image\/)/.test(src)) warnings.push('CAROUSEL_LOGO_INVALID: brand_logo.src no es https ni data:image; se compone sin logotipo');
+      else if (!Number.isFinite(h) || h <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.height_pct; se compone sin logotipo');
+      else if (!(iw > 0 && ih > 0)) warnings.push('CAROUSEL_LOGO_INVALID: no se pudieron medir las dimensiones del logotipo; se compone sin logotipo');
+      else logo = { kind: 'image', src, heightPct: h, aspect: iw / ih };
+    } else if (lg.kind === 'wordmark') {
+      const size = Number(logoTok.size_pct);
+      const parts = Array.isArray(lg.spec?.parts) ? lg.spec!.parts : [];
+      const bad: string[] = [];
+      const out = parts.map((p: any, k: number) => {
+        const text = typeof p?.text === 'string' ? p.text : '';
+        const typo = typoBy.get(String(p?.font ?? ''));
+        const color = carouselColor(p?.color, palBy, { allowHex: true, alpha: p?.alpha != null ? Number(p.alpha) : undefined });
+        if (!text) bad.push(`parts[${k}].text`);
+        if (!typo) bad.push(`parts[${k}].font='${p?.font ?? '∅'}' (rol de brand_typography)`);
+        if (!color) bad.push(`parts[${k}].color='${p?.color ?? '∅'}'`);
+        const sx = Number(p?.stretch?.x);
+        const sy = Number(p?.stretch?.y);
+        return {
+          text, family: typo ? String(typo.font_family) : '', cssImport: typo?.css_import ? String(typo.css_import) : null,
+          role: String(p?.font ?? ''), weight: Number(p?.weight ?? 400), italic: p?.style === 'italic',
+          color: color ?? '', letterSpacingEm: emValue(p?.tracking),
+          scale: Number.isFinite(Number(p?.scale)) && Number(p?.scale) > 0 ? Number(p.scale) : 1,
+          stretch: sx > 0 && sy > 0 ? { x: sx, y: sy } : null,
+          spaceBeforeEm: Number.isFinite(Number(p?.space_before)) ? Number(p.space_before) : 0,
+        };
+      });
+      if (!parts.length) bad.push('spec.parts vacío');
+      if (!Number.isFinite(size) || size <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.size_pct; se compone sin logotipo');
+      else if (bad.length) warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo (wordmark) incompleto — ${bad.join(' · ')}; se compone sin logotipo`);
+      else {
+        for (const p of out) addFont({ role: p.role, family: p.family, cssImport: p.cssImport, weight: p.weight, italic: p.italic });
+        logo = {
+          kind: 'wordmark', sizePct: size,
+          parts: out.map(({ cssImport: _c, role: _r, ...rest }) => rest),
+        };
+      }
+    } else {
+      warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo.kind='${lg.kind}' desconocido; se compone sin logotipo`);
+    }
+  }
+
+  const colors: Record<string, string> = {};
+  for (const [element, f] of Object.entries(CAROUSEL_ELEMENT_COLOR)) colors[element] = fn[f];
+  const surface = slide.role === 'closing' && fn.surface_closing ? fn.surface_closing : fn.surface;
+
+  return {
+    applied: true, slide,
+    canvas: { width: canvasW, height: canvasH },
+    marginPct, colors, surface, shade, type,
+    headline: split.parts,
+    subheadline: sub.trim() ? sub : null,
+    swipeText, logo, fonts, warnings,
+  };
+}
+
+/**
+ * El titular, en «átomos» para el ajuste de línea: un átomo es una palabra (o una palabra partida
+ * entre la clave y lo que la rodea, como «BROKEN» + «.»), y nunca se corta por dentro. El espacio
+ * entre palabras viaja como espacio duro al final del átomo: satori recorta los espacios normales en
+ * el borde de cada tramo y, sin esto, «SAME GOAL.» + «THREE» se pegarían. Puro: no cambia el texto
+ * visible, sólo cómo se agrupa.
+ */
+export function headlineAtoms(parts: Array<{ text: string; keyword: boolean }>): Array<Array<{ text: string; keyword: boolean }>> {
+  const atoms: Array<Array<{ text: string; keyword: boolean }>> = [[]];
+  for (const p of parts) {
+    for (const piece of p.text.split(/(\s+)/)) {
+      if (!piece) continue;
+      if (/^\s+$/.test(piece)) { if (atoms[atoms.length - 1].length) atoms.push([]); continue; }
+      atoms[atoms.length - 1].push({ text: piece, keyword: p.keyword });
+    }
+  }
+  const out = atoms.filter((a) => a.length);
+  for (let k = 0; k < out.length - 1; k++) {
+    const last = out[k][out[k].length - 1];
+    out[k][out[k].length - 1] = { ...last, text: `${last.text}\u00a0` };
+  }
+  return out;
+}
+
+/**
+ * La escena de una lámina de carrusel. PURA, misma disciplina que `buildOverlayScene`: todo se mide
+ * en porcentaje del ANCHO del lienzo, y las proporciones internas (puntos, barras, separaciones) se
+ * derivan del tamaño de letra de su familia — eso es geometría del eje, no dato de una marca.
+ *
+ * Estructura (la de la maqueta v4): arriba la barra de progreso y la fila etiqueta · `i / n`; al
+ * centro el contenido; abajo el aviso de deslizar (portada) y el logotipo. Con foto: imagen a sangre + velo +
+ * franja de identidad (si la marca la declara). Sin foto: el color de la función `surface`.
+ */
+export function buildCarouselScene(args: {
+  chrome: Extract<ReturnType<typeof resolveCarouselChrome>, { applied: true }>;
+  style: ReturnType<typeof resolveOverlayStyle>;
+  backgroundSrc: string | null;
+}): Record<string, any> {
+  const { chrome, style } = args;
+  const W = chrome.canvas.width;
+  const H = chrome.canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const px = (pct: number) => r2((pct / 100) * W);
+  const c = chrome.colors;
+  const T = chrome.type;
+  const L = px(T.label.sizePct);
+  const B = px(T.body.sizePct);
+  const M = px(chrome.marginPct);
+  const inner = r2(W - 2 * M);
+  const slide = chrome.slide;
+  const withImage = slide.background === 'image' && !!args.backgroundSrc;
+  const children: Array<Record<string, any>> = [];
+
+  const text = (value: string, s: Record<string, any>) => ({ type: 'div', props: { style: { display: 'flex', ...s }, children: value } });
+  const font = (k: CarouselType, size: number) => ({
+    fontFamily: k.family, fontWeight: k.weight, fontStyle: k.italic ? 'italic' : 'normal',
+    fontSize: size, lineHeight: k.lineHeight, letterSpacing: r2(k.letterSpacingEm * size), textTransform: k.transform,
+  });
+  // Flecha GEOMÉTRICA (la familia display de una marca puede no tener «→»): un trazo vectorial con el
+  // color de su función. No es un carácter: no depende de qué glifos traiga la fuente.
+  const arrow = (color: string, size: number) => {
+    const w = r2(size * 1.25);
+    const h = r2(size * 0.62);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="${w}" height="${h}">` +
+      `<path d="M1 6H22.5M17.5 1.5L22.5 6L17.5 10.5" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    return {
+      type: 'img',
+      props: { src: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`, width: w, height: h, style: { width: w, height: h, flexShrink: 0, marginLeft: r2(size * 0.45) } },
+    };
+  };
+
+  // ── fondo ──
+  if (withImage) {
+    children.push({ type: 'img', props: { src: args.backgroundSrc, width: W, height: H, style: { position: 'absolute', top: 0, left: 0, width: W, height: H, objectFit: 'cover' } } });
+    if (chrome.shade) {
+      const stops = chrome.shade.map((s) => `${s.color} ${s.pos}%`).join(', ');
+      children.push({ type: 'div', props: { style: { position: 'absolute', top: 0, left: 0, width: W, height: H, backgroundImage: `linear-gradient(180deg, ${stops})` } } });
+    } else if (style.scrim) {
+      const from = hexToRgba(style.scrim.color, style.scrim.opacity);
+      const to = hexToRgba(style.scrim.color, 0);
+      const cover = r2((style.scrim.coveragePct / 100) * H);
+      children.push({
+        type: 'div',
+        props: {
+          style: {
+            position: 'absolute', left: 0, width: W, height: cover,
+            ...(style.scrim.mode === 'gradient_top' ? { top: 0 } : { bottom: 0 }),
+            ...(style.scrim.mode === 'solid' ? { backgroundColor: from }
+              : { backgroundImage: `linear-gradient(${style.scrim.mode === 'gradient_top' ? '180deg' : '0deg'}, ${from} 0%, ${to} 100%)` }),
+          },
+        },
+      });
+    }
+    if (style.identity) {
+      const thickness = Math.max(1, Math.round((style.identity.widthPct / 100) * Math.min(W, H)));
+      const vertical = style.identity.mode === 'edge_left' || style.identity.mode === 'edge_right';
+      children.push({
+        type: 'div',
+        props: {
+          style: {
+            position: 'absolute', backgroundColor: style.identity.color,
+            ...(vertical
+              ? { top: 0, height: H, width: thickness, ...(style.identity.mode === 'edge_left' ? { left: 0 } : { right: 0 }) }
+              : { left: 0, width: W, height: thickness, bottom: 0 }),
+          },
+        },
+      });
+    }
+  } else {
+    children.push({ type: 'div', props: { style: { position: 'absolute', top: 0, left: 0, width: W, height: H, backgroundColor: chrome.surface } } });
+  }
+
+  // ── arriba: progreso por lámina + etiqueta · i / n ──
+  const segGap = r2(L * 0.42);
+  const segs = Array.from({ length: slide.total }, (_, k) => ({
+    type: 'div',
+    props: {
+      style: {
+        flexGrow: 1, flexBasis: 0, height: Math.max(2, r2(L * 0.21)),
+        ...(k < slide.total - 1 ? { marginRight: segGap } : {}),
+        backgroundColor: k < slide.index ? c.progress_done : c.progress_todo,
+      },
+    },
+  }));
+  const labelFont = font(T.label, L);
+  const top = {
+    type: 'div',
+    props: {
+      style: { display: 'flex', flexDirection: 'column', width: inner },
+      children: [
+        { type: 'div', props: { style: { display: 'flex', flexDirection: 'row', width: inner }, children: segs } },
+        {
+          type: 'div',
+          props: {
+            style: { display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: r2(L * 0.95), width: inner },
+            children: [
+              slide.eyebrow ? text(slide.eyebrow, { ...labelFont, color: c.eyebrow }) : { type: 'div', props: { style: { display: 'flex' } } },
+              text(`${slide.index} / ${slide.total}`, { ...labelFont, color: c.counter, textTransform: 'none' }),
+            ],
+          },
+        },
+      ],
+    },
+  };
+
+  // ── centro ──
+  const mid: Array<Record<string, any>> = [];
+  if (chrome.headline.length) {
+    const hs = px(T.headline.sizePct);
+    const hf = font(T.headline, hs);
+    mid.push({
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline },
+        children: headlineAtoms(chrome.headline).map((atom) => ({
+          type: 'div',
+          props: {
+            style: { display: 'flex', flexDirection: 'row' },
+            children: atom.map((p) => ({
+              type: 'span',
+              props: { style: { textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline }, children: p.text },
+            })),
+          },
+        })),
+      },
+    });
+  }
+  const subNode = (marginTop: number) => text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: inner });
+  if (slide.figure) {
+    const fs = px(T.figure.sizePct);
+    mid.push(text(slide.figure.value, { ...font(T.figure, fs), color: c.figure, marginTop: mid.length ? r2(B * 0.8) : 0, width: inner }));
+    if (slide.figure.bar) {
+      const bh = Math.max(2, r2(L * 0.53));
+      const from = r2((slide.figure.bar.from / 100) * inner);
+      const w = r2(((slide.figure.bar.to - slide.figure.bar.from) / 100) * inner);
+      mid.push({
+        type: 'div',
+        props: {
+          style: { display: 'flex', position: 'relative', width: inner, height: bh, marginTop: r2(L * 1.26), borderRadius: r2(bh / 2), backgroundColor: c.bar_track, overflow: 'hidden' },
+          children: [{
+            type: 'div',
+            props: { style: { position: 'absolute', top: 0, left: from, width: w, height: bh, backgroundImage: `linear-gradient(90deg, ${c.bar_from}, ${c.bar_to})` } },
+          }],
+        },
+      });
+    }
+    if (chrome.subheadline) mid.push(subNode(r2(B * 0.69)));
+    const dot = r2(L * 0.63);
+    mid.push({
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'row', alignItems: 'center', marginTop: r2(B * 0.69), width: inner },
+        children: [
+          { type: 'div', props: { style: { width: dot, height: dot, borderRadius: r2(dot / 2), backgroundColor: c.source_mark, marginRight: r2(L * 0.74), flexShrink: 0 } } },
+          text(slide.figure.source, { ...font(T.label, r2(L * 1.1)), letterSpacing: r2(T.label.letterSpacingEm * 0.4 * L * 1.1), textTransform: 'none', color: c.source_text }),
+        ],
+      },
+    });
+  } else if (chrome.subheadline) {
+    mid.push(subNode(mid.length ? r2(B * 0.69) : 0));
+  }
+  if (slide.steps.length) {
+    const ss = r2(B * 0.86);
+    const mark = r2(B * 0.55);
+    const bw = Math.max(1, r2(B * 0.07));
+    mid.push({
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'column', marginTop: mid.length ? r2(B * 0.83) : 0, width: inner },
+        children: slide.steps.map((s, k) => ({
+          type: 'div',
+          props: {
+            style: { display: 'flex', flexDirection: 'row', alignItems: 'center', ...(k > 0 ? { marginTop: r2(B * 0.48) } : {}) },
+            children: [
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    width: mark, height: mark, borderRadius: r2(mark / 2), flexShrink: 0, marginRight: r2(B * 0.62),
+                    border: `${bw}px solid ${s.critical ? c.step_critical_mark : c.step_mark}`,
+                    ...(s.critical ? { backgroundColor: c.step_critical_mark } : {}),
+                  },
+                },
+              },
+              text(s.text, { ...font(T.body, ss), lineHeight: 1.35, color: s.critical ? c.step_critical_text : c.step_text }),
+            ],
+          },
+        })),
+      },
+    });
+  }
+  if (slide.cta && slide.role === 'closing') {
+    const cs = r2(L * 1.16);
+    mid.push({
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'row', marginTop: mid.length ? r2(B * 0.97) : 0 },
+        children: [{
+          type: 'div',
+          props: {
+            // Subrayado, sin forma de botón: en una imagen nada se toca (maqueta v4).
+            style: { display: 'flex', flexDirection: 'row', alignItems: 'center', maxWidth: inner, paddingBottom: r2(cs * 0.45), borderBottom: `${Math.max(1, r2(cs * 0.09))}px solid ${c.cta_underline}` },
+            children: [
+              text(slide.cta, { ...font(T.label, cs), letterSpacing: r2(T.label.letterSpacingEm * 0.75 * cs), color: c.cta_text, flexShrink: 1 }),
+              arrow(c.cta_underline, cs),
+            ],
+          },
+        }],
+      },
+    });
+  }
+
+  // ── abajo: aviso de deslizar (sólo portada) + logotipo ──
+  let logoNode: Record<string, any> = { type: 'div', props: { style: { display: 'flex' } } };
+  if (chrome.logo?.kind === 'image') {
+    const h = px(chrome.logo.heightPct);
+    const w = r2(h * chrome.logo.aspect);
+    logoNode = { type: 'img', props: { src: chrome.logo.src, width: w, height: h, style: { width: w, height: h } } };
+  } else if (chrome.logo?.kind === 'wordmark') {
+    const S = px(chrome.logo.sizePct);
+    logoNode = {
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'row', alignItems: 'flex-end', lineHeight: 1 },
+        children: chrome.logo.parts.map((p) => {
+          const size = r2(S * p.scale);
+          return {
+            type: 'span',
+            props: {
+              style: {
+                fontFamily: p.family, fontWeight: p.weight, fontStyle: p.italic ? 'italic' : 'normal',
+                fontSize: size, color: p.color, letterSpacing: r2(p.letterSpacingEm * size), lineHeight: 1,
+                ...(p.spaceBeforeEm ? { marginLeft: r2(p.spaceBeforeEm * S) } : {}),
+                ...(p.stretch ? { transform: `scale(${p.stretch.x}, ${p.stretch.y})` } : {}),
+              },
+              children: p.text,
+            },
+          };
+        }),
+      },
+    };
+  }
+  const swipe = slide.role === 'cover'
+    ? {
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'row', alignItems: 'center' },
+        children: [text(chrome.swipeText, { ...labelFont, color: c.swipe }), arrow(c.swipe, L)],
+      },
+    }
+    : { type: 'div', props: { style: { display: 'flex' } } };
+  const foot = {
+    type: 'div',
+    props: {
+      style: { display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: inner },
+      children: [swipe, logoNode],
+    },
+  };
+
+  children.push({
+    type: 'div',
+    props: {
+      style: {
+        position: 'absolute', top: 0, left: 0, width: W, height: H,
+        display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: M,
+      },
+      children: [top, { type: 'div', props: { style: { display: 'flex', flexDirection: 'column', width: inner }, children: mid } }, foot],
+    },
+  });
+
+  return { type: 'div', props: { style: { display: 'flex', position: 'relative', width: W, height: H }, children } };
+}
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -736,7 +1436,7 @@ async function fetchBytes(url: string, label: string): Promise<Uint8Array> {
  *   2. `brand_typography.css_import` — hoja css2 de Google, de la que sale el TTF del peso pedido.
  * Sin ninguno de los dos: FALLA con el nombre del rol. El motor no tiene una fuente de reserva.
  */
-async function loadFont(slot: Slot, s: {
+async function loadFont(slot: Slot | string, s: {
   role: string; family: string; cssImport: string | null; fontUrl: string | null; weight: number; italic: boolean;
 }): Promise<{ name: string; data: Uint8Array; weight: number; style: 'normal' | 'italic'; source: string }> {
   if (s.fontUrl) {
@@ -756,6 +1456,51 @@ async function loadFont(slot: Slot, s: {
   }
   return { name: s.family, data: await fetchBytes(face.url, 'COMPOSITOR_FONT_FETCH_FAILED'),
     weight: face.weight, style: face.italic ? 'italic' : 'normal', source: face.url };
+}
+
+/**
+ * F3 — el logotipo de firma de la marca (`public.brand_logo`, role 'signature', activo). TOLERANTE por
+ * contrato: sin fila, sin tabla, sin permiso o con un `src` que no baja ⇒ null y un aviso; nunca un
+ * error. Una lámina sin logotipo es una lámina legible; una lámina que no sale no lo es.
+ * Las imágenes se embeben como data URI y se miden aquí (PNG/JPEG por cabecera, SVG por viewBox).
+ */
+async function loadSignatureLogo(brandId: string, warnings: string[]): Promise<CarouselLogoIn | null> {
+  let rows: any[] = [];
+  try {
+    rows = await sbSelect(`brand_logo?brand_id=eq.${encodeURIComponent(brandId)}&role=eq.signature&active=eq.true&select=kind,src,spec,width,height&limit=1`);
+  } catch (e) {
+    warnings.push(`CAROUSEL_LOGO_UNAVAILABLE: no se pudo leer brand_logo (${(e as Error)?.message?.slice(0, 160) ?? e}); se compone sin logotipo`);
+    return null;
+  }
+  const row = rows[0];
+  if (!row) return null;
+  if (row.kind !== 'image') return { kind: String(row.kind), spec: row.spec ?? null };
+  try {
+    let src = String(row.src ?? '');
+    let bytes: Uint8Array | null = null;
+    let mime = '';
+    if (/^https:\/\//.test(src)) {
+      bytes = await fetchBytes(src, 'CAROUSEL_LOGO_FETCH_FAILED');
+      const head = new TextDecoder().decode(bytes.slice(0, 256));
+      mime = /<svg|<\?xml/i.test(head) ? 'image/svg+xml' : imageDimensions(bytes).mime;
+      src = `data:${mime};base64,${b64(bytes)}`;
+    } else {
+      mime = (src.match(/^data:([^;,]+)/) ?? [])[1] ?? '';
+      const comma = src.indexOf(',');
+      const payload = src.slice(comma + 1);
+      bytes = /;base64,/.test(src.slice(0, comma + 1))
+        ? new Uint8Array(Buffer.from(payload, 'base64'))
+        : new TextEncoder().encode(decodeURIComponent(payload));
+    }
+    let intrinsic: { width: number; height: number } | null = null;
+    if (Number(row.width) > 0 && Number(row.height) > 0) intrinsic = { width: Number(row.width), height: Number(row.height) };
+    else if (mime === 'image/svg+xml') intrinsic = svgDimensions(new TextDecoder().decode(bytes));
+    else { const d = imageDimensions(bytes); intrinsic = { width: d.width, height: d.height }; }
+    return { kind: 'image', src, intrinsic };
+  } catch (e) {
+    warnings.push(`CAROUSEL_LOGO_UNAVAILABLE: el logotipo de brand_logo no se pudo cargar (${(e as Error)?.message?.slice(0, 160) ?? e}); se compone sin logotipo`);
+    return null;
+  }
 }
 
 const CORS = {
@@ -788,11 +1533,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const headline = String(body.headline ?? '');
     const subheadline = body.subheadline == null ? null : String(body.subheadline);
     if (!brandId) throw new CompositorError('COMPOSITOR_BRAND_MISSING', 'brand_id es obligatorio: los tokens son por marca', 400);
+    // F3 — el campo `carousel` se valida contra el contrato ANTES de leer nada: un 400 es un error
+    // del llamador y no depende de los datos de la marca.
+    const carouselIn = parseCarouselRequest(body.carousel);
+    const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
     // de BRIEF 7 sigue viva para el caso en que no habría NADA que dibujar, y se evalúa abajo,
     // cuando los tokens ya dijeron si hay identidad. Lo que no cambia: acá no se escribe texto.
-    if (!body.image_data_url && !body.image_url) {
+    // F3 — una lámina de carrusel con fondo de superficie no lleva foto: la imagen no se exige acá y
+    // se vuelve a exigir abajo si la marca no tiene `tokens.carousel` (sin cromo no hay superficie).
+    if (!hasImage && carouselIn?.background !== 'surface') {
       throw new CompositorError('COMPOSITOR_IMAGE_MISSING', 'falta image_data_url o image_url (la imagen limpia a componer)', 400);
     }
 
@@ -805,6 +1556,92 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const picked = pickOverlayTokens(tokenRows as any[], brandId, canal);
     const style = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline } });
+
+    // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
+    // Si no, todo lo de abajo es exactamente 1.2.0.
+    const warnings: string[] = [];
+    const carouselTokens = picked.tokens.carousel;
+    const carouselOn = !!carouselIn && isPlain(carouselTokens) && Object.keys(carouselTokens).length > 0;
+    if (carouselIn && !carouselOn) {
+      warnings.push(`CAROUSEL_NOT_DECLARED: la marca no declara tokens.carousel (capas: ${picked.layers.join(' < ')}); se compone como 1.2.0`);
+      if (!hasImage) {
+        throw new CompositorError('COMPOSITOR_IMAGE_MISSING',
+          'carousel.background=surface sin imagen, y la marca no declara tokens.carousel: sin cromo de carrusel no hay superficie que pintar', 400);
+      }
+    }
+    if (carouselOn) {
+      if (!headline.trim() && !carouselIn!.figure) {
+        throw new CompositorError('COMPOSITOR_TEXT_MISSING',
+          'lámina de carrusel sin titular y sin cifra: no hay nada que componer. El compositor NO escribe texto (BRIEF 7, regla a).', 400);
+      }
+      const logo = await loadSignatureLogo(brandId, warnings);
+      const chrome = resolveCarouselChrome({
+        tokens: picked.tokens, typography: typography as any[], palette: palette as any[],
+        carousel: carouselIn, text: { headline, subheadline }, logo,
+      });
+      if (!chrome.applied) throw new CompositorError('COMPOSITOR_FAILED', 'cromo de carrusel no resuelto', 500);
+      warnings.push(...chrome.warnings);
+      const prodPick = resolveProductLayer({ tokens: picked.tokens, textAnchor: null, count: Array.isArray(body.products) ? body.products.length : 0 });
+      if (prodPick.layer) warnings.push('CAROUSEL_PRODUCT_LAYER_NOT_COMPOSED: la lámina de carrusel no pega la capa de producto');
+
+      // Fondo: la foto se baja sólo si la lámina la usa. El lienzo es el de la marca (dato), así que
+      // todas las láminas de un carrusel salen del MISMO tamaño, tengan foto o no.
+      let backgroundSrc: string | null = null;
+      if (chrome.slide.background === 'image') {
+        const cleanBytes = body.image_data_url
+          ? dataUrlToBytes(String(body.image_data_url))
+          : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
+        const d = imageDimensions(cleanBytes);
+        backgroundSrc = `data:${d.mime};base64,${b64(cleanBytes)}`;
+      }
+      const fonts = await Promise.all(chrome.fonts.map(async (f) => ({
+        slot: `carousel:${f.role}`,
+        ...(await loadFont(`carousel:${f.role}`, { role: f.role, family: f.family, cssImport: f.cssImport, fontUrl: null, weight: f.weight, italic: f.italic })),
+      })));
+      const scene = buildCarouselScene({ chrome, style, backgroundSrc });
+      const { width, height } = chrome.canvas;
+      const svg = await satori(scene as any, {
+        width, height,
+        fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })),
+      });
+      const png = new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng();
+      console.log(
+        `[Compositor][F3] brand=${brandId} canal=${canal ?? '∅'} piece=${body.piece_id ?? '∅'} ` +
+        `lámina=${chrome.slide.index}/${chrome.slide.total} ${chrome.slide.role} fondo=${chrome.slide.background} ` +
+        `tokens=${picked.source} ${width}x${height} logotipo=${chrome.logo ? chrome.logo.kind : 'ninguno'} ` +
+        `avisos=${warnings.length} ${Date.now() - t0}ms`,
+      );
+      res.status(200).json({
+        status: 'ok',
+        image_data_url: `data:image/png;base64,${b64(new Uint8Array(png))}`,
+        compositor_version: COMPOSITOR_VERSION,
+        tokens_source: picked.source,
+        tokens_layers: picked.layers,
+        width, height,
+        fonts: fonts.map((f) => ({ slot: f.slot, family: f.name, weight: f.weight, source: f.source })),
+        // La franja de identidad sólo se dibuja en láminas con foto (sobre superficie, el logotipo firma).
+        identity: style.identity && backgroundSrc
+          ? { mode: style.identity.mode, color: style.identity.color, width_pct: style.identity.widthPct,
+              thickness_px: Math.max(1, Math.round((style.identity.widthPct / 100) * Math.min(width, height))),
+              short_side: Math.min(width, height) }
+          : null,
+        sealed_without_title: false,
+        product_layer: null,
+        markers: style.markers,
+        text: { headline, subheadline },
+        meta: {
+          carousel_applied: true,
+          warnings,
+          carousel: {
+            index: chrome.slide.index, total: chrome.slide.total, role: chrome.slide.role, background: chrome.slide.background,
+            keyword_found: !!chrome.headline.find((p) => p.keyword), logo: chrome.logo ? chrome.logo.kind : null,
+          },
+        },
+        duration_ms: Date.now() - t0,
+      });
+      return;
+    }
+
     const sealOnly = !headline.trim();
     if (sealOnly && !style.identity) {
       throw new CompositorError('COMPOSITOR_TEXT_MISSING',
@@ -886,6 +1723,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       markers: style.markers,
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
       text: { headline, subheadline },
+      // F3 — la forma de 1.2.0 se mantiene; sólo se suma `meta`.
+      meta: { carousel_applied: false, warnings },
       duration_ms: Date.now() - t0,
     });
   } catch (err) {

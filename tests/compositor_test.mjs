@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'api', 'compose.ts');
@@ -34,7 +35,8 @@ const modPath = join(dir, 'compositor_block.mts');
 writeFileSync(modPath, `${source.slice(i, j + END.length)}\n`, 'utf8');
 const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
-  'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer']) {
+  'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer',
+  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
 
@@ -168,9 +170,17 @@ test('los NOMBRES de rol son de la marca, no del motor (paletas disjuntas)', () 
   // ForumPHs nombra 'cream'/'terra'; UNRLVL nombra 'text_primary'/'accent_primary'. Ningún nombre
   // de rol de ninguna marca puede aparecer en la fuente del bloque.
   const block = source.slice(i, j);
-  for (const rol of ['cream', 'terra', 'carbon_d', 'text_primary', 'accent_primary', 'bg_primary', 'EB Garamond', 'Bebas', 'ForumPHs', 'Unrealville']) {
+  for (const rol of ['cream', 'terra', 'carbon_d', 'text_primary', 'accent_primary', 'bg_primary', 'EB Garamond', 'Bebas', 'ForumPHs', 'Unrealville',
+    // F3 (2026-10-02) — las cuatro marcas del carrusel, sus roles de paleta y de tipografía, sus
+    // familias y los textos por idioma del aviso de deslizar: nada de eso puede vivir en el motor.
+    'NeuroneSCF', 'LucienSael', 'accent_secondary', 'accent_glow', 'accent_warm', 'am_l', 'ember', 'gold', 'mercurio',
+    'parchment', 'obsidian', 'bone', 'surface_1', 'carbon_m', 'bg_secondary', 'bg_tertiary',
+    'Montserrat', 'PT Sans', 'Cinzel', 'Space Mono', 'JetBrains', 'Cormorant', 'Crimson', 'Libre Baskerville', 'DM Sans',
+    'Desliza', 'Swipe', 'Glisser']) {
     assert.ok(!block.includes(rol), `el motor nombra '${rol}': eso es instancia, no eje`);
   }
+  // Ni un hex en el bloque: todo color sale de brand_palette (o del logotipo declarado por la marca).
+  assert.ok(!/#[0-9a-fA-F]{6}\b/.test(block), 'el motor no trae colores propios');
 });
 test('marca N+1 sin sembrar → FALLA con el nombre de lo que falta, no con un default', () => {
   assert.throws(
@@ -491,6 +501,252 @@ test('opción (c): sin mode composite el compositor NO pega el producto (lo pint
   assert.ok(r.markers.some((m) => m.startsWith('PRODUCT_IN_SCENE')));
   const sinModo = M.deepMergeTokens(TOK_FPHS.tokens, { product: { anchor: 'top_right', height_pct: 34, margin_pct: 6 } });
   assert.equal(M.resolveProductLayer({ tokens: sinModo, textAnchor: 'bottom_left', count: 1 }).layer, null, 'sin modo = en escena');
+});
+
+console.log('\n── F3 · carrusel según la maqueta v4 (compose 1.3.0) ──');
+// Marca INVENTADA, de otro rubro y otro idioma, con nombres de rol que ninguna marca real usa: si
+// el motor conociera un rol, un hex, una familia o el texto del aviso de deslizar, esto fallaría.
+const N1_TYPO = [
+  { role: 'titular', font_family: 'Fuente Titular', css_import: 'https://fonts.example/titular.css' },
+  { role: 'texto', font_family: 'Fuente Texto', css_import: 'https://fonts.example/texto.css' },
+  { role: 'rotulo', font_family: 'Fuente Rotulo', css_import: 'https://fonts.example/rotulo.css' },
+];
+const N1_PAL = [
+  { role: 'hoja', hex: '#2F7A3D' }, { role: 'trigo', hex: '#D9A441' }, { role: 'cielo', hex: '#7FB7E6' },
+  { role: 'tierra', hex: '#3B2A1E' }, { role: 'arcilla', hex: '#5A4030' }, { role: 'lino', hex: '#F4EFE6' },
+];
+const N1_BASE = {
+  layout: { anchor: 'bottom_left', margin_pct: 6, max_width_pct: 80, scrim: { mode: 'gradient_bottom', palette: 'tierra', opacity: 0.8, coverage_pct: 60 } },
+  typography: {
+    headline: { role: 'titular', weight: 700, fit_steps: [{ max_chars: 60, size_pct: 8 }] },
+    subheadline: { role: 'texto', weight: 400, fit_steps: [{ max_chars: 160, size_pct: 3 }] },
+  },
+  palette: { headline: 'lino', subheadline: 'lino' },
+  identity: { mode: 'edge_bottom', palette: 'hoja', width_pct: 1.5 },
+};
+const N1_CAROUSEL = {
+  palette: {
+    keyword: 'trigo', progress_on: 'hoja', progress_off: { role: 'lino', alpha: 0.2 }, counter: 'cielo', critical: 'cielo',
+    light: 'trigo', muted: { role: 'lino', alpha: 0.5 }, surface: 'tierra', surface_closing: 'arcilla', figure: 'trigo',
+  },
+  carousel: {
+    canvas: { width: 1000, height: 1250 }, margin_pct: 5,
+    typography: {
+      headline: { role: 'titular', weight: 700, transform: 'none', line_height: 1, fit_steps: [{ max_chars: 40, size_pct: 10 }, { max_chars: 90, size_pct: 8 }] },
+      body: { role: 'texto', weight: 400, size_pct: 4 },
+      label: { role: 'rotulo', weight: 600, size_pct: 3, letter_spacing_em: 0.1, transform: 'uppercase' },
+      figure: { role: 'titular', weight: 700, size_pct: 25, line_height: 0.9 },
+    },
+    swipe: { text: 'Glisser' },
+    logo: { size_pct: 5, height_pct: 6 },
+  },
+};
+const n1Tokens = (over = {}) => M.deepMergeTokens(M.deepMergeTokens(N1_BASE, N1_CAROUSEL), over);
+const N1_LOGO = { kind: 'wordmark', spec: { parts: [
+  { text: 'Granja', font: 'titular', color: 'lino', weight: 700, tracking: '0.02em' },
+  { text: 'Sur', font: 'rotulo', color: '#D9A441', alpha: 0.5, weight: 600, scale: 0.7, space_before: 0.2, stretch: { x: 0.8, y: 1.2 } },
+] } };
+const chromeN1 = (c, text, over, logo = N1_LOGO) => M.resolveCarouselChrome({
+  tokens: n1Tokens(over), typography: N1_TYPO, palette: N1_PAL, carousel: M.parseCarouselRequest(c), text, logo,
+});
+const sceneN1 = (c, text, over, bg = 'data:image/png;base64,AA') => {
+  const tokens = n1Tokens(over);
+  const style = M.resolveOverlayStyle({ tokens, typography: N1_TYPO, palette: N1_PAL, text });
+  return M.buildCarouselScene({ chrome: chromeN1(c, text, over), style, backgroundSrc: bg });
+};
+const findAll = (node, pred, acc = []) => {
+  if (node && typeof node === 'object') {
+    if (pred(node)) acc.push(node);
+    const kids = node.props?.children;
+    if (Array.isArray(kids)) for (const k of kids) findAll(k, pred, acc);
+    else if (kids && typeof kids === 'object') findAll(kids, pred, acc);
+  }
+  return acc;
+};
+const textNodes = (scene) => findAll(scene, (n) => typeof n.props?.children === 'string');
+const textOf = (scene, str) => textNodes(scene).find((n) => n.props.children === str);
+
+test('F3 · validación del contrato: errores 400 con etiqueta estable', () => {
+  const ok = { index: 1, total: 5, role: 'cover' };
+  const cases = [
+    [{ ...ok, index: 0 }, 'CAROUSEL_INDEX_INVALID'],
+    [{ ...ok, index: 6 }, 'CAROUSEL_INDEX_INVALID'],
+    [{ ...ok, total: 11, index: 1 }, 'CAROUSEL_INDEX_INVALID'],
+    [{ ...ok, index: 1.5 }, 'CAROUSEL_INDEX_INVALID'],
+    [{ ...ok, role: 'middle' }, 'CAROUSEL_ROLE_INVALID'],
+    [{ ...ok, background: 'video' }, 'CAROUSEL_BACKGROUND_INVALID'],
+    [{ ...ok, figure: { value: '15%' } }, 'CAROUSEL_FIGURE_WITHOUT_SOURCE'],
+    [{ ...ok, figure: { value: '15%', source: '  ' } }, 'CAROUSEL_FIGURE_WITHOUT_SOURCE'],
+    [{ ...ok, figure: { value: '15%', source: 'X', bar: { from: 20, to: 10 } } }, 'CAROUSEL_FIGURE_BAR_INVALID'],
+    [{ ...ok, figure: { value: '15%', source: 'X', bar: { from: 0, to: 120 } } }, 'CAROUSEL_FIGURE_BAR_INVALID'],
+    [{ ...ok, steps: Array.from({ length: 6 }, (_, k) => ({ text: `p${k}` })) }, 'CAROUSEL_STEPS_TOO_MANY'],
+    [{ ...ok, steps: [{ text: 'a', critical: true }, { text: 'b', critical: true }] }, 'CAROUSEL_STEPS_CRITICAL_MULTIPLE'],
+    [{ ...ok, steps: [{ text: '' }] }, 'CAROUSEL_STEP_INVALID'],
+    [{ ...ok, cta: 'Guarda esto' }, 'CAROUSEL_CTA_OUTSIDE_CLOSING'],
+    [{ ...ok, role: 'body', cta: 'Guarda esto' }, 'CAROUSEL_CTA_OUTSIDE_CLOSING'],
+    ['no-objeto', 'CAROUSEL_BAD_REQUEST'],
+  ];
+  for (const [raw, label] of cases) {
+    assert.throws(() => M.parseCarouselRequest(raw), (e) => e.label === label && e.status === 400, `${JSON.stringify(raw)} → ${label}`);
+  }
+  assert.equal(M.parseCarouselRequest(undefined), null);
+  const full = M.parseCarouselRequest({ index: 5, total: 5, role: 'closing', cta: 'Guarda esto', steps: [{ text: 'a' }, { text: 'b', critical: true }] });
+  assert.equal(full.background, 'image', 'background por defecto: image');
+  assert.equal(full.cta, 'Guarda esto');
+  assert.deepEqual(full.steps.map((s) => s.critical), [false, true]);
+});
+
+test('F3 · REGRESIÓN 1.2.0: sin tokens.carousel el campo se ignora y la escena es byte a byte la de 1.2.0', () => {
+  // Golden: sha256 de la escena que producía el bloque de compose 1.2.0 (commit a8e3c30) para esta
+  // misma entrada. Si cambia, 1.3.0 dejó de ser aditiva.
+  const st = M.resolveOverlayStyle({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS, text: TXT });
+  const scene = M.buildOverlayScene({ style: st, width: 1080, height: 1350, backgroundSrc: 'data:image/png;base64,AAAA' });
+  assert.equal(createHash('sha256').update(JSON.stringify(scene)).digest('hex'),
+    'e2c63fe0a9e63e3b74ba4ac2f198cc447e35213069aacdad684f96151fd765c7');
+  const r = M.resolveCarouselChrome({ tokens: TOK_FPHS.tokens, typography: TYPO_FPHS, palette: PAL_FPHS,
+    carousel: M.parseCarouselRequest({ index: 1, total: 3, role: 'cover', keyword: 'cuota' }), text: TXT });
+  assert.deepEqual(r, { applied: false }, 'una marca sin tokens.carousel no tiene cromo de carrusel');
+  // Y con tokens.carousel pero sin campo `carousel` en la petición, tampoco.
+  assert.deepEqual(M.resolveCarouselChrome({ tokens: n1Tokens(), typography: N1_TYPO, palette: N1_PAL, carousel: null, text: TXT }), { applied: false });
+});
+
+test('F3 · marca N+1: colores por FUNCIÓN desde SU paleta, con el reparto de la maqueta', () => {
+  const ch = chromeN1({ index: 2, total: 4, role: 'body', eyebrow: 'Campo', keyword: 'trigo',
+    steps: [{ text: 'Sembrar' }, { text: 'Regar', critical: true }] }, { headline: 'El trigo no espera', subheadline: 'Ni el clima.' });
+  assert.equal(ch.applied, true);
+  assert.equal(ch.colors.progress_done, 'rgb(47, 122, 61)', 'progreso: acento 1 (progress_on → hoja)');
+  assert.equal(ch.colors.progress_todo, 'rgba(244, 239, 230, 0.2)', 'progreso pendiente con su alfa');
+  assert.equal(ch.colors.keyword, 'rgb(217, 164, 65)', 'palabra clave → trigo');
+  assert.equal(ch.colors.counter, 'rgb(127, 183, 230)', 'i / n → acento 2 (cielo)');
+  assert.equal(ch.colors.step_critical_mark, 'rgb(127, 183, 230)', 'paso crítico → acento 2');
+  assert.equal(ch.colors.source_mark, ch.colors.counter, 'punto de la fuente → acento 2');
+  assert.equal(ch.colors.swipe, 'rgb(217, 164, 65)', 'aviso de deslizar → luz');
+  assert.equal(ch.colors.cta_underline, ch.colors.swipe, 'subrayado del CTA → luz');
+  assert.equal(ch.colors.headline, 'rgb(244, 239, 230)', 'sin palette.text, el titular hereda palette.headline');
+  assert.equal(ch.surface, 'rgb(59, 42, 30)', 'superficie → tierra');
+  assert.equal(chromeN1({ index: 4, total: 4, role: 'closing', cta: 'Pide tu caja' }, { headline: 'Fin' }).surface, 'rgb(90, 64, 48)',
+    'el cierre usa surface_closing cuando la marca lo declara');
+  assert.equal(ch.type.headline.family, 'Fuente Titular');
+  assert.equal(ch.type.label.family, 'Fuente Rotulo');
+  assert.equal(ch.swipeText, 'Glisser', 'el texto del aviso de deslizar es dato de la marca, en su idioma');
+  assert.deepEqual(ch.canvas, { width: 1000, height: 1250 });
+  assert.deepEqual(ch.headline, [{ text: 'El ', keyword: false }, { text: 'trigo', keyword: true }, { text: ' no espera', keyword: false }]);
+  assert.deepEqual(ch.warnings, []);
+});
+
+test('F3 · la escena: progreso por lámina, i / n, palabra clave, pasos, superficie', () => {
+  const sc = sceneN1({ index: 2, total: 4, role: 'body', background: 'surface', eyebrow: 'Campo', keyword: 'trigo',
+    steps: [{ text: 'Sembrar' }, { text: 'Regar', critical: true }] }, { headline: 'El trigo no espera' });
+  const flat = JSON.stringify(sc);
+  assert.equal(sc.props.style.width, 1000); assert.equal(sc.props.style.height, 1250);
+  assert.ok(!flat.includes('"type":"img","props":{"src":"data:image/png'), 'fondo surface: sin foto');
+  assert.ok(flat.includes('"backgroundColor":"rgb(59, 42, 30)"'), 'fondo de la función surface');
+  const segs = findAll(sc, (n) => n.props?.style?.flexGrow === 1);
+  assert.equal(segs.length, 4, 'una barra por lámina');
+  assert.deepEqual(segs.map((s) => s.props.style.backgroundColor),
+    ['rgb(47, 122, 61)', 'rgb(47, 122, 61)', 'rgba(244, 239, 230, 0.2)', 'rgba(244, 239, 230, 0.2)'], 'hechas hasta la lámina actual');
+  assert.equal(textOf(sc, '2 / 4').props.style.color, 'rgb(127, 183, 230)');
+  assert.equal(textOf(sc, 'Campo').props.style.textTransform, 'uppercase');
+  const kw = findAll(sc, (n) => n.type === 'span' && String(n.props.children).startsWith('trigo'))[0];
+  assert.equal(kw.props.style.color, 'rgb(217, 164, 65)', 'la palabra clave en su color');
+  assert.equal(textOf(sc, 'Regar').props.style.color, 'rgb(244, 239, 230)', 'el paso crítico, en el color del titular');
+  assert.ok(flat.includes('"backgroundColor":"rgb(127, 183, 230)"'), 'su marca, rellena en acento 2');
+  assert.ok(!textOf(sc, 'Glisser'), 'el aviso de deslizar sólo va en la portada');
+  assert.ok(flat.includes('"children":"Granja"') && flat.includes('"children":"Sur"'), 'el logotipo en el pie');
+  assert.ok(flat.includes('"transform":"scale(0.8, 1.2)"'), 'el estiramiento del wordmark es dato');
+  assert.ok(flat.includes('"color":"rgba(217, 164, 65, 0.5)"'), 'un hex de la marca en el wordmark, con su alfa');
+});
+
+test('F3 · portada con foto: velo, franja, aviso de deslizar con flecha geométrica; cierre con CTA subrayado', () => {
+  const cover = sceneN1({ index: 1, total: 4, role: 'cover', keyword: 'trigo' }, { headline: 'El trigo no espera', subheadline: 'Ni el clima.' }, undefined, 'data:image/png;base64,BG');
+  const flat = JSON.stringify(cover);
+  assert.ok(flat.includes('"src":"data:image/png;base64,BG"'), 'la foto a sangre');
+  assert.ok(flat.includes('rgba(59, 42, 30, 0.8)'), 'sin carousel.shade, el velo de 1.2.0 de la marca');
+  assert.ok(flat.includes('"backgroundColor":"rgb(47, 122, 61)","left":0,"width":1000'), 'la franja de identidad de la marca');
+  assert.ok(textOf(cover, 'Glisser'), 'portada: aviso de deslizar');
+  assert.ok(flat.includes('data:image/svg+xml;utf8,'), 'la flecha es un trazo vectorial, no un carácter');
+  assert.ok(!flat.includes('→'), 'ningún glifo de flecha');
+  const closing = sceneN1({ index: 4, total: 4, role: 'closing', cta: 'Pide tu caja' }, { headline: 'Cosecha propia' });
+  const cta = textOf(closing, 'Pide tu caja');
+  assert.ok(cta, 'el CTA del cierre');
+  const under = findAll(closing, (n) => String(n.props?.style?.borderBottom ?? '').includes('solid'))[0];
+  assert.ok(under && under.props.style.borderBottom.endsWith('rgb(217, 164, 65)'), 'subrayado en la luz');
+  assert.ok(!under.props.style.backgroundColor && !under.props.style.borderRadius, 'sin forma de botón');
+  const withShade = sceneN1({ index: 1, total: 4, role: 'cover' }, { headline: 'Cosecha' },
+    { palette: { shade: 'tierra' }, carousel: { shade: { stops: [[0, 0.9], [100, 0.4]] } } }, 'data:image/png;base64,BG');
+  assert.ok(JSON.stringify(withShade).includes('linear-gradient(180deg, rgba(59, 42, 30, 0.9) 0%, rgba(59, 42, 30, 0.4) 100%)'), 'velo de carrusel declarado');
+});
+
+test('F3 · cifra sobre superficie: barra a escala, fuente con su punto', () => {
+  const sc = sceneN1({ index: 2, total: 4, role: 'body', background: 'surface', figure: { value: '62%', bar: { from: 10, to: 62 }, source: 'Censo agrario 2025' } },
+    { headline: '', subheadline: 'de las fincas ya riega por goteo.' });
+  assert.equal(textOf(sc, '62%').props.style.color, 'rgb(217, 164, 65)', 'la cifra en la función figure');
+  const inner = 1000 - 2 * 50;
+  const fill = findAll(sc, (n) => String(n.props?.style?.backgroundImage ?? '').startsWith('linear-gradient(90deg'))[0];
+  assert.equal(fill.props.style.left, 0.1 * inner, 'arranca en from');
+  assert.equal(fill.props.style.width, 0.52 * inner, 'mide to − from');
+  assert.equal(fill.props.style.backgroundImage, 'linear-gradient(90deg, rgb(47, 122, 61), rgb(127, 183, 230))');
+  assert.equal(textOf(sc, 'Censo agrario 2025').props.style.textTransform, 'none', 'la fuente no se pasa a mayúsculas');
+  assert.ok(textOf(sc, 'de las fincas ya riega por goteo.'));
+});
+
+test('F3 · palabra clave ausente del titular → aviso y titular entero sin resaltar', () => {
+  const ch = chromeN1({ index: 1, total: 2, role: 'cover', keyword: 'maíz' }, { headline: 'El trigo no espera' });
+  assert.ok(ch.warnings.includes('CAROUSEL_KEYWORD_NOT_IN_HEADLINE'));
+  assert.deepEqual(ch.headline, [{ text: 'El trigo no espera', keyword: false }]);
+  // La clave es LITERAL: no se normaliza mayúsculas ni acentos.
+  assert.equal(M.splitKeyword('El Trigo', 'trigo').found, false);
+  assert.deepEqual(M.splitKeyword('Roto.', 'Roto').parts, [{ text: 'Roto', keyword: true }, { text: '.', keyword: false }]);
+});
+
+test('F3 · átomos del titular: el espacio entre tramos no se pierde y la puntuación no se separa', () => {
+  const atoms = M.headlineAtoms(M.splitKeyword("Your agents aren't broken.", 'broken').parts);
+  assert.deepEqual(atoms.map((a) => a.map((p) => p.text).join('')), ['Your ', 'agents ', "aren't ", 'broken.']);
+  assert.deepEqual(atoms[3], [{ text: 'broken', keyword: true }, { text: '.', keyword: false }], '«broken» + «.» en un solo átomo');
+  const two = M.headlineAtoms(M.splitKeyword('Build the process model first.', 'process model').parts);
+  assert.deepEqual(two.map((a) => a.map((p) => `${p.keyword ? '*' : ''}${p.text}`).join('')),
+    ['Build ', 'the ', '*process ', '*model ', 'first.']);
+});
+
+test('F3 · marca con carrusel declarado a medias → falla NOMBRANDO lo que falta', () => {
+  const tokens = structuredClone(n1Tokens());   // clon: el merge comparte referencias de las capas
+  delete tokens.palette.light;
+  tokens.palette.counter = 'no_existe';
+  delete tokens.carousel.swipe;
+  delete tokens.carousel.typography.label.size_pct;
+  assert.throws(
+    () => M.resolveCarouselChrome({ tokens, typography: N1_TYPO, palette: N1_PAL, carousel: M.parseCarouselRequest({ index: 1, total: 2, role: 'cover' }), text: { headline: 'x' } }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /palette\.light/.test(e.message) && /brand_palette\.role='no_existe'/.test(e.message)
+      && /carousel\.swipe\.text/.test(e.message) && /carousel\.typography\.label\.size_pct/.test(e.message),
+  );
+});
+
+test('F3 · logotipo tolerante: sin fila no hay logotipo ni error; fila incompleta → aviso', () => {
+  const sin = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, undefined, null);
+  assert.equal(sin.logo, null); assert.deepEqual(sin.warnings, []);
+  const roto = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, undefined,
+    { kind: 'wordmark', spec: { parts: [{ text: 'Granja', font: 'no_es_un_rol', color: 'lino' }] } });
+  assert.equal(roto.logo, null);
+  assert.ok(roto.warnings.some((w) => w.startsWith('CAROUSEL_LOGO_INVALID')));
+  const img = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, undefined,
+    { kind: 'image', src: 'data:image/png;base64,AA', intrinsic: { width: 300, height: 100 } });
+  assert.deepEqual(img.logo, { kind: 'image', src: 'data:image/png;base64,AA', heightPct: 6, aspect: 3 });
+  const sc = M.buildCarouselScene({ chrome: img, style: M.resolveOverlayStyle({ tokens: n1Tokens(), typography: N1_TYPO, palette: N1_PAL, text: { headline: 'x' } }), backgroundSrc: 'x' });
+  const logo = findAll(sc, (n) => n.type === 'img' && n.props.src === 'data:image/png;base64,AA')[0];
+  assert.equal(logo.props.height, 60, '6% del ancho (1000)'); assert.equal(logo.props.width, 180, 'ancho por su aspecto');
+  const http = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, undefined, { kind: 'image', src: 'http://inseguro', intrinsic: { width: 1, height: 1 } });
+  assert.equal(http.logo, null, 'sólo https o data:image');
+});
+
+test('F3 · svgDimensions: atributos numéricos o viewBox', () => {
+  assert.deepEqual(M.svgDimensions('<svg xmlns="x" viewBox="0 0 320 96" width="100%" height="100%">'), { width: 320, height: 96 });
+  assert.deepEqual(M.svgDimensions('<svg width="40px" height="20" viewBox="0 0 1 1">'), { width: 40, height: 20 });
+  assert.equal(M.svgDimensions('<svg>'), null);
+});
+
+test('F3 · determinismo: misma lámina ⇒ mismo árbol', () => {
+  const c = { index: 3, total: 5, role: 'body', eyebrow: 'Campo', keyword: 'trigo', steps: [{ text: 'a' }, { text: 'b', critical: true }] };
+  assert.equal(JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })), JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })));
 });
 
 console.log(`\n${'─'.repeat(72)}`);
