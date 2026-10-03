@@ -20,7 +20,7 @@ import { createDebugMetadataHelper } from "../../core/debug/debugUtils.ts";
 import { DebugOverlay } from "../../core/debug/DebugOverlay.tsx";
 import { safeId, downloadDataUrl } from "../../utils/imageUtils.ts";
 import { compositeProductOverBackground } from "../../utils/composite.ts";
-import { generateImageFromPrompt, generateAvatar } from "../../services/gemini.ts";
+import { generateImageFromPrompt, generateAvatar, buildSlotsPayload } from "../../services/gemini.ts";
 import { ModuleTips } from "../../ui/ModuleTips.tsx";
 import { CompositeSettingsPanel, CompositeValues } from "../../components/composite/CompositeSettingsPanel.tsx"; 
 import { ToolsPreviewPane } from "../../components/preview/ToolsPreviewPane.tsx";
@@ -213,11 +213,11 @@ export function ToolsModule({
             customBrief = (customBrief || "") + ` ${bpDesc}. Lighting: ${bpLight}. Elements: ${bpSig}. Style: ${bpParams.realism_level || ""}, ${bpParams.film_look || ""}, ${bpParams.lens_preset || ""}.`;
         }
         const prompts = buildSceneVariantPrompts({ archetype: sceneArchetype, negativeSpace: sceneNS, variants: sceneVariants, customBrief, userPrompt: userPrompt });
-        const allReferences = [];
-        if (sourceAssetB) allReferences.push({ dataUrl: sourceAssetB.dataUrl, label: `Fondo: ${sourceAssetB.label}` });
+        // 2026-10-03 — el fondo viaja como espacio con su rol (rotulado por posición en el servidor).
+        const slots = buildSlotsPayload({ background: sourceAssetB ? { dataUrl: sourceAssetB.dataUrl, label: sourceAssetB.label } : null });
         for (let i = 0; i < prompts.length; i++) {
             if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-            let genImg = await generateImageFromPrompt({ prompt: prompts[i] + ". Negative: text, product", aspectRatio: sceneAR, size: "2k", referenceImages: allReferences, signal });
+            let genImg = await generateImageFromPrompt({ prompt: prompts[i] + ". Negative: text, product", aspectRatio: sceneAR, size: "2k", slots, signal });
             pushOutput({ id: safeId("scene"), module: "tools" as any, createdAt: Date.now(), label: `Scene ${i+1}`, imageUrl: genImg, metadata: globalDebug ? createDebugMetadataHelper("scene_creator", "scene_only", { mode: "SCENE_ONLY" }, { archetype: sceneArchetype, user_prompt: userPrompt, blueprint: sceneActiveBlueprint?.id }, { sourceA: sourceAssetA, sourceB: sourceAssetB }, i, sceneVariants, [], { enabled: true, prompt_built: true, images_sent: [] }) : undefined, aspect: sceneAR });
         }
     };
@@ -235,6 +235,8 @@ export function ToolsModule({
         let subjectA = sourceAssetA ? { dataUrl: sourceAssetA.dataUrl, label: sourceAssetA.label } : undefined;
         let subjectB = sourceAssetB && sourceAssetB.kind === 'person' ? { dataUrl: sourceAssetB.dataUrl, label: sourceAssetB.label } : undefined;
         let background = sourceAssetB && sourceAssetB.kind === 'background' ? { dataUrl: sourceAssetB.dataUrl, label: sourceAssetB.label } : undefined;
+        // 2026-10-03 — Slot C («Subj 2»): segundo sujeto. Antes no se enviaba.
+        let subjectC = sourceAssetC && sourceAssetC.kind === 'person' ? { dataUrl: sourceAssetC.dataUrl, label: sourceAssetC.label } : undefined;
         const styleRefs = [];
         if (ref1Asset) styleRefs.push({ dataUrl: ref1Asset.dataUrl, label: ref1Asset.label });
         if (ref2Asset) styleRefs.push({ dataUrl: ref2Asset.dataUrl, label: ref2Asset.label });
@@ -250,7 +252,7 @@ export function ToolsModule({
         }
         for (let i = 0; i < avatarBatchSize; i++) {
              if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-             const res = await generateAvatar({ aspectRatio: avatarAR, baseStyleRules: base?.rules || "", contextRules: "Studio " + customRules, roleRules: "Model", enableRefs: styleRefs.length > 0, allowMirrors: false, strictIdentity: avatarStrictIdentity, creativityLevel: avatarCreativity, subjectA, subjectB, background, styleRefs: styleRefs.length > 0 ? styleRefs : undefined, userPrompt: finalPrompt, signal });
+             const res = await generateAvatar({ aspectRatio: avatarAR, baseStyleRules: base?.rules || "", contextRules: "Studio " + customRules, roleRules: "Model", enableRefs: styleRefs.length > 0, allowMirrors: false, strictIdentity: avatarStrictIdentity, creativityLevel: avatarCreativity, subjectA, subjectB, subjectC, background, styleRefs: styleRefs.length > 0 ? styleRefs : undefined, userPrompt: finalPrompt, signal });
              pushOutput({ id: safeId("avatar"), module: "tools" as any, createdAt: Date.now(), label: `Avatar ${i+1}`, imageUrl: res, metadata: globalDebug ? createDebugMetadataHelper("avatar_generator", "avatar_render", { identity_lock: "STRICT" }, { user_prompt: finalPrompt, blueprint: avatarActiveBlueprint?.id }, { sourceA: sourceAssetA, sourceB: sourceAssetB, ref1: ref1Asset, ref2: ref2Asset, ref3: ref3Asset }, i, avatarBatchSize, [], { enabled: true, prompt_built: true, images_sent: ['subject_a'] }) : undefined, aspect: avatarAR });
         }
     };
@@ -272,7 +274,16 @@ export function ToolsModule({
                 prompt += `Style: ${location.imagelab.realism_level}, ${location.imagelab.film_look}, lens ${location.imagelab.lens_preset}, depth of field ${location.imagelab.depth_of_field}. `;
                 prompt += `Compliance: ${personA.compliance_notes || ""}`;
                 if (personB) prompt += ` ${personB.compliance_notes || ""}`;
-                const genImg = await generateImageFromPrompt({ prompt, aspectRatio: "16:9", size: "2k", signal });
+                // 2026-10-03 — los blueprints locales no traen fotos: si el operador asignó Slot A, Slot C o
+                // un fondo en Slot B, viajan como referencias rotuladas (persona A, persona B, fondo).
+                const slots = buildSlotsPayload({
+                    subjects: [
+                        sourceAssetA && sourceAssetA.kind === 'person' ? { dataUrl: sourceAssetA.dataUrl, label: personA.displayName } : null,
+                        vpArchetype !== 'single_talking_head' && personB && sourceAssetC && sourceAssetC.kind === 'person' ? { dataUrl: sourceAssetC.dataUrl, label: personB.displayName } : null,
+                    ],
+                    background: sourceAssetB && sourceAssetB.kind === 'background' ? { dataUrl: sourceAssetB.dataUrl, label: location.displayName } : null,
+                });
+                const genImg = await generateImageFromPrompt({ prompt, aspectRatio: "16:9", size: "2k", slots, signal });
                 pushOutput({ id: safeId("vp"), module: "tools" as any, createdAt: Date.now(), label: `VP ${angle} ${v + 1}`, imageUrl: genImg, metadata: { module: "tools_videopodcast", archetype: vpArchetype, location: vpLocationId, angle, persona_a: vpPersonA, persona_b: vpPersonB || undefined, blueprint_used: vpActiveBlueprint?.id, timestamp: new Date().toISOString() }, aspect: "16:9" });
             }
         }

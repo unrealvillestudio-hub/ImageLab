@@ -286,7 +286,12 @@ const PSY_AUTHORITY = {
   assert.ok(vacio.negative.includes('diptych'), 'sin marca ni preset, el negativo del motor sigue ahí');
   const cl = (source.match(/const SINGLE_FRAME_CLAUSE =[\s\S]*?;\n/) ?? [''])[0];
   for (const caso of ['PSY', 'CONTRAST', 'Neurone', 'frizz']) assert.ok(!cl.includes(caso), `la cláusula nombra el caso '${caso}'`);
-  assert.match(source, /enforceEngineClauses\(synth\.text, \[NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE[,\]]/,
+  // 2026-10-03 (motor de personas) — la lista que se repone sobre la síntesis vive en `engineClausesFor`
+  // (bloque PB): se exige que el handler la use y que la lista empiece por las tres cláusulas del eje.
+  // Su comportamiento lo ejecutan `prompt_builder_test.mjs` y `personas_test.mjs` (CC_PROTOCOL §14.3).
+  assert.match(source, /enforceEngineClauses\(synth\.text, engineClausesFor\(\{/,
+    'la síntesis del constructor no puede quitarla');
+  assert.match(source, /return \[noTextClause\(args\.allowedSceneText\), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE[,\]]/,
     'la síntesis del constructor no puede quitarla');
 }
 

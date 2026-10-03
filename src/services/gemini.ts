@@ -1,5 +1,28 @@
 import { AspectRatio, ImageSize, ReferenceImage } from "../core/types.ts";
 
+/** Lo que la UI manda por espacio. Mismo contrato que `DirectSlots` en `api/execute.ts`. */
+export interface SlotsPayload {
+  subjects?: { dataUrl: string; label: string }[];
+  background?: { dataUrl: string; label: string } | null;
+  product?: { dataUrl: string; label: string }[];
+  style?: { dataUrl: string; label: string }[];
+}
+
+/** Arma los espacios en el orden que el servidor rotula. Sin imágenes, `undefined` (camino de siempre). */
+export function buildSlotsPayload(p: {
+  subjects?: ({ dataUrl: string; label: string } | undefined | null)[];
+  background?: { dataUrl: string; label: string } | null;
+  product?: ({ dataUrl: string; label: string } | undefined | null)[];
+  style?: ({ dataUrl: string; label: string } | undefined | null)[];
+}): SlotsPayload | undefined {
+  const keep = <T,>(xs?: (T | undefined | null)[]) => (xs ?? []).filter((x): x is T => !!x);
+  const out: SlotsPayload = {
+    subjects: keep(p.subjects), background: p.background ?? null, product: keep(p.product), style: keep(p.style),
+  };
+  const n = (out.subjects?.length ?? 0) + (out.background ? 1 : 0) + (out.product?.length ?? 0) + (out.style?.length ?? 0);
+  return n ? out : undefined;
+}
+
 const VALID_ASPECT_RATIOS = new Set([
   '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'
 ]);
@@ -19,6 +42,9 @@ export async function generateImageFromPrompt(params: {
   referenceImages?: ReferenceImage[];
   model?: string;
   signal?: AbortSignal;
+  // 2026-10-03 — los espacios con su rol (sujetos A y C, fondo B, producto, estilo). Si llegan, el
+  // servidor rotula cada imagen por posición con el mismo constructor que el carril asíncrono.
+  slots?: SlotsPayload;
 }): Promise<string> {
   if (params.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
@@ -36,7 +62,10 @@ export async function generateImageFromPrompt(params: {
       prompt: params.prompt,
       aspectRatio: validAR,
       sourceAssetDataUrl: params.sourceAssetDataUrl,
+      // Antes no viajaba y el servidor la cambiaba por «main subject».
+      sourceAssetLabel: params.sourceAssetLabel,
       referenceImages: params.referenceImages,
+      ...(params.slots ? { slots: params.slots } : {}),
       model: modelName,
     }),
     signal: params.signal,
@@ -65,6 +94,8 @@ export async function generateAvatar(params: {
   creativityLevel: number;
   subjectA?: { dataUrl: string; label: string };
   subjectB?: { dataUrl: string; label: string };
+  // 2026-10-03 — Slot C («Subj 2»). Antes no existía aquí y la UI lo descartaba.
+  subjectC?: { dataUrl: string; label: string };
   background?: { dataUrl: string; label: string };
   styleRefs?: { dataUrl: string; label: string }[];
   userPrompt?: string;
@@ -78,12 +109,17 @@ ${params.userPrompt ? `Extra constraints: ${params.userPrompt}` : ''}
 ${params.allowMirrors ? '' : 'Strictly avoid mirrors or reflective glass in background.'}
 ${params.strictIdentity ? 'Maintain strict facial likeness of the person provided.' : ''}`;
 
+  // 2026-10-03 — antes sólo viajaba el sujeto A (y el estilo): el sujeto B, el fondo y el Slot C se
+  // descartaban aquí. Ahora viajan todos, cada uno con su rol.
   return generateImageFromPrompt({
     prompt,
     aspectRatio: params.aspectRatio,
     size: "1k",
-    sourceAssetDataUrl: params.subjectA?.dataUrl,
-    referenceImages: params.styleRefs,
+    slots: buildSlotsPayload({
+      subjects: [params.subjectA, params.subjectC, params.subjectB],
+      background: params.background ?? null,
+      style: params.styleRefs,
+    }),
     signal: params.signal
   });
 }

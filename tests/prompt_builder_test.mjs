@@ -31,6 +31,15 @@ const M = await import(pathToFileURL(mod).href);
 let n = 0;
 const ok = (name, fn) => { fn(); n++; console.log(`  ✓ ${name}`); };
 
+// 2026-10-03 (motor de personas) — la lista de cláusulas que se reponen sobre la síntesis salió del
+// handler a `engineClausesFor` (bloque PB). Las comprobaciones que antes leían esa lista en la FUENTE
+// del handler ahora la EJECUTAN (CC_PROTOCOL §14.3: un test pegado a la arquitectura se hace
+// independiente, no se relaja). Y se comprueba que el handler la usa.
+const ENGINE_ARGS = { mode: 'regenerate_full', textZone: 'TEXTZONE', personaCount: 1, gaze: null, placement: 'PLACEMENT',
+  productInScene: true, productComposited: false, angleSeed: 's' };
+const engine = (over = {}) => M.engineClausesFor({ ...ENGINE_ARGS, ...over });
+assert.match(source, /enforceEngineClauses\(synth\.text, engineClausesFor\(\{/, 'el handler no repone las cláusulas con engineClausesFor');
+
 // 1 · Sin copy entero no hay síntesis: el camino de hoy queda intacto.
 ok('shouldSynthesize exige copy_full no vacío', () => {
   assert.equal(M.shouldSynthesize({}), false);
@@ -151,7 +160,8 @@ ok('encuadre: el sujeto manda y la locación es fondo; la cláusula sólo al gen
   assert.ok(msg.includes('It is the BACKDROP') && !msg.includes('architecture, materials, colours and layout'));
   const c = M.imageRoleClause({ hasSource: false, personaName: 'P', personaRefs: 1, locationName: 'L', locationRefs: 1 });
   assert.ok(c.includes('frame the subject, not the room'));
-  assert.match(source, /mode === 'edit_from_current' \? \[\] : \[SUBJECT_FRAMING_CLAUSE[,\]]/);
+  assert.ok(engine().includes(M.SUBJECT_FRAMING_CLAUSE), 'al generar desde cero, el encuadre se repone');
+  assert.ok(!engine({ mode: 'edit_from_current' }).includes(M.SUBJECT_FRAMING_CLAUSE), 'al editar, no');
 });
 
 ok('la expresión de la persona sigue el tono del gancho, sólo cuando la persona sale', () => {
@@ -170,7 +180,9 @@ ok('zona de texto: sale del dato de la marca, y sin dato no hay cláusula', () =
   assert.equal(M.textZoneClause({ anchor: 'bottom_left' }), '', 'sin porcentaje declarado, nada');
   assert.equal(M.textZoneClause({ anchor: 'center', text_zone_pct: 40 }), '', 'anclaje sin lado, nada');
   assert.equal(M.textZoneClause(null), '');
-  assert.match(source, /\[SUBJECT_FRAMING_CLAUSE, \.\.\.\(textZone \? \[textZone\] : \[\]\),/);
+  const l = engine();
+  assert.equal(l.indexOf('TEXTZONE'), l.indexOf(M.SUBJECT_FRAMING_CLAUSE) + 1, 'la zona de texto va pegada al encuadre');
+  assert.ok(!engine({ textZone: '' }).includes(''), 'sin zona declarada, no hay cláusula vacía');
 });
 
 ok('gesto: el catálogo de la persona manda; sin catálogo, la regla general', () => {
@@ -187,7 +199,9 @@ ok('luz por capas: fuente, temperatura y grano compartidos, sin aplanar; se repo
   assert.ok(L.includes('never flat') && L.includes('key light on the face') && L.includes('same light direction, color temperature'));
   assert.ok(L.includes('film grain') && L.includes('depth and perspective'));
   assert.ok(!L.includes('same direction, color temperature, intensity'), 'la intensidad pareja es lo que aplanaba');
-  assert.match(source, /SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,/);
+  const l = engine();
+  assert.ok(l[2].startsWith('The image is ONE single photograph') && l[3] === M.LIGHTING_COHERENCE_CLAUSE, 'la luz va detrás del encuadre único');
+  assert.equal(engine({ personaCount: 0 })[3], M.LIGHTING_COHERENCE_CLAUSE, 'se repone siempre, con o sin persona');
 });
 
 ok('vestuario: las fotos son identidad, no ropa; el catálogo de la persona manda', () => {
@@ -212,7 +226,9 @@ ok('lugar del producto: sale de la franja de texto de la marca, y se repone con 
   assert.ok(M.productPlacementClause(abajo, true, 1).includes('held in the person\'s hand'), 'un envase: en la mano');
   assert.ok(M.productPlacementClause({ anchor: 'top_right', text_zone_pct: 30 }, true).includes('lower part of the frame'));
   assert.equal(M.productPlacementClause({ anchor: 'bottom_left' }, true), '', 'sin franja declarada, nada');
-  assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_IDENTITY_ONLY_CLAUSE\] : \[\]\), \.\.\.\(placement \? \[placement\] : \[\]\)/);
+  const l = engine();
+  assert.equal(l.indexOf('PLACEMENT'), l.indexOf(M.PERSONA_IDENTITY_ONLY_CLAUSE) + 1, 'el lugar del producto va pegado a la identidad');
+  assert.ok(!engine({ personaCount: 0 }).includes(M.PERSONA_IDENTITY_ONLY_CLAUSE), 'sin persona, no hay identidad que reponer');
 });
 
 ok('producto: del lado contrario al texto, con ángulo estable por semilla; mirada con destino', () => {
@@ -225,7 +241,8 @@ ok('producto: del lado contrario al texto, con ángulo estable por semilla; mira
   const lados = new Set(['a','b','c','d','e','f','g','h'].map((s) => M.productAngleClause(s).includes('to the left') ? 'L' : 'R'));
   assert.equal(lados.size, 2, 'las semillas reparten los dos lados');
   assert.ok(M.PERSONA_GAZE_CLAUSE.includes('into the camera, at the other person in the scene, or at the product'));
-  assert.match(source, /\.\.\.\(personaUsed \? \[PERSONA_GAZE_CLAUSE\] : \[\]\)/);
+  assert.ok(engine().includes(M.PERSONA_GAZE_CLAUSE), 'con persona y sin dato de mirada, la cláusula de siempre');
+  assert.ok(!engine({ personaCount: 0 }).includes(M.PERSONA_GAZE_CLAUSE), 'sin persona, sin mirada');
 });
 
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
