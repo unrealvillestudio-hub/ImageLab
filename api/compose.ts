@@ -73,7 +73,11 @@ declare const process: { env: Record<string, string | undefined> };
 //         central no cabe entre la cabecera y el pie, se reduce por escalones (cifra → titular →
 //         cuerpo y pasos → pasos omitidos, nunca el crítico) y el pie no se tapa ni sale del lienzo.
 //         Una lámina que ya cabía sale idéntica.
-export const COMPOSITOR_VERSION = '1.3.3';
+//   1.3.4 (2026-10-03) — efecto de texto en las láminas con foto (`tokens.carousel.text_effect`): una
+//         sombra por glifo, del color de una FUNCIÓN de la paleta, que da contraste local al texto sin
+//         tocar el velo ni la imagen. Sólo con `background:'image'`; ni la superficie, ni el logotipo,
+//         ni la barra de progreso. Sin el token, la escena sale idéntica a la de 1.3.3.
+export const COMPOSITOR_VERSION = '1.3.4';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -919,6 +923,49 @@ type CarouselLogo =
   | { kind: 'image'; src: string; heightPct: number; aspect: number }
   | { kind: 'wordmark'; sizePct: number; parts: Array<{ text: string; family: string; weight: number; italic: boolean; color: string; letterSpacingEm: number; scale: number; stretch: { x: number; y: number } | null; spaceBeforeEm: number }> };
 
+// ── 1.3.4 · EFECTO DE TEXTO DE LAS LÁMINAS CON FOTO ──────────────────────────────────────────────
+// DEFECTO, medido en producción (2026-10-03): en láminas con foto, el texto en el color de acento se
+// leía mal sobre caras o fondos cálidos. Oscurecer el velo lo resolvía tapando la foto, y cuánto
+// oscurecer era un juicio por lámina. La corrección es una capa que va CON el texto: una sombra por
+// glifo, que da contraste local alrededor de cada letra y no pinta ningún rectángulo.
+//
+// EJE (código): QUÉ es el efecto —dos sombras apiladas por glifo, una centrada (halo) y otra caída
+// hacia abajo— y A QUÉ texto se aplica (el de las láminas con foto, nunca el logotipo ni la barra).
+// INSTANCIA (dato, `tokens.carousel.text_effect`): la función de color, su alfa, y el desenfoque y el
+// desplazamiento como PORCENTAJE del ancho del lienzo. Ningún tamaño en px vive en el código de marca.
+const TEXT_EFFECT_KINDS = new Set(['shadow']);
+// Tope de desenfoque y desplazamiento, en % del ancho: por encima, la sombra deja de seguir al glifo y
+// se convierte en una mancha — el velo que este efecto existe para no tener que oscurecer.
+const TEXT_EFFECT_MAX_PCT = 5;
+
+export interface CarouselTextEffect { kind: 'shadow'; fn: string; alpha: number; blurPct: number; offsetPct: number; color?: string }
+
+/**
+ * Valida la FORMA de `tokens.carousel.text_effect`. PURO. Un token mal formado es un error con
+ * etiqueta estable (400 `CAROUSEL_TEXT_EFFECT_INVALID`), no un efecto silenciosamente omitido.
+ * No resuelve el color: eso lo hace `resolveCarouselChrome` contra la paleta de la marca.
+ */
+export function parseCarouselTextEffect(raw: unknown): CarouselTextEffect {
+  const bad = (why: string) => new CompositorError('CAROUSEL_TEXT_EFFECT_INVALID',
+    `carousel.text_effect mal formado: ${why}. Forma: { kind: 'shadow', color: <función de tokens.palette>, ` +
+    `alpha: 0..1, blur_pct: 0..${TEXT_EFFECT_MAX_PCT}, offset_pct: 0..${TEXT_EFFECT_MAX_PCT} } (% del ancho del lienzo)`, 400);
+  if (!isPlain(raw)) throw bad('debe ser un objeto');
+  const r = raw as Record<string, unknown>;
+  const kind = String(r.kind ?? '');
+  if (!TEXT_EFFECT_KINDS.has(kind)) throw bad(`kind='${kind || '∅'}' (válidos: ${[...TEXT_EFFECT_KINDS].join(', ')})`);
+  if (typeof r.color !== 'string' || !r.color.trim()) throw bad('color debe ser el nombre de una función de tokens.palette');
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+  const alpha = num(r.alpha);
+  const blurPct = num(r.blur_pct);
+  const offsetPct = num(r.offset_pct);
+  if (!(alpha > 0 && alpha <= 1)) throw bad(`alpha=${JSON.stringify(r.alpha)} (número, 0 < alpha ≤ 1)`);
+  for (const [k, v, raw2] of [['blur_pct', blurPct, r.blur_pct], ['offset_pct', offsetPct, r.offset_pct]] as const) {
+    if (!(v >= 0 && v <= TEXT_EFFECT_MAX_PCT)) throw bad(`${k}=${JSON.stringify(raw2)} (número, 0 ≤ ${k} ≤ ${TEXT_EFFECT_MAX_PCT})`);
+  }
+  if (blurPct === 0 && offsetPct === 0) throw bad('blur_pct y offset_pct en 0: la sombra quedaría oculta bajo el glifo');
+  return { kind: 'shadow', fn: r.color.trim(), alpha, blurPct, offsetPct };
+}
+
 /**
  * Resuelve el «cromo» de una lámina de carrusel: colores por FUNCIÓN, familias y tamaños por ROL,
  * textos y logotipo. PURO. Devuelve `applied:false` si la marca no declara `tokens.carousel`.
@@ -940,6 +987,8 @@ export function resolveCarouselChrome(args: {
   colors: Record<string, string>;
   surface: string;
   shade: null | Array<{ pos: number; color: string }>;
+  // 1.3.4 — sombra del texto de las láminas con foto; null si la marca no declara `carousel.text_effect`.
+  textEffect: null | CarouselTextEffect;
   type: Record<'headline' | 'body' | 'label' | 'figure', CarouselType>;
   headline: Array<{ text: string; keyword: boolean }>;
   subheadline: string | null;
@@ -1042,6 +1091,23 @@ export function resolveCarouselChrome(args: {
     }
   }
 
+  // ── 1.3.4 · efecto de texto de las láminas con foto (opcional; sin él, la escena de 1.3.3) ──
+  // La FORMA del token es contrato y se valida con 400; el COLOR es una función de `tokens.palette` y,
+  // si no resuelve, falla como cualquier otro color del carrusel (faltante acumulado, fail-loud).
+  let textEffect: null | CarouselTextEffect = null;
+  if (ct.text_effect != null) {
+    const te = parseCarouselTextEffect(ct.text_effect);
+    const spec = palTok[te.fn];
+    const role = typeof spec === 'string' ? spec : isPlain(spec) ? String(spec.role ?? '') : '';
+    if (spec == null || !role) missing.push(`palette.${te.fn} (pedido por carousel.text_effect.color)`);
+    else {
+      // El alfa es el del efecto, no el que la función pueda llevar para su propio elemento.
+      const color = carouselColor(role, palBy, { allowHex: false, alpha: te.alpha });
+      if (!color) missing.push(`brand_palette.role='${role}' (pedido por palette.${te.fn}, vía carousel.text_effect.color)`);
+      else textEffect = { ...te, color };
+    }
+  }
+
   if (missing.length) {
     throw new CompositorError(
       'COMPOSITOR_TOKENS_INCOMPLETE',
@@ -1115,7 +1181,7 @@ export function resolveCarouselChrome(args: {
   return {
     applied: true, slide,
     canvas: { width: canvasW, height: canvasH },
-    marginPct, colors, surface, shade, type,
+    marginPct, colors, surface, shade, textEffect, type,
     headline: split.parts,
     subheadline: sub.trim() ? sub : null,
     swipeText, logo, fonts, warnings,
@@ -1150,6 +1216,18 @@ export function headlineAtoms(parts: Array<{ text: string; keyword: boolean }>):
 }
 
 /**
+ * 1.3.4 — el `textShadow` de satori para el efecto de texto. PURO. Dos sombras apiladas del mismo
+ * color: un halo centrado (contraste en todo el contorno del glifo, también por arriba) y una caída
+ * hacia abajo (asienta la letra sobre la foto). Desenfoque y desplazamiento son % del ANCHO del lienzo.
+ */
+export function carouselTextShadow(te: CarouselTextEffect, canvasWidth: number): string {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const blur = r2((te.blurPct / 100) * canvasWidth);
+  const off = r2((te.offsetPct / 100) * canvasWidth);
+  return `0px 0px ${blur}px ${te.color}, 0px ${off}px ${blur}px ${te.color}`;
+}
+
+/**
  * La escena de una lámina de carrusel. PURA, misma disciplina que `buildOverlayScene`: todo se mide
  * en porcentaje del ANCHO del lienzo, y las proporciones internas (puntos, barras, separaciones) se
  * derivan del tamaño de letra de su familia — eso es geometría del eje, no dato de una marca.
@@ -1177,6 +1255,10 @@ export function buildCarouselScene(args: {
   const slide = chrome.slide;
   const withImage = slide.background === 'image' && !!args.backgroundSrc;
   const children: Array<Record<string, any>> = [];
+  // 1.3.4 — efecto de texto: sólo sobre foto, y sólo en nodos de TEXTO (no en el logotipo, la barra de
+  // progreso, las marcas de los pasos ni las flechas). Sin token `fx` es {}: ningún estilo cambia y la
+  // escena es la de 1.3.3, clave por clave.
+  const fx: Record<string, string> = withImage && chrome.textEffect ? { textShadow: carouselTextShadow(chrome.textEffect, W) } : {};
 
   const text = (value: string, s: Record<string, any>) => ({ type: 'div', props: { style: { display: 'flex', ...s }, children: value } });
   const font = (k: CarouselType, size: number) => ({
@@ -1269,8 +1351,8 @@ export function buildCarouselScene(args: {
           props: {
             style: { display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: r2(L * 0.95), width: inner },
             children: [
-              slide.eyebrow ? text(slide.eyebrow, { ...labelFont, color: c.eyebrow }) : { type: 'div', props: { style: { display: 'flex' } } },
-              text(`${slide.index} / ${slide.total}`, { ...labelFont, color: c.counter, textTransform: 'none' }),
+              slide.eyebrow ? text(slide.eyebrow, { ...labelFont, color: c.eyebrow, ...fx }) : { type: 'div', props: { style: { display: 'flex' } } },
+              text(`${slide.index} / ${slide.total}`, { ...labelFont, color: c.counter, textTransform: 'none', ...fx }),
             ],
           },
         },
@@ -1286,24 +1368,24 @@ export function buildCarouselScene(args: {
     mid.push({
       type: 'div',
       props: {
-        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline },
+        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline, ...fx },
         children: headlineAtoms(chrome.headline).map((atom) => ({
           type: 'div',
           props: {
             style: { display: 'flex', flexDirection: 'row' },
             children: atom.map((p) => ({
               type: 'span',
-              props: { style: { textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline }, children: p.text },
+              props: { style: { textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline, ...fx }, children: p.text },
             })),
           },
         })),
       },
     });
   }
-  const subNode = (marginTop: number) => text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: inner });
+  const subNode = (marginTop: number) => text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: inner, ...fx });
   if (slide.figure) {
     const fs = px(T.figure.sizePct);
-    mid.push(text(slide.figure.value, { ...font(T.figure, fs), color: c.figure, marginTop: mid.length ? r2(B * 0.8) : 0, width: inner }));
+    mid.push(text(slide.figure.value, { ...font(T.figure, fs), color: c.figure, marginTop: mid.length ? r2(B * 0.8) : 0, width: inner, ...fx }));
     if (slide.figure.bar) {
       const bh = Math.max(2, r2(L * 0.53));
       const from = r2((slide.figure.bar.from / 100) * inner);
@@ -1327,7 +1409,7 @@ export function buildCarouselScene(args: {
         style: { display: 'flex', flexDirection: 'row', alignItems: 'center', marginTop: r2(B * 0.69), width: inner },
         children: [
           { type: 'div', props: { style: { width: dot, height: dot, borderRadius: r2(dot / 2), backgroundColor: c.source_mark, marginRight: r2(L * 0.74), flexShrink: 0 } } },
-          text(slide.figure.source, { ...font(T.label, r2(L * 1.1)), letterSpacing: r2(T.label.letterSpacingEm * 0.4 * L * 1.1), textTransform: 'none', color: c.source_text }),
+          text(slide.figure.source, { ...font(T.label, r2(L * 1.1)), letterSpacing: r2(T.label.letterSpacingEm * 0.4 * L * 1.1), textTransform: 'none', color: c.source_text, ...fx }),
         ],
       },
     });
@@ -1357,7 +1439,7 @@ export function buildCarouselScene(args: {
                   },
                 },
               },
-              text(s.text, { ...font(T.body, ss), lineHeight: 1.35, color: s.critical ? c.step_critical_text : c.step_text }),
+              text(s.text, { ...font(T.body, ss), lineHeight: 1.35, color: s.critical ? c.step_critical_text : c.step_text, ...fx }),
             ],
           },
         })),
@@ -1376,7 +1458,7 @@ export function buildCarouselScene(args: {
             // Subrayado, sin forma de botón: en una imagen nada se toca (maqueta v4).
             style: { display: 'flex', flexDirection: 'row', alignItems: 'center', maxWidth: inner, paddingBottom: r2(cs * 0.45), borderBottom: `${Math.max(1, r2(cs * 0.09))}px solid ${c.cta_underline}` },
             children: [
-              text(slide.cta, { ...font(T.label, cs), letterSpacing: r2(T.label.letterSpacingEm * 0.75 * cs), color: c.cta_text, flexShrink: 1 }),
+              text(slide.cta, { ...font(T.label, cs), letterSpacing: r2(T.label.letterSpacingEm * 0.75 * cs), color: c.cta_text, flexShrink: 1, ...fx }),
               arrow(c.cta_underline, cs, 'down'),
             ],
           },
@@ -1420,7 +1502,7 @@ export function buildCarouselScene(args: {
       type: 'div',
       props: {
         style: { display: 'flex', flexDirection: 'row', alignItems: 'center' },
-        children: [text(chrome.swipeText, { ...labelFont, color: c.swipe }), arrow(c.swipe, L)],
+        children: [text(chrome.swipeText, { ...labelFont, color: c.swipe, ...fx }), arrow(c.swipe, L)],
       },
     }
     : { type: 'div', props: { style: { display: 'flex' } } };
@@ -2054,6 +2136,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           carousel: {
             index: chrome.slide.index, total: chrome.slide.total, role: chrome.slide.role, background: chrome.slide.background,
             keyword_found: !!chrome.headline.find((p) => p.keyword), logo: chrome.logo ? chrome.logo.kind : null,
+            // 1.3.4 — si la lámina llevó efecto de texto, y cuál: sólo en láminas con foto.
+            text_effect: chrome.textEffect && backgroundSrc
+              ? { kind: chrome.textEffect.kind, color: chrome.textEffect.fn, alpha: chrome.textEffect.alpha,
+                  blur_pct: chrome.textEffect.blurPct, offset_pct: chrome.textEffect.offsetPct, text_shadow: carouselTextShadow(chrome.textEffect, width) }
+              : null,
             // 1.3.3 — qué hizo el ajuste vertical: sin esto no se puede auditar una lámina reducida.
             fit: fit.report,
           },

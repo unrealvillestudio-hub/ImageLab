@@ -37,7 +37,7 @@ const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
   'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer',
   'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning',
-  'fontAdvanceMetrics', 'fitFontKey', 'measureCarouselLayout', 'fitCarouselContent']) {
+  'fontAdvanceMetrics', 'fitFontKey', 'measureCarouselLayout', 'fitCarouselContent', 'parseCarouselTextEffect', 'carouselTextShadow']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
 
@@ -978,6 +978,107 @@ test('1.3.3 · la medida sigue al dato de la marca: un pie más alto deja menos 
   assert.equal(conImagen.foot, 60, 'logotipo de 6 % del ancho (1000)');
   assert.ok(conImagen.available < chico.available || chico.foot >= 60);
   assert.equal(conImagen.gap, Math.round(30 * 0.6 * 100) / 100, 'el aire mínimo es proporcional a la etiqueta');
+});
+
+console.log('\n── 1.3.4 · efecto de texto en las láminas con foto (tokens.carousel.text_effect) ──');
+
+// El efecto de la marca inventada: la función `shade` (rol `tierra` de SU paleta), en % del ancho.
+const TE = { kind: 'shadow', color: 'shade', alpha: 0.8, blur_pct: 1, offset_pct: 0.2 };
+const teOver = (te = TE) => ({ palette: { shade: 'tierra' }, carousel: { text_effect: te } });
+const conSombra = (scene) => findAll(scene, (n) => n.props?.style?.textShadow != null);
+const sinSombra = (v) => JSON.parse(JSON.stringify(v), (k, x) => (k === 'textShadow' ? undefined : x));
+const TE_CASOS = [
+  [{ index: 1, total: 4, role: 'cover', eyebrow: 'Campo', keyword: 'trigo' }, { headline: 'El trigo no espera', subheadline: 'Ni el clima.' }],
+  [{ index: 3, total: 4, role: 'body', eyebrow: 'Campo', keyword: 'trigo', figure: { value: '62%', bar: { from: 10, to: 62 }, source: 'Censo agrario 2025' }, steps: [{ text: 'Sembrar' }, { text: 'Regar', critical: true }] }, { headline: 'El trigo no espera' }],
+  [{ index: 4, total: 4, role: 'closing', cta: 'Pide tu caja' }, { headline: 'Cosecha propia' }],
+];
+
+test('1.3.4 · SIN token, las láminas con foto son las de 1.3.3 byte a byte (golden del commit bb8bef6)', () => {
+  // Golden: sha256 de la escena que producía el bloque de compose 1.3.3 (commit bb8bef6) para estas
+  // mismas entradas, con foto. Los goldens de superficie de 1.2.0 y 1.3.2 siguen arriba, intactos.
+  const golden = [
+    '3a94a86871244d5e3a0015554a24a91d3fd164e316e77bf5a529e0a1e013818c',
+    '30c52c5922d9952a355bef4e276d52bb506a08543714acb4124708499d20b731',
+    '6c1d830c99d3a9ab372afb1f8fa73bfd98b5254f9f8929417fae3b1eb946ecb0',
+  ];
+  TE_CASOS.forEach(([c, text], k) => {
+    const sc = sceneN1(c, text, undefined, 'data:image/png;base64,BG');
+    assert.equal(conSombra(sc).length, 0, 'sin token no hay sombra');
+    assert.equal(createHash('sha256').update(JSON.stringify(sc)).digest('hex'), golden[k], `lámina ${c.role}`);
+  });
+  assert.equal(chromeN1(TE_CASOS[0][0], TE_CASOS[0][1]).textEffect, null);
+});
+
+test('1.3.4 · token válido: sombra en TODO el texto de la lámina con foto, y en nada más', () => {
+  for (const [c, text] of TE_CASOS) {
+    const sc = sceneN1(c, text, teOver(), 'data:image/png;base64,BG');
+    const sombra = 'rgba(59, 42, 30, 0.8)';
+    const esperada = `0px 0px 10px ${sombra}, 0px 2px 10px ${sombra}`;
+    // Texto de la lámina: todos los nodos con texto salvo el logotipo.
+    const logo = new Set(['Granja', 'Sur']);
+    const textos = textNodes(sc).filter((n) => !logo.has(n.props.children));
+    assert.ok(textos.length >= 3, `${c.role}: hay texto que sombrear`);
+    for (const n of textos) {
+      const own = n.props.style?.textShadow;
+      // El titular lleva la sombra en su contenedor y en cada tramo (la clave incluida).
+      assert.equal(own, esperada, `${c.role}: «${n.props.children}» lleva la sombra (desenfoque y caída en % del ancho 1000)`);
+    }
+    for (const n of textNodes(sc).filter((x) => logo.has(x.props.children))) {
+      assert.equal(n.props.style?.textShadow, undefined, 'el logotipo no lleva sombra');
+    }
+    for (const n of conSombra(sc)) {
+      assert.ok(typeof n.props.children === 'string' || n.props.style.flexWrap === 'wrap',
+        'la sombra sólo va en nodos de texto (y en el contenedor del titular)');
+    }
+    assert.equal(findAll(sc, (n) => n.props?.style?.flexGrow === 1 && n.props.style.textShadow).length, 0, 'la barra de progreso no');
+    // Una capa no toca a la otra: quitando la sombra, la escena es exactamente la de sin token.
+    assert.deepEqual(sinSombra(sc), sinSombra(sceneN1(c, text, undefined, 'data:image/png;base64,BG')),
+      `${c.role}: el velo, la foto, la franja y la geometría no cambian`);
+  }
+  const ch = chromeN1(TE_CASOS[0][0], TE_CASOS[0][1], teOver());
+  assert.deepEqual(ch.textEffect, { kind: 'shadow', fn: 'shade', alpha: 0.8, blurPct: 1, offsetPct: 0.2, color: 'rgba(59, 42, 30, 0.8)' });
+  assert.equal(M.carouselTextShadow(ch.textEffect, 2000), '0px 0px 20px rgba(59, 42, 30, 0.8), 0px 4px 20px rgba(59, 42, 30, 0.8)',
+    'los px salen del ancho del lienzo, no de una constante');
+});
+
+test('1.3.4 · lámina sobre superficie: sin efecto aunque la marca lo declare', () => {
+  const c = { index: 2, total: 4, role: 'body', background: 'surface', eyebrow: 'Campo', keyword: 'trigo', steps: [{ text: 'Sembrar' }] };
+  const sc = sceneN1(c, { headline: 'El trigo no espera' }, teOver());
+  assert.equal(conSombra(sc).length, 0);
+  assert.equal(JSON.stringify(sc), JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })), 'idéntica a la de sin token');
+  // Y una lámina «con foto» a la que no le llegó foto tampoco: sin foto no hay contra qué contrastar.
+  assert.equal(conSombra(sceneN1({ index: 1, total: 4, role: 'cover' }, { headline: 'Cosecha' }, teOver(), null)).length, 0);
+});
+
+test('1.3.4 · token mal formado → 400 CAROUSEL_TEXT_EFFECT_INVALID', () => {
+  const malos = [
+    'sombra', [], 0,
+    { ...TE, kind: 'glow' }, { ...TE, kind: undefined },
+    { ...TE, color: '' }, { ...TE, color: 3 }, { ...TE, color: { role: 'tierra' } },
+    { ...TE, alpha: 0 }, { ...TE, alpha: 1.2 }, { ...TE, alpha: '0.8' }, { ...TE, alpha: undefined },
+    { ...TE, blur_pct: -1 }, { ...TE, blur_pct: 12 }, { ...TE, blur_pct: '1' }, { ...TE, offset_pct: Number.NaN },
+    { ...TE, offset_pct: 6 }, { ...TE, blur_pct: 0, offset_pct: 0 },
+  ];
+  for (const te of malos) {
+    assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver(te)),
+      (e) => e.label === 'CAROUSEL_TEXT_EFFECT_INVALID' && e.status === 400, JSON.stringify(te));
+  }
+  // Los bordes válidos pasan: sombra dura sin desenfoque, o halo sin caída.
+  assert.equal(chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver({ ...TE, blur_pct: 0, offset_pct: 0.3 })).textEffect.blurPct, 0);
+  assert.equal(chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver({ ...TE, alpha: 1, offset_pct: 0 })).textEffect.offsetPct, 0);
+});
+
+test('1.3.4 · función de color inexistente → fail-loud como los demás colores del carrusel', () => {
+  const sinFuncion = { carousel: { text_effect: { ...TE, color: 'sombra_texto' } } };
+  assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, sinFuncion),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /palette\.sombra_texto \(pedido por carousel\.text_effect\.color\)/.test(e.message));
+  const rolInexistente = { palette: { shade: 'no_existe' }, carousel: { text_effect: TE } };
+  assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, rolInexistente),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /brand_palette\.role='no_existe'/.test(e.message));
+  // La función puede declarar su propio alfa para su elemento; el del efecto es el que manda.
+  const conAlfa = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' },
+    { palette: { shade: { role: 'tierra', alpha: 0.1 } }, carousel: { text_effect: TE } });
+  assert.equal(conAlfa.textEffect.color, 'rgba(59, 42, 30, 0.8)');
 });
 
 console.log(`\n${'─'.repeat(72)}`);
