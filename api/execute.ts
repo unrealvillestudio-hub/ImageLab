@@ -310,10 +310,21 @@ async function fetchImageInline(url: string): Promise<InlineImage> {
 
 /** Cómo entra el producto a la imagen para esta marca: DATO en `imagelab_overlay_tokens.product.mode`.
  *  `composite` = lo pega el compositor; cualquier otro valor o ausencia = se pinta en la escena (opción c). */
-async function loadOverlayTokens(brandId: string | undefined): Promise<any | null> {
-  if (!brandId) return null;
-  const row = await sb<any>(`imagelab_overlay_tokens?brand_id=eq.${encodeURIComponent(brandId)}&canal=is.null&select=tokens`);
-  return row?.tokens ?? null;
+//
+// 2026-10-03 — también la fila del CANAL (activa), mezclada sobre la de marca por `overlayTokensForCanal`
+// (bloque PB). La consulta de la fila de marca no cambia. Sin fila de canal, `tokens` es el mismo objeto
+// de antes. Cada consulta grita por su cuenta si falla (`sb`), y entonces se sigue con lo que llegó.
+//
+// ⛔ NO OPERATIVO — versión anterior (main 35eccca), se conserva por trazabilidad: devolvía sólo
+// `row?.tokens ?? null` de la fila de marca, sin mirar el canal de la petición.
+async function loadOverlayTokens(brandId: string | undefined, canal: string): Promise<{ tokens: any | null; canal: string | null; declared: string[] }> {
+  if (!brandId) return { tokens: null, canal: null, declared: [] };
+  const b = encodeURIComponent(brandId);
+  const [row, canalRow] = await Promise.all([
+    sb<any>(`imagelab_overlay_tokens?brand_id=eq.${b}&canal=is.null&select=tokens`),
+    canal ? sb<any>(`imagelab_overlay_tokens?brand_id=eq.${b}&canal=eq.${encodeURIComponent(canal)}&active=is.true&select=canal,tokens&limit=1`) : null,
+  ]);
+  return overlayTokensForCanal(row?.tokens ?? null, canalRow, canal);
 }
 
 // Los topes de fotos de referencia (persona, locación, producto) viven en el bloque PB desde el
@@ -1105,6 +1116,85 @@ export function subjectFramingClause(count: number): string {
     'with only a small margin above their heads — no large empty area of ceiling, wall or sky above them. The people are the subject and the place is the backdrop behind them, never the other way round';
 }
 
+// ── LA FRANJA Y EL ENCUADRE, POR CANAL (2026-10-03) ─────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA, medido sobre main 35eccca:
+//   · `loadOverlayTokens` leía sólo la fila de MARCA (`canal is null`), así que la franja de texto
+//     (`layout.text_zone_pct`) se pedía en todos los canales de la marca, también en la imagen dentro
+//     del artículo, que se sube sin texto encima (`content-run-stage`, `uploadMedia` sin compositor).
+//   · `engineClausesFor` añadía el encuadre ceñido en todo modo que no fuera edición, así que un plano
+//     cenital o un detalle de manos recibía «el sujeto llena casi todo el cuadro».
+//   Las dos cosas varían por (marca, canal) en la realidad, y la tabla ya tiene esa granularidad: el
+//   compositor (`api/compose.ts`, `pickOverlayTokens`) lee la fila del canal desde F3. El generador era
+//   el único lector que se quedaba en la de marca (MULTIBRAND_RULE §12).
+//
+// LA REGLA:
+//   · La fila del canal, si existe y está activa, se mezcla SOBRE la de marca, clave a clave, con la
+//     misma mezcla que el compositor: los dos leen la misma franja para el mismo canal.
+//   · `layout.text_zone_pct: 0` en la fila del canal apaga la cláusula de franja (y con ella el lugar del
+//     producto, que sólo existe para esquivar la franja): `textZoneClause` ya devuelve '' fuera de 10..70.
+//   · `layout.subject_framing` (`tight` | `scene`) decide el encuadre. `tight`, o la clave ausente, es el
+//     encuadre de siempre. Un valor ajeno no se adivina: se usa `tight` y se avisa.
+//   · Sin fila de canal, `tokens` es el MISMO objeto que antes y todo es idéntico byte a byte
+//     (`tests/fixtures/canal_layout_golden.json`, congelado sobre main).
+//
+// MULTIMARCA: cero marcas y cero canales en el código. Qué canal apaga la franja o abre el encuadre es
+// una fila de `imagelab_overlay_tokens`.
+
+/** Mezcla de capas de tokens: la de encima manda clave a clave; dos objetos se mezclan, todo lo demás se
+ *  reemplaza. Es la misma regla que `deepMergeTokens` de `api/compose.ts` (el test lo comprueba). */
+export function mergeTokenLayers(base: any, over: any): any {
+  const plain = (v: any) => v != null && typeof v === 'object' && !Array.isArray(v);
+  const out: Record<string, any> = { ...(plain(base) ? base : {}) };
+  for (const k of Object.keys(plain(over) ? over : {})) {
+    out[k] = plain(out[k]) && plain(over[k]) ? mergeTokenLayers(out[k], over[k]) : over[k];
+  }
+  return out;
+}
+
+/** Las claves de `layout` que este bloque lee del generador. Una fila de canal que no declara ninguna
+ *  (las de carrusel de hoy: scrim, anclaje y ancho) se mezcla igual, pero no se anuncia en la respuesta. */
+export const GENERATOR_LAYOUT_KEYS = ['text_zone_pct', 'subject_framing'] as const;
+
+/** Los tokens que valen para (marca, canal). La fila de canal sólo cuenta si es de ESTE canal y trae
+ *  tokens; si no, se devuelven los de marca tal cual (el mismo objeto: nada cambia). `declared` son las
+ *  claves de `GENERATOR_LAYOUT_KEYS` que la fila del canal declara en su propio `layout`. */
+export function overlayTokensForCanal(brandTokens: any | null, canalRow: any | null, canal: string | null | undefined): { tokens: any | null; canal: string | null; declared: string[] } {
+  const want = String(canal ?? '').trim().toUpperCase();
+  const got = String(canalRow?.canal ?? '').trim().toUpperCase();
+  const t = canalRow?.tokens;
+  if (!want || got !== want || t == null || typeof t !== 'object' || Array.isArray(t)) return { tokens: brandTokens, canal: null, declared: [] };
+  const lay = t.layout != null && typeof t.layout === 'object' ? t.layout : {};
+  return { tokens: mergeTokenLayers(brandTokens, t), canal: want, declared: GENERATOR_LAYOUT_KEYS.filter((k) => k in lay) };
+}
+
+/** El vocabulario del encuadre. `tight` es el de siempre. */
+export const SUBJECT_FRAMINGS = ['tight', 'scene'] as const;
+export type SubjectFraming = typeof SUBJECT_FRAMINGS[number];
+
+/** El encuadre que declara el dato (`layout.subject_framing`). Ausente: `tight`. Ajeno: `tight` y aviso. */
+export function resolveSubjectFraming(layout: any): { framing: SubjectFraming; declared: boolean; warning: string | null } {
+  const raw = layout?.subject_framing;
+  if (raw === undefined || raw === null || raw === '') return { framing: 'tight', declared: false, warning: null };
+  const v = String(raw).trim().toLowerCase();
+  if ((SUBJECT_FRAMINGS as readonly string[]).includes(v)) return { framing: v as SubjectFraming, declared: true, warning: null };
+  return { framing: 'tight', declared: false, warning: `layout.subject_framing=${JSON.stringify(raw)} no es uno de ${SUBJECT_FRAMINGS.join(', ')}: se usa tight` };
+}
+
+/** ENCUADRE DE ESCENA. La cláusula ceñida dice dos cosas: (a) el sujeto llena el cuadro y (b) sin una
+ *  zona vacía grande arriba. (a) contradice un plano cenital o un detalle de manos; (b) es el defecto
+ *  medido el 2026-09-27 y sigue valiendo en cualquier plano. Por eso `scene` no OMITE la cláusula: la
+ *  cambia por una que conserva (b) y deja el ángulo y la distancia a la escena. No depende del número
+ *  de personas: «todas enteras en el cuadro» es justo lo que un detalle de manos no cumple. */
+export const SCENE_FRAMING_CLAUSE =
+  'Frame the shot the way the scene describes it: a wide shot, a top-down overhead view or a close-up detail of hands or objects are all valid, ' +
+  'and the camera angle and distance follow the scene rather than a portrait framing. Whatever the framing, the scene fills the frame — no large empty area of ceiling, wall or sky';
+
+/** El encuadre para N personas según el dato. Con `tight`, exactamente `subjectFramingClause(n)`. */
+export function framingClause(framing: SubjectFraming | null | undefined, count: number): string {
+  return framing === 'scene' ? SCENE_FRAMING_CLAUSE : subjectFramingClause(count);
+}
+
 /** Identidad sin vestuario, para N personas. Con una, la constante literal de siempre. */
 export function personaIdentityOnlyClause(count: number): string {
   if (count < 2) return PERSONA_IDENTITY_ONLY_CLAUSE;
@@ -1180,11 +1270,13 @@ export function engineClausesFor(args: {
   mode: GenerationMode; textZone: string; personaCount: number; gaze: PersonaGaze | null;
   placement: string; productInScene: boolean; productComposited: boolean; angleSeed: string;
   allowedSceneText?: string[] | null;
+  /** 2026-10-03 — el encuadre como dato (`layout.subject_framing`). Ausente: `tight`, el de siempre. */
+  framing?: SubjectFraming | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
   return [noTextClause(args.allowedSceneText), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, lightingCoherenceClause(n),
-    ...(edit ? [] : [subjectFramingClause(n), ...(args.textZone ? [args.textZone] : []),
+    ...(edit ? [] : [framingClause(args.framing, n), ...(args.textZone ? [args.textZone] : []),
       ...(n > 0 ? [personaIdentityOnlyClause(n)] : []), ...(args.placement ? [args.placement] : [])]),
     ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
@@ -1996,9 +2088,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ? { name: String(params.product.name ?? ''), items: params.product.items.filter((i: any) => i && typeof i.image_url === 'string' && /^https?:\/\//.test(i.image_url)) }
         : null;
     // Los tokens de la marca dicen cómo entra el producto y DÓNDE irá el texto (TEXT-ZONE).
-    const overlayTokens = await loadOverlayTokens(request.brandId);
+    // 2026-10-03 — los de (marca, canal): la fila del canal manda clave a clave sobre la de marca.
+    const overlay = await loadOverlayTokens(request.brandId, built.canal);
+    const overlayTokens = overlay.tokens;
     const productMode = productIn ? (overlayTokens?.product?.mode === 'composite' ? 'composite' : 'in_scene') : null;
     const textZone = textZoneClause(overlayTokens?.layout);
+    const framingR = resolveSubjectFraming(overlayTokens?.layout);
+    if (framingR.warning) console.warn(`[ImageLab][CANAL] brand=${request.brandId} canal=${built.canal} ${framingR.warning}`);
+    // Sólo cuando la fila del canal declara franja o encuadre, o el dato declara el encuadre: sin eso, la
+    // respuesta es la de siempre, clave por clave (una fila de canal que no toca estas claves no se anuncia).
+    const overlayTrace = overlay.declared.length || framingR.declared ? {
+      overlay_canal: overlay.canal,
+      subject_framing: framingR.framing,
+      text_zone: textZone !== '',
+    } : {};
+    if (overlay.canal) {
+      console.log(`[ImageLab][CANAL] brand=${request.brandId} fila de canal ${overlay.canal} sobre la de marca (declara: ${overlay.declared.join(', ') || 'nada del generador'}): encuadre=${framingR.framing} franja=${textZone ? 'sí' : 'no'}`);
+    }
     const productComposited = params.product_composited === true || productMode === 'composite';
     const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = usedPersonas.length > 0;
@@ -2054,6 +2160,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         productInScene: !!productInScene, productComposited,
         angleSeed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
         allowedSceneText,
+        framing: framingR.framing,
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
@@ -2071,6 +2178,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         prompt_builder_usage:   builder?.usage ?? null,
         generation_mode: mode,
         persona_used:    personaUsed,
+        ...overlayTrace,
         status: 'ok',
       });
       return;
@@ -2145,6 +2253,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         reference_budget: alloc.budget,
         references_dropped: alloc.dropped,
       } : {}),
+      ...overlayTrace,
       status:         'ok',
     });
   } catch (err) {
