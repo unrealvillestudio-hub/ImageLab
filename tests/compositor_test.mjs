@@ -36,7 +36,8 @@ writeFileSync(modPath, `${source.slice(i, j + END.length)}\n`, 'utf8');
 const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
   'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer',
-  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning']) {
+  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning',
+  'fontAdvanceMetrics', 'fitFontKey', 'measureCarouselLayout', 'fitCarouselContent', 'parseCarouselTextEffect', 'carouselTextShadow']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
 
@@ -178,7 +179,9 @@ test('los NOMBRES de rol son de la marca, no del motor (paletas disjuntas)', () 
     'Montserrat', 'PT Sans', 'Cinzel', 'Space Mono', 'JetBrains', 'Cormorant', 'Crimson', 'Libre Baskerville', 'DM Sans',
     'Desliza', 'Swipe', 'Glisser',
     // 1.3.1 (2026-10-03) — el caso que destapó el kerning (pieza 85517171): su vocabulario tampoco.
-    'Broward', 'Dyfensor', 'Narrow']) {
+    'Broward', 'Dyfensor', 'Narrow',
+    // 1.3.3 (2026-10-03) — los textos de las cuatro láminas que destaparon el desborde vertical.
+    'Many Labs', 'BuildMVPFast', 'Soulmate', 'PRISMA', 'Rule 707', 'HOURS']) {
     assert.ok(!block.includes(rol), `el motor nombra '${rol}': eso es instancia, no eje`);
   }
   // Ni un hex en el bloque: todo color sale de brand_palette (o del logotipo declarado por la marca).
@@ -815,6 +818,267 @@ test('1.3.1 · una fuente sin kerning, o algo que no es una fuente, pasa intacta
   // Directorio que miente sobre su tamaño: no se lee fuera del búfer.
   const lies = fakeFont('OTTO', ['GPOS']); lies[5] = 9;
   assert.deepEqual(M.neutralizeKerning(lies).neutralized, ['GPOS']);
+});
+
+
+console.log('\n── 1.3.3 · ajuste vertical: el bloque central cabe entre la cabecera y el pie ──');
+
+// Fuente SINTÉTICA con las cuatro tablas que lee `fontAdvanceMetrics`: head (unitsPerEm), hhea
+// (numberOfHMetrics), hmtx (avances) y cmap. Glifos: 0 → 500, 1 → 600, 2 → 700, 3 → 250 unidades de 1000.
+function fakeTtf({ format = 4 } = {}) {
+  const be16 = (v) => [(v >> 8) & 0xff, v & 0xff];
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
+  const head = new Array(54).fill(0); head.splice(18, 2, ...be16(1000));
+  const hhea = new Array(36).fill(0); hhea.splice(34, 2, ...be16(4));
+  const hmtx = [500, 600, 700, 250].flatMap((a) => [...be16(a), 0, 0]);
+  let sub;
+  if (format === 4) {
+    // Segmentos: espacio → glifo 3; «A»..«B» → glifos 1..2; 0xFFFF de cierre.
+    const ends = [32, 66, 0xffff], starts = [32, 65, 0xffff], deltas = [(3 - 32) & 0xffff, (1 - 65) & 0xffff, 1];
+    sub = [...be16(4), ...be16(0), ...be16(0), ...be16(6), 0, 0, 0, 0, 0, 0,
+      ...ends.flatMap(be16), 0, 0, ...starts.flatMap(be16), ...deltas.flatMap(be16), ...[0, 0, 0].flatMap(be16)];
+  } else {
+    sub = [...be16(12), 0, 0, ...be32(0), ...be32(0), ...be32(2),
+      ...be32(32), ...be32(32), ...be32(3), ...be32(65), ...be32(66), ...be32(1)];
+  }
+  const cmap = [...be16(0), ...be16(1), ...be16(3), ...be16(format === 4 ? 1 : 10), ...be32(12), ...sub];
+  const tables = [['cmap', cmap], ['head', head], ['hhea', hhea], ['hmtx', hmtx]];
+  const out = [0, 1, 0, 0, ...be16(tables.length), 0, 0, 0, 0, 0, 0];
+  let off = 12 + tables.length * 16;
+  const body = [];
+  for (const [t, data] of tables) {
+    out.push(...[...t].map((ch) => ch.charCodeAt(0)), 0, 0, 0, 0, ...be32(off + body.length), ...be32(data.length));
+    body.push(...data);
+  }
+  return new Uint8Array([...out, ...body]);
+}
+
+test('1.3.3 · métricas de avance: cmap formato 4 y 12 → hmtx / unitsPerEm; lo ilegible es null', () => {
+  for (const format of [4, 12]) {
+    const m = M.fontAdvanceMetrics(fakeTtf({ format }));
+    assert.ok(m, `formato ${format} legible`);
+    assert.equal(m.advances.get(65), 0.6); assert.equal(m.advances.get(66), 0.7); assert.equal(m.advances.get(32), 0.25);
+    assert.equal(m.advances.has(67), false, 'un carácter sin glifo no inventa avance');
+    assert.equal(m.avgEm, (0.25 + 0.6 + 0.7) / 3, 'la media sale de los imprimibles ASCII presentes');
+  }
+  assert.equal(M.fontAdvanceMetrics(new Uint8Array([1, 2, 3])), null);
+  assert.equal(M.fontAdvanceMetrics(fakeFont('wOFF', ['cmap'], { woff: true })), null, 'WOFF: no se descomprime, se estima');
+  const cut = fakeTtf(); assert.equal(M.fontAdvanceMetrics(cut.slice(0, cut.length - 10)), null, 'tabla fuera del búfer → null');
+  // Neutralizar el kerning no toca lo que lee el ajuste: mide igual antes y después.
+  assert.deepEqual([...M.fontAdvanceMetrics(M.neutralizeKerning(fakeTtf()).bytes).advances], [...M.fontAdvanceMetrics(fakeTtf()).advances]);
+});
+
+// Métricas sintéticas: todo carácter mide `em` (una fuente «monoespaciada» de la marca inventada).
+const monoMetrics = (chrome, em = 0.5) => Object.fromEntries(chrome.fonts.map((f) => [M.fitFontKey(f), { advances: new Map(), avgEm: em }]));
+const fitN1 = (c, text, metrics = 'mono') => {
+  const chrome = chromeN1(c, text);
+  return { chrome, fit: M.fitCarouselContent({ chrome, metrics: metrics === 'mono' ? monoMetrics(chrome) : metrics }) };
+};
+const sceneOf = (chrome, text, bg = 'data:image/png;base64,AA') =>
+  M.buildCarouselScene({ chrome, style: M.resolveOverlayStyle({ tokens: n1Tokens(), typography: N1_TYPO, palette: N1_PAL, text }), backgroundSrc: bg });
+const LARGO = 'Un paso escrito con muchas palabras para que ocupe varias líneas en la lámina';
+
+test('1.3.3 · NO desborda → el ajuste no toca nada: mismo objeto y escena idéntica a la de 1.3.2', () => {
+  // Golden: sha256 de la escena que producía el bloque de compose 1.3.2 (commit cf1d277) para estas
+  // mismas entradas. Si cambia, el ajuste dejó de ser inocuo para las láminas que ya cabían.
+  const golden = [
+    [{ index: 3, total: 5, role: 'body', background: 'surface', eyebrow: 'Campo', keyword: 'trigo', steps: [{ text: 'Sembrar en otoño' }, { text: 'Regar al alba', critical: true }] },
+      { headline: 'El trigo no espera', subheadline: 'Ni el clima.' }, '097e6ac3d0fb6c68ba2e48435326782bc436c69cc1f2600f5eef2e215b1f6a64'],
+    [{ index: 2, total: 5, role: 'body', background: 'surface', figure: { value: '62%', bar: { from: 10, to: 62 }, source: 'Censo agrario 2025' } },
+      { headline: '', subheadline: 'de las fincas ya riega por goteo.' }, '8858c1ea8f227b2033b134f222ad1a8fc4f5d89bff1fc6e60500cd8ceb5fcfb6'],
+  ];
+  for (const [c, text, sha] of golden) {
+    const { chrome, fit } = fitN1(c, text);
+    assert.equal(fit.chrome, chrome, 'devuelve el MISMO cromo, sin copiarlo');
+    assert.equal(fit.report.adjusted, false);
+    assert.ok(fit.report.slack_px >= 0);
+    assert.deepEqual(fit.warnings, []);
+    assert.equal(createHash('sha256').update(JSON.stringify(sceneOf(fit.chrome, text))).digest('hex'), sha);
+  }
+});
+
+test('1.3.3 · desborda → reduce primero la cifra, y el pie queda rígido', () => {
+  const c = { index: 3, total: 5, role: 'body', background: 'surface', eyebrow: 'Campo',
+    figure: { value: '1.234 ha', bar: null, source: 'Censo agrario 2025' },
+    steps: [{ text: 'Sembrar' }, { text: 'Regar', critical: true }, { text: 'Cosechar' }, { text: 'Vender' }] };
+  const text = { headline: 'El trigo no espera', subheadline: 'De las fincas, casi todas riegan por goteo.' };
+  const { chrome, fit } = fitN1(c, text);
+  assert.ok(M.measureCarouselLayout(chrome, monoMetrics(chrome)).slack < 0, 'el caso desborda sin ajuste');
+  assert.equal(fit.report.adjusted, true);
+  assert.ok(fit.report.slack_px >= 0, 'después del ajuste cabe');
+  assert.ok(fit.report.figure_scale < 1, 'la cifra baja');
+  assert.equal(fit.report.headline_size_pct, 10, 'la cifra alcanzó: el titular no se tocó');
+  assert.equal(fit.report.body_scale, 1);
+  assert.equal(fit.report.steps_dropped, 0);
+  assert.equal(fit.chrome.type.figure.sizePct, Math.round(25 * fit.report.figure_scale * 1000) / 1000);
+  assert.equal(chrome.type.figure.sizePct, 25, 'el cromo de entrada no se muta');
+  assert.ok(fit.warnings.some((w) => w.startsWith('CAROUSEL_CONTENT_FIT_REDUCED') && /cifra ×/.test(w)));
+  const sc = sceneOf(fit.chrome, text);
+  const col = sc.props.children[sc.props.children.length - 1];
+  const [top, mid, foot] = col.props.children;
+  assert.equal(top.props.style.flexShrink, 0); assert.equal(foot.props.style.flexShrink, 0);
+  assert.equal(mid.props.style.overflow, 'hidden', 'si la estimación se quedara corta, cede el centro, no el pie');
+  for (const s of c.steps) assert.ok(textOf(sc, s.text), `el paso «${s.text}» sigue en la lámina`);
+});
+
+test('1.3.3 · el orden de la escalera: cifra → titular → cuerpo y pasos → pasos omitidos', () => {
+  // Sin cifra: lo primero que baja es el titular, al escalón siguiente de su fit_steps.
+  const sinCifra = fitN1({ index: 2, total: 5, role: 'body', background: 'surface',
+    steps: [{ text: LARGO }, { text: LARGO, critical: true }, { text: LARGO }, { text: LARGO }, { text: LARGO }] },
+  { headline: 'El trigo no espera a nadie', subheadline: `${LARGO}. ${LARGO}.` });
+  assert.equal(sinCifra.fit.report.adjusted, true);
+  assert.equal(sinCifra.fit.report.headline_size_pct, 8, 'titular: 10 → 8 (escalón siguiente)');
+  assert.equal(sinCifra.fit.report.figure_scale, 1);
+  assert.equal(sinCifra.fit.report.body_scale, 1, 'con el titular alcanzó: el cuerpo no se tocó');
+  // Con cifra, titular y cuerpo: se agotan los escalones en orden antes de omitir un paso.
+  const lleno = fitN1({ index: 2, total: 5, role: 'body', background: 'surface',
+    figure: { value: '1.234 hectáreas', bar: { from: 0, to: 50 }, source: 'Censo agrario 2025' },
+    steps: [{ text: LARGO }, { text: LARGO }, { text: LARGO }, { text: LARGO }, { text: LARGO, critical: true }] },
+  { headline: 'El trigo no espera a nadie', subheadline: LARGO });
+  const r = lleno.fit.report;
+  assert.equal(r.figure_scale, 0.5, 'la cifra llegó a su mínimo');
+  assert.equal(r.headline_size_pct, 8, 'el titular llegó a su último escalón');
+  assert.equal(r.body_scale, 0.85, 'el cuerpo llegó a su mínimo legible');
+  assert.ok(r.steps_dropped >= 1, 'y recién entonces se omiten pasos');
+});
+
+test('1.3.3 · el recorte de pasos va desde el final y NUNCA omite el crítico', () => {
+  const steps = [{ text: `Uno. ${LARGO}` }, { text: `Dos. ${LARGO}` }, { text: `Tres. ${LARGO}` }, { text: `Cuatro. ${LARGO}` }, { text: `Cinco. ${LARGO}`, critical: true }];
+  const { chrome, fit } = fitN1({ index: 2, total: 5, role: 'body', background: 'surface',
+    figure: { value: '1.234 hectáreas', bar: null, source: 'Censo agrario 2025' }, steps },
+  { headline: 'El trigo no espera a nadie', subheadline: LARGO });
+  const kept = fit.chrome.slide.steps;
+  assert.ok(fit.report.steps_dropped >= 1);
+  assert.equal(kept.length, steps.length - fit.report.steps_dropped);
+  assert.ok(kept.some((s) => s.critical), 'el crítico se conserva aunque sea el último');
+  assert.deepEqual(kept.map((s) => s.text), [...steps.slice(0, kept.length - 1), steps[4]].map((s) => s.text),
+    'se omiten los no críticos más cercanos al final; el orden de los que quedan no cambia');
+  assert.ok(fit.warnings.some((w) => w.startsWith('CAROUSEL_STEPS_TRUNCATED')), 'y queda el aviso');
+  assert.equal(chrome.slide.steps.length, 5, 'la entrada no se muta');
+});
+
+test('1.3.3 · ni con el mínimo cabe → aviso de desborde, el pie se mantiene; sin métricas → estimado', () => {
+  const enorme = Array.from({ length: 60 }, () => LARGO).join(' ');
+  const { fit } = fitN1({ index: 2, total: 5, role: 'body', background: 'surface', steps: [{ text: enorme, critical: true }] }, { headline: 'El trigo' });
+  assert.equal(fit.report.overflow, true);
+  assert.equal(fit.chrome.slide.steps.length, 1, 'el único paso es el crítico: no se omite');
+  assert.ok(fit.warnings.some((w) => w.startsWith('CAROUSEL_CONTENT_OVERFLOW')));
+  assert.equal(fit.chrome.fitGuard, true);
+  const sinMetricas = fitN1({ index: 1, total: 2, role: 'cover' }, { headline: 'El trigo' }, null);
+  assert.equal(sinMetricas.fit.report.adjusted, false);
+  assert.ok(sinMetricas.fit.warnings.some((w) => w.startsWith('CAROUSEL_FIT_ESTIMATED') && /Fuente Titular/.test(w)),
+    'sin métricas avisa qué familias se estimaron');
+});
+
+test('1.3.3 · la medida sigue al dato de la marca: un pie más alto deja menos sitio al centro', () => {
+  const c = { index: 1, total: 2, role: 'cover' };
+  const chico = M.measureCarouselLayout(chromeN1(c, { headline: 'El trigo' }), null);
+  const conImagen = M.measureCarouselLayout(chromeN1(c, { headline: 'El trigo' }, undefined,
+    { kind: 'image', src: 'data:image/png;base64,AA', intrinsic: { width: 300, height: 100 } }), null);
+  assert.equal(conImagen.foot, 60, 'logotipo de 6 % del ancho (1000)');
+  assert.ok(conImagen.available < chico.available || chico.foot >= 60);
+  assert.equal(conImagen.gap, Math.round(30 * 0.6 * 100) / 100, 'el aire mínimo es proporcional a la etiqueta');
+});
+
+console.log('\n── 1.3.4 · efecto de texto en las láminas con foto (tokens.carousel.text_effect) ──');
+
+// El efecto de la marca inventada: la función `shade` (rol `tierra` de SU paleta), en % del ancho.
+const TE = { kind: 'shadow', color: 'shade', alpha: 0.8, blur_pct: 1, offset_pct: 0.2 };
+const teOver = (te = TE) => ({ palette: { shade: 'tierra' }, carousel: { text_effect: te } });
+const conSombra = (scene) => findAll(scene, (n) => n.props?.style?.textShadow != null);
+const sinSombra = (v) => JSON.parse(JSON.stringify(v), (k, x) => (k === 'textShadow' ? undefined : x));
+const TE_CASOS = [
+  [{ index: 1, total: 4, role: 'cover', eyebrow: 'Campo', keyword: 'trigo' }, { headline: 'El trigo no espera', subheadline: 'Ni el clima.' }],
+  [{ index: 3, total: 4, role: 'body', eyebrow: 'Campo', keyword: 'trigo', figure: { value: '62%', bar: { from: 10, to: 62 }, source: 'Censo agrario 2025' }, steps: [{ text: 'Sembrar' }, { text: 'Regar', critical: true }] }, { headline: 'El trigo no espera' }],
+  [{ index: 4, total: 4, role: 'closing', cta: 'Pide tu caja' }, { headline: 'Cosecha propia' }],
+];
+
+test('1.3.4 · SIN token, las láminas con foto son las de 1.3.3 byte a byte (golden del commit bb8bef6)', () => {
+  // Golden: sha256 de la escena que producía el bloque de compose 1.3.3 (commit bb8bef6) para estas
+  // mismas entradas, con foto. Los goldens de superficie de 1.2.0 y 1.3.2 siguen arriba, intactos.
+  const golden = [
+    '3a94a86871244d5e3a0015554a24a91d3fd164e316e77bf5a529e0a1e013818c',
+    '30c52c5922d9952a355bef4e276d52bb506a08543714acb4124708499d20b731',
+    '6c1d830c99d3a9ab372afb1f8fa73bfd98b5254f9f8929417fae3b1eb946ecb0',
+  ];
+  TE_CASOS.forEach(([c, text], k) => {
+    const sc = sceneN1(c, text, undefined, 'data:image/png;base64,BG');
+    assert.equal(conSombra(sc).length, 0, 'sin token no hay sombra');
+    assert.equal(createHash('sha256').update(JSON.stringify(sc)).digest('hex'), golden[k], `lámina ${c.role}`);
+  });
+  assert.equal(chromeN1(TE_CASOS[0][0], TE_CASOS[0][1]).textEffect, null);
+});
+
+test('1.3.4 · token válido: sombra en TODO el texto de la lámina con foto, y en nada más', () => {
+  for (const [c, text] of TE_CASOS) {
+    const sc = sceneN1(c, text, teOver(), 'data:image/png;base64,BG');
+    const sombra = 'rgba(59, 42, 30, 0.8)';
+    const esperada = `0px 0px 10px ${sombra}, 0px 2px 10px ${sombra}`;
+    // Texto de la lámina: todos los nodos con texto salvo el logotipo.
+    const logo = new Set(['Granja', 'Sur']);
+    const textos = textNodes(sc).filter((n) => !logo.has(n.props.children));
+    assert.ok(textos.length >= 3, `${c.role}: hay texto que sombrear`);
+    for (const n of textos) {
+      const own = n.props.style?.textShadow;
+      // El titular lleva la sombra en su contenedor y en cada tramo (la clave incluida).
+      assert.equal(own, esperada, `${c.role}: «${n.props.children}» lleva la sombra (desenfoque y caída en % del ancho 1000)`);
+    }
+    for (const n of textNodes(sc).filter((x) => logo.has(x.props.children))) {
+      assert.equal(n.props.style?.textShadow, undefined, 'el logotipo no lleva sombra');
+    }
+    for (const n of conSombra(sc)) {
+      assert.ok(typeof n.props.children === 'string' || n.props.style.flexWrap === 'wrap',
+        'la sombra sólo va en nodos de texto (y en el contenedor del titular)');
+    }
+    assert.equal(findAll(sc, (n) => n.props?.style?.flexGrow === 1 && n.props.style.textShadow).length, 0, 'la barra de progreso no');
+    // Una capa no toca a la otra: quitando la sombra, la escena es exactamente la de sin token.
+    assert.deepEqual(sinSombra(sc), sinSombra(sceneN1(c, text, undefined, 'data:image/png;base64,BG')),
+      `${c.role}: el velo, la foto, la franja y la geometría no cambian`);
+  }
+  const ch = chromeN1(TE_CASOS[0][0], TE_CASOS[0][1], teOver());
+  assert.deepEqual(ch.textEffect, { kind: 'shadow', fn: 'shade', alpha: 0.8, blurPct: 1, offsetPct: 0.2, color: 'rgba(59, 42, 30, 0.8)' });
+  assert.equal(M.carouselTextShadow(ch.textEffect, 2000), '0px 0px 20px rgba(59, 42, 30, 0.8), 0px 4px 20px rgba(59, 42, 30, 0.8)',
+    'los px salen del ancho del lienzo, no de una constante');
+});
+
+test('1.3.4 · lámina sobre superficie: sin efecto aunque la marca lo declare', () => {
+  const c = { index: 2, total: 4, role: 'body', background: 'surface', eyebrow: 'Campo', keyword: 'trigo', steps: [{ text: 'Sembrar' }] };
+  const sc = sceneN1(c, { headline: 'El trigo no espera' }, teOver());
+  assert.equal(conSombra(sc).length, 0);
+  assert.equal(JSON.stringify(sc), JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })), 'idéntica a la de sin token');
+  // Y una lámina «con foto» a la que no le llegó foto tampoco: sin foto no hay contra qué contrastar.
+  assert.equal(conSombra(sceneN1({ index: 1, total: 4, role: 'cover' }, { headline: 'Cosecha' }, teOver(), null)).length, 0);
+});
+
+test('1.3.4 · token mal formado → 400 CAROUSEL_TEXT_EFFECT_INVALID', () => {
+  const malos = [
+    'sombra', [], 0,
+    { ...TE, kind: 'glow' }, { ...TE, kind: undefined },
+    { ...TE, color: '' }, { ...TE, color: 3 }, { ...TE, color: { role: 'tierra' } },
+    { ...TE, alpha: 0 }, { ...TE, alpha: 1.2 }, { ...TE, alpha: '0.8' }, { ...TE, alpha: undefined },
+    { ...TE, blur_pct: -1 }, { ...TE, blur_pct: 12 }, { ...TE, blur_pct: '1' }, { ...TE, offset_pct: Number.NaN },
+    { ...TE, offset_pct: 6 }, { ...TE, blur_pct: 0, offset_pct: 0 },
+  ];
+  for (const te of malos) {
+    assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver(te)),
+      (e) => e.label === 'CAROUSEL_TEXT_EFFECT_INVALID' && e.status === 400, JSON.stringify(te));
+  }
+  // Los bordes válidos pasan: sombra dura sin desenfoque, o halo sin caída.
+  assert.equal(chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver({ ...TE, blur_pct: 0, offset_pct: 0.3 })).textEffect.blurPct, 0);
+  assert.equal(chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, teOver({ ...TE, alpha: 1, offset_pct: 0 })).textEffect.offsetPct, 0);
+});
+
+test('1.3.4 · función de color inexistente → fail-loud como los demás colores del carrusel', () => {
+  const sinFuncion = { carousel: { text_effect: { ...TE, color: 'sombra_texto' } } };
+  assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, sinFuncion),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /palette\.sombra_texto \(pedido por carousel\.text_effect\.color\)/.test(e.message));
+  const rolInexistente = { palette: { shade: 'no_existe' }, carousel: { text_effect: TE } };
+  assert.throws(() => chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' }, rolInexistente),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /brand_palette\.role='no_existe'/.test(e.message));
+  // La función puede declarar su propio alfa para su elemento; el del efecto es el que manda.
+  const conAlfa = chromeN1({ index: 1, total: 2, role: 'cover' }, { headline: 'x' },
+    { palette: { shade: { role: 'tierra', alpha: 0.1 } }, carousel: { text_effect: TE } });
+  assert.equal(conAlfa.textEffect.color, 'rgba(59, 42, 30, 0.8)');
 });
 
 console.log(`\n${'─'.repeat(72)}`);

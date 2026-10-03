@@ -212,7 +212,7 @@ function logoFor(brand) {
   return null;
 }
 
-async function render(brand, slide, k, total, tokensOverride, { kerning = false, svgOnly = false } = {}) {
+async function render(brand, slide, k, total, tokensOverride, { kerning = false, svgOnly = false, fit = true } = {}) {
   const base = BASE[brand];
   const carouselRow = {
     ...SCRIM_CAROUSEL,
@@ -232,14 +232,20 @@ async function render(brand, slide, k, total, tokensOverride, { kerning = false,
   const bgSrc = bgBytes ? `data:${M.imageDimensions(new Uint8Array(bgBytes)).mime};base64,${bgBytes.toString('base64')}` : null;
   if (!chrome.applied) return { chrome, style, bgSrc };
   const fonts = [];
+  const metrics = {};
   for (const f of chrome.fonts) {
     const b = await fontBytes(f.cssImport, f.weight, f.italic);
     fonts.push({ name: f.family, data: kerning ? b.raw : b.data, weight: b.weight, style: b.style });
+    metrics[M.fitFontKey(f)] = M.fontAdvanceMetrics(new Uint8Array(b.data));
   }
-  const scene = M.buildCarouselScene({ chrome, style, backgroundSrc: bgSrc });
+  // 1.3.3 — igual que el handler: el ajuste vertical se mide con las fuentes que recibe satori.
+  const fitted = fit ? M.fitCarouselContent({ chrome, metrics }) : null;
+  const drawn = fitted ? fitted.chrome : chrome;
+  const scene = M.buildCarouselScene({ chrome: drawn, style, backgroundSrc: bgSrc });
   const svg = await satori(scene, { width: chrome.canvas.width, height: chrome.canvas.height, fonts, embedFont: !svgOnly });
-  if (svgOnly) return { svg, chrome, style };
-  return { png: Buffer.from(new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng()), chrome, style };
+  const extra = { chrome, style, fit: fitted, drawn, scene, fonts, metrics };
+  if (svgOnly) return { svg, ...extra };
+  return { png: Buffer.from(new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng()), ...extra };
 }
 
 console.log('\n── F3 · cuatro marcas × cinco láminas (4:5), con los datos del archivo de siembra ──');
@@ -257,6 +263,9 @@ for (const brand of Object.keys(SLIDES)) {
     console.log(`  ok   ${brand.padEnd(18)} ${k + 1}/${slides.length} ${slide.c.role.padEnd(7)} ${(slide.c.background ?? 'image').padEnd(7)} ` +
       `logo=${a.chrome.logo?.kind ?? '∅'} avisos=${a.chrome.warnings.length} → ${out}`);
     assert.deepEqual(a.chrome.warnings, [], `${brand} lámina ${k + 1}: sin avisos (${a.chrome.warnings.join(' | ')})`);
+    // 1.3.3 — estas láminas ya cabían: el ajuste no las toca (mismo cromo ⇒ misma escena que 1.3.2).
+    assert.equal(a.fit.chrome, a.chrome, `${brand} lámina ${k + 1}: el ajuste vertical no debía actuar (holgura ${a.fit.report.slack_px} px)`);
+    assert.deepEqual(a.fit.warnings, []);
   }
 }
 
@@ -320,6 +329,99 @@ console.log('\n── 1.3.1 · espacio entre palabras del titular (≤ 1 px de s
   // `neutralizeKerning` puede retirarse — revisar antes de tocar nada.
   assert.ok(controlMax > 5, `control: con kerning el sobrante máximo debía superar 5 px y fue ${controlMax.toFixed(2)} px`);
   console.log(`  ok   control: con la fuente original (kerning) el sobrante llega a ${controlMax.toFixed(2)} px`);
+}
+
+// ── 1.3.3 · el bloque central cabe entre la cabecera y el pie ───────────────────────────────
+// Defecto medido en producción (barrido del 2026-10-03, compose 1.3.2): con una cifra grande y
+// cuatro pasos, o con una cifra de dos palabras partida en dos líneas, el bloque central empujaba
+// el pie fuera del lienzo — el último paso cortado y el logotipo perdido. Los textos son los REALES
+// de esas cuatro láminas (`content.content_pieces.assets->carousel->slides`, leídos el 2026-10-03).
+const PROD_FIT = [
+  { pid: '82c355aa', brand: 'LucienSael', k: 2, slide: { text: { headline: 'Many Labs 4 tested it', subheadline: 'Seventeen labs, 1,550 participants, original authors overseeing the protocol. Result: d ≈ 0.03.' },
+    c: { role: 'body', background: 'surface', eyebrow: 'The replication test', keyword: 'Many Labs 4', figure: { value: 'd ≈ 0.03', bar: null, source: 'Many Labs 4' },
+      steps: [{ text: 'Seventeen labs run the same protocol' }, { text: '1,550 participants tested after exclusions' }, { text: 'Original authors oversee the design', critical: true }, { text: 'Effect drops to d ≈ 0.03' }] } } },
+  { pid: '0c704fe8', brand: 'UnrealvilleStudio', k: 2, slide: { text: { headline: 'Silence became a billable event', subheadline: 'Per BuildMVPFast, 24 hours without a reply can mark a conversation as resolved.' },
+    c: { role: 'body', background: 'surface', eyebrow: 'The mechanism', keyword: 'billable event', figure: { value: '24 hours', bar: null, source: 'BuildMVPFast' },
+      steps: [{ text: "Customer receives Fin's last reply" }, { text: '24 hours pass with no response', critical: true }, { text: 'Conversation auto-marks as resolved' }, { text: 'Vendor bills $0.99 for the resolution' }] } } },
+  { pid: 'f70036e3', brand: 'LucienSael', k: 1, slide: { text: { headline: 'A server stops responding', subheadline: 'In a PRISMA review of 14 studies, most Soulmate users described the shutdown as a death.' },
+    c: { role: 'body', background: 'surface', eyebrow: 'The data point', keyword: 'stops responding', figure: { value: '14 studies', bar: null, source: 'PRISMA review' } } } },
+  { pid: '5d5591a1', brand: 'LucienSael', k: 3, slide: { bg: 'steps', text: { headline: 'Rule 707 stalled in June 2026', subheadline: 'No rule means no threshold. The burden moves onto whoever can still testify they were there.' },
+    c: { role: 'body', background: 'image', eyebrow: 'The vacuum',
+      steps: [{ text: 'Rule 707 would set a reliability standard for machine-generated evidence' }, { text: 'The Standing Committee met and chose not to recommend action', critical: true }, { text: 'No threshold means no default filter on authenticity' }, { text: 'The burden shifts to whoever can still testify they were there' }] } } },
+];
+
+/** Alto REAL de una caja de la escena: satori la dibuja sola, con fondo testigo, y se lee su <rect>. */
+async function satoriBoxHeight(node, width, fonts) {
+  const probe = { type: 'div', props: { style: { display: 'flex', flexDirection: 'column', width, height: 6000 }, children: [
+    { type: 'div', props: { style: { ...node.props.style, backgroundColor: 'rgb(1, 2, 3)' }, children: node.props.children } }] } };
+  const svg = await satori(probe, { width, height: 6000, fonts, embedFont: false });
+  const m = svg.match(/<rect x="[\d.]+" y="[\d.]+" width="[\d.]+" height="([\d.]+)" fill="rgb\(1, 2, 3\)"/);
+  assert.ok(m, 'la caja testigo aparece en el SVG');
+  return Number(m[1]);
+}
+const columnOf = (scene) => scene.props.children[scene.props.children.length - 1].props.children;   // [cabecera, centro, pie]
+/** Lo que el SVG dibuja por debajo del margen inferior (texto por su línea base; imágenes por su borde), sin el fondo a sangre. */
+function belowMargin(svg, W, H, M) {
+  const out = [];
+  for (const t of svg.matchAll(/<text x="[\d.]+" y="([\d.]+)"[^>]*>([^<]*)<\/text>/g)) if (Number(t[1]) > H - M + 0.5) out.push(`texto «${t[2]}» y=${t[1]}`);
+  for (const im of svg.matchAll(/<image x="[\d.]+" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)) {
+    if (Number(im[2]) >= W) continue;
+    if (Number(im[1]) + Number(im[3]) > H - M + 0.5) out.push(`imagen y=${im[1]} alto=${im[3]}`);
+  }
+  return out;
+}
+
+console.log('\n── 1.3.3 · la medida del ajuste coincide con la caja que dibuja satori (±1,5 px) ──');
+{
+  const casos = [
+    ...Object.keys(SLIDES).flatMap((brand) => SLIDES[brand].map((slide, k) => ({ name: `${brand} ${k + 1}`, brand, slide, k }))),
+    ...PROD_FIT.map((p) => ({ name: `${p.brand} ${p.pid}_${p.k + 1}`, brand: p.brand, slide: p.slide, k: p.k })),
+  ];
+  let worst = 0;
+  for (const it of casos) {
+    const r = await render(it.brand, it.slide, it.k, 5, undefined, { svgOnly: true, fit: false });
+    const est = M.measureCarouselLayout(r.chrome, r.metrics);
+    assert.deepEqual(est.estimated, [], `${it.name}: todas las fuentes tienen métricas`);
+    const [top, mid, foot] = columnOf(r.scene);
+    const real = [await satoriBoxHeight(top, r.chrome.canvas.width, r.fonts), await satoriBoxHeight(mid, r.chrome.canvas.width, r.fonts), await satoriBoxHeight(foot, r.chrome.canvas.width, r.fonts)];
+    const d = [est.top - real[0], est.mid - real[1], est.foot - real[2]];
+    worst = Math.max(worst, ...d.map(Math.abs));
+    assert.ok(d.every((x) => Math.abs(x) <= 1.5), `${it.name}: estimado ${est.top}/${est.mid}/${est.foot} vs satori ${real.join('/')}`);
+  }
+  console.log(`  ok   ${casos.length} láminas: cabecera, centro y pie estimados vs satori, desvío máximo ${worst.toFixed(2)} px`);
+}
+
+console.log('\n── 1.3.3 · las cuatro láminas del barrido: antes desbordan, después caben con el pie en su sitio ──');
+for (const p of PROD_FIT) {
+  const total = 5;
+  const antes = await render(p.brand, p.slide, p.k, total, undefined, { svgOnly: true, fit: false });
+  const W = antes.chrome.canvas.width;
+  const H = antes.chrome.canvas.height;
+  const Mg = Math.round((antes.chrome.marginPct / 100) * W * 100) / 100;
+  const est = M.measureCarouselLayout(antes.chrome, antes.metrics);
+  const midAntes = await satoriBoxHeight(columnOf(antes.scene)[1], W, antes.fonts);
+  assert.ok(est.slack < 0 && midAntes > est.available, `${p.pid}: reproduce el defecto (centro ${midAntes} px en ${est.available} px)`);
+  assert.ok(belowMargin(antes.svg, W, H, Mg).length > 0, `${p.pid}: con 1.3.2 algo se dibuja por debajo del margen`);
+
+  const despues = await render(p.brand, p.slide, p.k, total, undefined, { svgOnly: true });
+  const rep = despues.fit.report;
+  assert.equal(rep.adjusted, true); assert.equal(rep.overflow, false); assert.ok(rep.slack_px >= 0);
+  const after = M.measureCarouselLayout(despues.drawn, despues.metrics);
+  const midDespues = await satoriBoxHeight(columnOf(despues.scene)[1], W, despues.fonts);
+  assert.ok(midDespues + 2 * after.gap <= after.available + 1, `${p.pid}: satori confirma que el centro cabe (${midDespues} + aire ≤ ${after.available})`);
+  assert.deepEqual(belowMargin(despues.svg, W, H, Mg), [], `${p.pid}: nada se dibuja por debajo del margen inferior`);
+  for (const s of despues.drawn.slide.steps) assert.ok(despues.svg.includes(s.text.split(' ')[0]), `${p.pid}: el paso «${s.text}» está en la lámina`);
+  assert.ok(despues.drawn.slide.steps.some((s) => s.critical) === (p.slide.c.steps ?? []).some((s) => s.critical), `${p.pid}: el crítico sigue`);
+  if (p.brand === 'LucienSael') {
+    const logo = [...despues.svg.matchAll(/<image x="[\d.]+" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].find((m) => Number(m[2]) < W);
+    assert.ok(logo && Math.abs(Number(logo[1]) + Number(logo[3]) - (H - Mg)) <= 1, `${p.pid}: el logotipo apoya en el margen inferior`);
+  }
+  for (const [tag, fit] of [['antes', false], ['despues', true]]) {
+    const r = await render(p.brand, p.slide, p.k, total, undefined, { fit });
+    writeFileSync(join(OUT, `ajuste_${p.brand}_${p.pid}_${p.k + 1}_${tag}.png`), r.png);
+  }
+  console.log(`  ok   ${p.brand.padEnd(18)} ${p.pid}_${p.k + 1}: faltaban ${Math.ceil(-est.slack)} px → ${despues.fit.warnings.map((w) => w.split(':')[0]).join(', ')} ` +
+    `(cifra ×${rep.figure_scale}, titular ${rep.headline_size_pct} %, cuerpo ×${rep.body_scale}, pasos omitidos ${rep.steps_dropped}, holgura ${rep.slack_px} px)`);
 }
 
 console.log(`\n✅ compositor_carousel_smoke — ${Object.keys(SLIDES).length} marcas × 5 láminas, reproducibles, en ${OUT}\n`);

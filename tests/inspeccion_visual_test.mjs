@@ -188,4 +188,124 @@ ok('MULTIMARCA: el endpoint no trae reglas fijas; las reglas son las del cuerpo'
   assert.equal((u.match(/^\d+\. \[/gm) ?? []).length, 1, 'el prompt sólo debe numerar las reglas recibidas');
 });
 
+// ── meta.edge_bands (2026-10-03): medida determinista de bandas de borde ─────────────────────
+// Imágenes SINTÉTICAS generadas aquí: una escena con textura (nunca uniforme por fila ni por columna)
+// y bandas pintadas encima. Sin red y sin archivos.
+function scene(w, h, paint = () => null) {
+  const px = new Uint8Array(w * h * 4);
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) >>> 16) & 0xff;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = (y * w + x) * 4;
+    const c = paint(x, y) ?? [rnd(), (x * 7 + y * 3) & 0xff, rnd()];
+    px[p] = c[0]; px[p + 1] = c[1]; px[p + 2] = c[2]; px[p + 3] = 255;
+  }
+  return px;
+}
+// PNG mínimo (RGBA, sin filtro) con zlib de Node: para probar la decodificación REAL de punta a punta.
+const { deflateSync } = await import('node:zlib');
+function crc32(buf) {
+  let c = ~0;
+  for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); }
+  return ~c >>> 0;
+}
+function png(px, w, h) {
+  const chunk = (type, data) => {
+    const t = Buffer.from(type, 'ascii');
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data])));
+    return Buffer.concat([len, t, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
+  const raw = Buffer.alloc(h * (1 + w * 4));
+  for (let y = 0; y < h; y++) Buffer.from(px.buffer, y * w * 4, w * 4).copy(raw, y * (1 + w * 4) + 1);
+  return new Uint8Array(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]));
+}
+const { createRequire } = await import('node:module');
+const { Resvg } = createRequire(join(ROOT, 'package.json'))('@resvg/resvg-js');
+
+ok('bandas: escena sin franjas → 0 en los cuatro bordes', () => {
+  const b = M.measureEdgeBands(scene(160, 90), 160, 90);
+  assert.deepEqual([b.top_px, b.bottom_px, b.left_px, b.right_px], [0, 0, 0, 0]);
+  assert.deepEqual(b.mean_luma, { top: null, bottom: null, left: null, right: null });
+  assert.equal(b.width, 160); assert.equal(b.height, 90);
+});
+
+ok('bandas: franjas negras de N px arriba y abajo → N (con ruido de compresión ≤ 2 niveles)', () => {
+  for (const N of [1, 7, 12]) {
+    const w = 160, h = 90;
+    const px = scene(w, h, (x, y) => (y < N || y >= h - N ? [(x + y) % 3, (x * y) % 2, 0] : null));
+    const b = M.measureEdgeBands(px, w, h);
+    assert.equal(b.top_px, N, `arriba ${N}`); assert.equal(b.bottom_px, N, `abajo ${N}`);
+    assert.equal(b.left_px, 0); assert.equal(b.right_px, 0);
+    assert.ok(b.mean_luma.top < 3 && b.mean_luma.bottom < 3, 'luma media de la franja ≈ negro');
+  }
+});
+
+ok('bandas: franja blanca lateral → medida, del lado en que está', () => {
+  const w = 120, h = 80;
+  const b = M.measureEdgeBands(scene(w, h, (x) => (x >= w - 9 ? [255, 255, 255] : null)), w, h);
+  assert.deepEqual([b.top_px, b.bottom_px, b.left_px, b.right_px], [0, 0, 0, 9]);
+  assert.equal(b.mean_luma.right, 255);
+  const l = M.measureEdgeBands(scene(w, h, (x) => (x < 5 ? [250, 250, 250] : null)), w, h);
+  assert.equal(l.left_px, 5);
+});
+
+ok('bandas: un salto de media > 6 entre filas uniformes corta la banda', () => {
+  const w = 100, h = 60;
+  // 6 filas negras y debajo 4 filas grises lisas: la banda negra mide 6, no 10.
+  const b = M.measureEdgeBands(scene(w, h, (x, y) => (y < 6 ? [0, 0, 0] : y < 10 ? [128, 128, 128] : null)), w, h);
+  assert.equal(b.top_px, 6);
+  // Y un degradado liso que cambia ≤ 6 por fila SÍ se cuenta: la medida no distingue una franja de un
+  // fondo liso hasta el borde (cielo, pared de estudio). Lo declara el contrato: mide, no decide.
+  const g = M.measureEdgeBands(scene(w, h, (x, y) => (y < 8 ? [y * 5, y * 5, y * 5] : null)), w, h);
+  assert.equal(g.top_px, 8);
+});
+
+ok('bandas: decodificación REAL (PNG → resvg → píxeles) da la misma medida que los píxeles de origen', () => {
+  const w = 96, h = 54, N = 6;
+  const px = scene(w, h, (x, y) => (y < N || y >= h - N ? [0, 0, 0] : null));
+  const r = M.decodeRaster(png(px, w, h), Resvg);
+  assert.equal(r.width, w); assert.equal(r.height, h);
+  assert.deepEqual([...r.pixels.slice(0, 64)], [...px.slice(0, 64)], 'píxel a píxel');
+  const out = M.edgeBandsOrNull(() => M.decodeRaster(png(px, w, h), Resvg));
+  assert.equal(out.error, null);
+  assert.deepEqual([out.edge_bands.top_px, out.edge_bands.bottom_px, out.edge_bands.left_px, out.edge_bands.right_px], [N, N, 0, 0]);
+});
+
+ok('bandas: imagen no decodificable → edge_bands null con motivo, sin lanzar', () => {
+  const casos = [
+    ['bytes basura', () => M.decodeRaster(new TextEncoder().encode('no es una imagen'), Resvg)],
+    ['webp (sin decodificador)', () => M.decodeRaster(new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0, 0, 0, 0]), Resvg)],
+    // Cabecera PNG válida y datos rotos: resvg no avisa, devuelve un lienzo transparente.
+    ['png con datos rotos', () => M.decodeRaster(new Uint8Array([...png(scene(8, 8), 8, 8).slice(0, 33), 1, 2, 3, 4, 5, 6]), Resvg)],
+    ['el decodificador lanza', () => { throw new Error('boom'); }],
+  ];
+  for (const [nombre, decode] of casos) {
+    const out = M.edgeBandsOrNull(decode);
+    assert.equal(out.edge_bands, null, nombre);
+    assert.ok(typeof out.error === 'string' && out.error.length > 0, `${nombre}: el motivo viaja`);
+  }
+});
+
+ok('bandas: dimensiones por cabecera — PNG (IHDR) y JPEG (SOF tras otros segmentos)', () => {
+  assert.deepEqual(M.rasterDimensions(png(scene(7, 5), 7, 5)), { width: 7, height: 5, mime: 'image/png' });
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc4, 0x00, 0x02,
+    0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0xd0, 0x05, 0x40, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(M.rasterDimensions(jpeg), { width: 1344, height: 720, mime: 'image/jpeg' });
+  assert.equal(M.rasterDimensions(new Uint8Array([1, 2, 3])), null);
+});
+
+ok('CABLEADO: el handler mide ANTES del modelo, nunca lanza por la medida, y sólo AÑADE meta', () => {
+  const h = inspect.slice(inspect.indexOf('export default async function handler'));
+  const mide = h.indexOf('edgeBandsOrNull(');
+  const juez = h.indexOf('callJudge(');
+  assert.ok(mide > 0 && juez > mide, 'la medida va antes de la llamada al juez');
+  assert.ok(/meta: \{ edge_bands: bands\.edge_bands/.test(h), 'la respuesta 200 lleva meta.edge_bands');
+  for (const campo of ['ok: true,', 'violated: verdict.violated,', 'unmatched: verdict.unmatched,', 'evaluated_codes: codes,', 'model,', 'usage: trace.usage,']) {
+    assert.ok(h.includes(campo), `el campo existente sigue igual: ${campo}`);
+  }
+});
+
 console.log(`\ninspeccion_visual: ${n} pruebas OK`);
