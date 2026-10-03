@@ -191,7 +191,10 @@ async function fontBytes(cssUrl, weight, italic) {
   const css = await (await fetch(cssUrl, { headers: { 'User-Agent': 'Mozilla/4.0 (compatible)' } })).text();
   const face = M.pickFontFace(M.parseFontFaces(css), { weight, italic });
   assert.ok(face, `sin @font-face descargable en ${cssUrl}`);
-  const out = { data: Buffer.from(await (await fetch(face.url)).arrayBuffer()), weight: face.weight, style: face.italic ? 'italic' : 'normal' };
+  // Igual que `loadFont` en el handler (1.3.1): la fuente llega a satori sin kerning. `raw` queda a
+  // mano para el control del espaciado entre palabras (abajo).
+  const raw = new Uint8Array(await (await fetch(face.url)).arrayBuffer());
+  const out = { data: Buffer.from(M.neutralizeKerning(raw).bytes), raw: Buffer.from(raw), weight: face.weight, style: face.italic ? 'italic' : 'normal' };
   fontCache.set(key, out);
   return out;
 }
@@ -209,7 +212,7 @@ function logoFor(brand) {
   return null;
 }
 
-async function render(brand, slide, k, total, tokensOverride) {
+async function render(brand, slide, k, total, tokensOverride, { kerning = false, svgOnly = false } = {}) {
   const base = BASE[brand];
   const carouselRow = {
     ...SCRIM_CAROUSEL,
@@ -231,10 +234,11 @@ async function render(brand, slide, k, total, tokensOverride) {
   const fonts = [];
   for (const f of chrome.fonts) {
     const b = await fontBytes(f.cssImport, f.weight, f.italic);
-    fonts.push({ name: f.family, data: b.data, weight: b.weight, style: b.style });
+    fonts.push({ name: f.family, data: kerning ? b.raw : b.data, weight: b.weight, style: b.style });
   }
   const scene = M.buildCarouselScene({ chrome, style, backgroundSrc: bgSrc });
-  const svg = await satori(scene, { width: chrome.canvas.width, height: chrome.canvas.height, fonts });
+  const svg = await satori(scene, { width: chrome.canvas.width, height: chrome.canvas.height, fonts, embedFont: !svgOnly });
+  if (svgOnly) return { svg, chrome, style };
   return { png: Buffer.from(new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng()), chrome, style };
 }
 
@@ -265,6 +269,57 @@ console.log('\n── F3 · sin tokens.carousel la lámina es la de 1.2.0 (el ca
   const scene = M.buildOverlayScene({ style: r.style, width: 900, height: 900, backgroundSrc: r.bgSrc });
   assert.ok(JSON.stringify(scene).includes(slide.text.headline), 'compone el titular como siempre');
   console.log('  ok   ForumPHs sin tokens.carousel → applied=false, escena de 1.2.0');
+}
+
+// ── 1.3.1 · el espacio entre palabras del titular es el de la fuente ─────────────────────────
+// Defecto medido en producción (pieza NeuroneSCF 85517171, compose 1.3.0): «COLOR  DURA»,
+// «BROWARD  QUE», «SENTARTE  EN». Causa: satori ubica cada palabra con el avance SIN kerning y la
+// dibuja CON kerning; el sobrante cae antes de la palabra siguiente. Se mide en el SVG sin fuentes
+// embebidas (cada palabra es un <text> con x y ancho): entre dos <text> seguidos del titular, en la
+// misma línea, el hueco tiene que ser ≤ 1 px — lo que redondea la caja de cada átomo al píxel.
+// Corre con los titulares REALES de esa pieza y con el titular de portada de las cuatro marcas.
+const PIEZA_85517171 = [
+  '¿Por qué tu color dura menos en Broward que en la foto del salón?',
+  'El problema empezó antes de sentarte en la silla',
+  'El agua dura mantiene la cutícula abierta',
+  'Dyfensor Hair Restructuring Serum',
+  'Tu cabello no está fallando',
+];
+function headlineGaps(svg, sizePx) {
+  const runs = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" width="([\d.]+)"[^>]*font-size="([\d.]+)"[^>]*>([^<]*)<\/text>/g)]
+    .map((m) => ({ x: +m[1], y: +m[2], w: +m[3], size: +m[4], s: m[5] }))
+    .filter((r) => Math.abs(r.size - sizePx) < 0.01);
+  const gaps = [];
+  for (let k = 0; k + 1 < runs.length; k++) {
+    if (runs[k].y === runs[k + 1].y) gaps.push({ after: runs[k].s, gap: runs[k + 1].x - runs[k].x - runs[k].w });
+  }
+  return { runs, gaps };
+}
+console.log('\n── 1.3.1 · espacio entre palabras del titular (≤ 1 px de sobrante) ──');
+{
+  const casos = [
+    ...PIEZA_85517171.map((h, k) => ({ brand: 'NeuroneSCF', slide: { bg: 'cover', text: { headline: h }, c: { role: k ? 'body' : 'cover', keyword: k === 4 ? 'fallando' : undefined } }, k })),
+    ...Object.keys(SLIDES).map((brand) => ({ brand, slide: SLIDES[brand][0], k: 0 })),
+  ];
+  let controlMax = 0;
+  for (const { brand, slide, k } of casos) {
+    const r = await render(brand, slide, k, 5, undefined, { svgOnly: true });
+    const size = Math.round((r.chrome.type.headline.sizePct / 100) * r.chrome.canvas.width * 100) / 100;
+    const { runs, gaps } = headlineGaps(r.svg, size);
+    const words = slide.text.headline.trim().split(/\s+/).length;
+    assert.ok(runs.length >= words, `${brand}: el titular «${slide.text.headline}» se lee en el SVG (${runs.length} tramos, ${words} palabras)`);
+    const worst = gaps.reduce((a, b) => (b.gap > a.gap ? b : a), { after: '∅', gap: 0 });
+    assert.ok(gaps.every((g) => g.gap > -0.01 && g.gap < 1.001),
+      `${brand}: hueco de ${worst.gap.toFixed(2)} px después de «${worst.after}» en «${slide.text.headline}» (máximo 1 px)`);
+    const ctl = headlineGaps((await render(brand, slide, k, 5, undefined, { svgOnly: true, kerning: true })).svg, size).gaps;
+    const ctlMax = Math.max(0, ...ctl.map((g) => g.gap));
+    controlMax = Math.max(controlMax, ctlMax);
+    console.log(`  ok   ${brand.padEnd(18)} «${slide.text.headline}» — ${gaps.length} huecos en línea, sobrante máx ${worst.gap.toFixed(2)} px (con kerning: ${ctlMax.toFixed(2)} px)`);
+  }
+  // CONTROL: la medición SABE ver el defecto. Si esto falla, satori ya mide con kerning y
+  // `neutralizeKerning` puede retirarse — revisar antes de tocar nada.
+  assert.ok(controlMax > 5, `control: con kerning el sobrante máximo debía superar 5 px y fue ${controlMax.toFixed(2)} px`);
+  console.log(`  ok   control: con la fuente original (kerning) el sobrante llega a ${controlMax.toFixed(2)} px`);
 }
 
 console.log(`\n✅ compositor_carousel_smoke — ${Object.keys(SLIDES).length} marcas × 5 láminas, reproducibles, en ${OUT}\n`);

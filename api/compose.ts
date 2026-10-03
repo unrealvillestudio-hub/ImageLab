@@ -63,7 +63,10 @@ declare const process: { env: Record<string, string | undefined> };
 // lo que el compositor DIBUJA — no cuando cambia un token de marca (eso es dato) ni un comentario.
 //   1.3.0 (F3, 2026-10-02) — láminas de carrusel según la maqueta v4 (campo `carousel`). Aditivo:
 //         una marca sin `tokens.carousel` compone exactamente como en 1.2.0.
-export const COMPOSITOR_VERSION = '1.3.0';
+//   1.3.1 (2026-10-03) — espacio entre palabras parejo: las fuentes llegan a satori sin kerning
+//         (`neutralizeKerning`), porque satori mide sin él y dibuja con él. Cambia el dibujo de TODO
+//         texto —titular, bajada, etiquetas, logotipo de texto— en lámina y en overlay.
+export const COMPOSITOR_VERSION = '1.3.1';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -671,6 +674,45 @@ export function parseFontFaces(css: string): Array<{ family: string; weight: num
   return out;
 }
 
+/**
+ * 1.3.1 — la fuente que recibe satori, SIN KERNING. Devuelve una COPIA con las tablas `kern` y `GPOS`
+ * renombradas en el directorio de tablas (`kern`→`xern`, `GPOS`→`xPOS`), así el lector de fuentes de
+ * satori no las encuentra; el resto de los bytes no se toca. Acepta sfnt (TrueType u OpenType/CFF)
+ * y WOFF; cualquier otra cosa vuelve intacta con `neutralized: []`. Puro e idempotente.
+ *
+ * POR QUÉ, medido (satori 0.12.2, 2026-10-03): satori UBICA cada palabra sumando el avance de cada
+ * grafema por separado —sin pares de kerning— y la DIBUJA con kerning. Toda palabra con pares
+ * negativos queda más corta que su caja y el hueco sobrante aparece pegado a la palabra siguiente:
+ * hasta +9,8 px después de una palabra de cinco letras con pares fuertes, en una familia condensada
+ * en negrita a 90,7 px (un espacio de esa fuente mide 18,6 px). Pasa en cualquier texto y cualquier
+ * marca, con mayúsculas o sin ellas, dentro o fuera de `headlineAtoms`; se nota más donde la familia
+ * tiene pares fuertes y el cuerpo es grande. Sin kerning, la medida y el dibujo coinciden: el espacio
+ * entre palabras vuelve a ser el de la fuente.
+ * En el lector de satori `GPOS` sólo aporta kerning (no hay posicionamiento de marcas), así que
+ * renombrarlo no mueve ningún acento: los TTF traen las letras acentuadas compuestas.
+ */
+export function neutralizeKerning(bytes: Uint8Array): { bytes: Uint8Array; neutralized: string[] } {
+  const out = new Uint8Array(bytes);
+  const neutralized: string[] = [];
+  const u16 = (o: number) => (out[o] << 8) | out[o + 1];
+  const tag = (o: number) => String.fromCharCode(out[o], out[o + 1], out[o + 2], out[o + 3]);
+  if (out.length < 12) return { bytes: out, neutralized };
+  const sig = tag(0);
+  const sfnt = sig === '\u0000\u0001\u0000\u0000' || sig === 'OTTO' || sig === 'true';
+  const woff = sig === 'wOFF';
+  if (!sfnt && !woff) return { bytes: out, neutralized };
+  const count = u16(woff ? 12 : 4);
+  const dirAt = woff ? 44 : 12;
+  const entry = woff ? 20 : 16;
+  for (let k = 0; k < count; k++) {
+    const o = dirAt + k * entry;
+    if (o + 4 > out.length) break;
+    const t = tag(o);
+    if (t === 'kern' || t === 'GPOS') { out[o] = 0x78; neutralized.push(t); }   // 0x78 = 'x'
+  }
+  return { bytes: out, neutralized };
+}
+
 /** El @font-face más cercano al peso pedido, respetando la itálica. Determinista ante empates. */
 export function pickFontFace(
   faces: Array<{ family: string; weight: number; italic: boolean; url: string }>,
@@ -1072,6 +1114,8 @@ export function resolveCarouselChrome(args: {
  * entre palabras viaja como espacio duro al final del átomo: satori recorta los espacios normales en
  * el borde de cada tramo y, sin esto, «SAME GOAL.» + «THREE» se pegarían. Puro: no cambia el texto
  * visible, sólo cómo se agrupa.
+ * (Los huecos desiguales entre palabras de 1.3.0 no venían de aquí sino del kerning: ver
+ * `neutralizeKerning`. Lo que sí aporta el átomo es redondear su caja al píxel de arriba: ≤ 1 px.)
  */
 export function headlineAtoms(parts: Array<{ text: string; keyword: boolean }>): Array<Array<{ text: string; keyword: boolean }>> {
   const atoms: Array<Array<{ text: string; keyword: boolean }>> = [[]];
@@ -1439,8 +1483,10 @@ async function fetchBytes(url: string, label: string): Promise<Uint8Array> {
 async function loadFont(slot: Slot | string, s: {
   role: string; family: string; cssImport: string | null; fontUrl: string | null; weight: number; italic: boolean;
 }): Promise<{ name: string; data: Uint8Array; weight: number; style: 'normal' | 'italic'; source: string }> {
+  // Toda fuente pasa por `neutralizeKerning` antes de llegar a satori (1.3.1): sin eso, el espacio
+  // entre palabras sale desigual. El porqué, medido, está en la función.
   if (s.fontUrl) {
-    return { name: s.family, data: await fetchBytes(s.fontUrl, 'COMPOSITOR_FONT_FETCH_FAILED'),
+    return { name: s.family, data: neutralizeKerning(await fetchBytes(s.fontUrl, 'COMPOSITOR_FONT_FETCH_FAILED')).bytes,
       weight: s.weight, style: s.italic ? 'italic' : 'normal', source: s.fontUrl };
   }
   if (!s.cssImport || !/^https?:\/\//i.test(s.cssImport)) {
@@ -1454,7 +1500,7 @@ async function loadFont(slot: Slot | string, s: {
     throw new CompositorError('COMPOSITOR_FONT_UNRESOLVED',
       `css_import de '${s.role}' (${s.family}) no declara ningún @font-face descargable: ${s.cssImport}`);
   }
-  return { name: s.family, data: await fetchBytes(face.url, 'COMPOSITOR_FONT_FETCH_FAILED'),
+  return { name: s.family, data: neutralizeKerning(await fetchBytes(face.url, 'COMPOSITOR_FONT_FETCH_FAILED')).bytes,
     weight: face.weight, style: face.italic ? 'italic' : 'normal', source: face.url };
 }
 
