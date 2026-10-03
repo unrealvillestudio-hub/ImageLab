@@ -19,7 +19,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import { loadHandler, run, vertexDigest } from './_handler_harness.mjs';
-import { N1, DB, PERSONAS, req } from './fixtures/personas_escenarios.mjs';
+import { N1, DB, PERSONAS, req, DIRECT_LEGACY, PX } from './fixtures/personas_escenarios.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = readFileSync(join(ROOT, 'api', 'execute.ts'), 'utf8');
@@ -32,7 +32,7 @@ function block(tag) {
 const fb = source.match(/const FALLBACK_NEGATIVE = '[^']*';/);
 const dir = mkdtempSync(join(tmpdir(), 'personas-'));
 const mod = join(dir, 'personas_block.mts');
-writeFileSync(mod, `${fb[0]}\n\n${block('C')}\n\n${block('PB')}\nexport { NO_TEXT_CLAUSE };\n`, 'utf8');
+writeFileSync(mod, `${fb[0]}\n\n${block('C')}\n\n${block('PB')}\n\n${block('SLOTS')}\nexport { NO_TEXT_CLAUSE };\n`, 'utf8');
 const M = await import(pathToFileURL(mod).href);
 
 let n = 0;
@@ -251,6 +251,61 @@ await ok('dos personas y producto en escena: el producto viaja con su foto y el 
   assert.deepEqual(r.json.references_dropped, { persona: 4, location: 2, product: 1 });
 });
 
+// ── 3-bis · la UI sync: los espacios viajan rotulados con el mismo constructor ─────────────────────
+console.log('── 3-bis · UI sync: espacios rotulados ──');
+await ok('direct sin slots: el cuerpo hacia Vertex es el de main', async () => {
+  const G = JSON.parse(readFileSync(join(ROOT, 'tests', 'fixtures', 'personas_direct_golden.json'), 'utf8'));
+  const restore = silence();
+  try {
+    for (const [k, b] of Object.entries(DIRECT_LEGACY)) assert.deepEqual(vertexDigest(await run(handler, b, { db: DB })), G[k], `direct «${k}» cambió`);
+  } finally { restore(); }
+});
+await ok('directSlotsPlan: sujeto A, Slot C, fondo, producto y estilo, en ese orden y rotulados por posición', () => {
+  const s = (label) => ({ dataUrl: PX, label });
+  const p = M.directSlotsPlan({ subjects: [s('Teodora'), s('Nacho')], background: s('Mostrador'), product: [s('Alicate')], style: [s('luz cálida'), s('grano')] });
+  assert.equal(p.error, null); assert.equal(p.images.length, 6);
+  assert.ok(p.clause.includes('Image 1: SUBJECT A, Teodora. Image 2: SUBJECT B, Nacho. Image 3: BACKGROUND, the real place "Mostrador"'));
+  assert.ok(p.clause.includes('Image 4: PRODUCT, the real packaging (Alicate)') && p.clause.includes('Images 5–6: STYLE reference only'));
+  assert.ok(p.clause.includes('exactly 2 different people'));
+  const una = M.directSlotsPlan({ subjects: [s('Teodora')], background: s('Mostrador') });
+  assert.ok(una.clause.includes('Image 1: SUBJECT A, Teodora. Image 2: BACKGROUND') && una.clause.includes('Whenever Teodora appears, keep that exact face'));
+  assert.ok(!una.clause.includes('different people'));
+  assert.match(M.directSlotsPlan({ subjects: [s('a'), s('b'), s('c'), s('d')] }).error, /^PERSONAS_TOO_MANY/);
+  assert.deepEqual(M.directSlotsPlan({ subjects: [{ dataUrl: 'https://x/y.png', label: 'x' }] }).images, [], 'sólo data: (la UI manda sus archivos)');
+  const sinNombre = M.directSlotsPlan({ subjects: [{ dataUrl: PX, label: '' }, { dataUrl: PX }] });
+  assert.ok(sinNombre.clause.includes('SUBJECT A, subject A') && sinNombre.clause.includes('SUBJECT B, subject B'));
+});
+await ok('el carril con 2+ personas y la UI rotulan con el MISMO constructor', () => {
+  const a = M.imageRoleClause({ hasSource: false, personaName: 'x', personaRefs: 2, personas: [{ name: 'Teodora', refs: 1 }, { name: 'Nacho', refs: 1 }], locationName: 'Mostrador', locationRefs: 1 });
+  const b = M.directSlotsPlan({ subjects: [{ dataUrl: PX, label: 'Teodora' }, { dataUrl: PX, label: 'Nacho' }], background: { dataUrl: PX, label: 'Mostrador' } }).clause;
+  assert.equal(a, b);
+});
+// Cada espacio con una imagen DISTINTA: un test con imágenes iguales no ve un cambio de orden
+// (inyectado el 2026-10-03: pasó en verde; CC_PROTOCOL §14.2).
+const img = (tag) => ({ dataUrl: 'data:image/png;base64,' + Buffer.from(`IMG:${tag}`).toString('base64'), label: tag });
+await ok('handler direct con slots: imágenes en orden y rótulo delante del prompt', async () => {
+  const restore = silence();
+  let r;
+  try {
+    r = await run(handler, { mode: 'direct', prompt: 'dos personas en el mostrador', slots: {
+      subjects: [img('Teodora'), img('Nacho')], background: img('Mostrador'), product: [img('Alicate')], style: [img('luz')] } }, { db: DB });
+  } finally { restore(); }
+  const d = vertexDigest(r);
+  assert.equal(d.status, 200);
+  assert.deepEqual(d.image_parts.map((p) => p.split('IMG:')[1]), ['Teodora', 'Nacho', 'Mostrador', 'Alicate', 'luz'], 'el orden de las imágenes es el del rótulo');
+  assert.ok(d.image_text[0].startsWith(`${M.REFERENCE_PHOTOS_CLAUSE}.`) && d.image_text[0].includes('Image 5: STYLE reference only') && d.image_text[0].includes('dos personas en el mostrador'));
+});
+await ok('UI: Avatar manda B, fondo y Slot C; VideoPodcast y Escena mandan espacios; la etiqueta principal viaja', () => {
+  const g = readFileSync(join(ROOT, 'src', 'services', 'gemini.ts'), 'utf8');
+  const t = readFileSync(join(ROOT, 'src', 'modules', 'tools', 'ToolsModule.tsx'), 'utf8');
+  assert.ok(g.includes('sourceAssetLabel: params.sourceAssetLabel,'), 'la etiqueta de la imagen principal no viaja');
+  assert.match(g, /subjects: \[params\.subjectA, params\.subjectC, params\.subjectB\],\s*background: params\.background \?\? null,\s*style: params\.styleRefs,/);
+  assert.ok(!/sourceAssetDataUrl: params\.subjectA\?\.dataUrl/.test(g), 'Avatar ya no manda sólo el sujeto A');
+  assert.ok(t.includes('subjectA, subjectB, subjectC, background, styleRefs'), 'Avatar no pasa el Slot C');
+  assert.equal((t.match(/buildSlotsPayload\(\{/g) ?? []).length, 2, 'Escena y VideoPodcast arman espacios');
+  assert.ok(t.includes('generateImageFromPrompt({ prompt, aspectRatio: "16:9", size: "2k", slots, signal })'), 'VideoPodcast no manda espacios');
+});
+
 // ── 4 · multimarca y voseo ───────────────────────────────────────────────────────────────────────
 console.log('── 4 · multimarca y voseo ──');
 const nuevo = source.slice(source.indexOf('// ── VARIAS PERSONAS EN UNA IMAGEN'), source.indexOf('export interface PromptBuilderInput'));
@@ -265,7 +320,7 @@ await ok('el código nuevo no nombra marcas, personas reales ni textos de un set
 
 await ok('sin voseo en lo nuevo (comentarios, cadenas y tests)', () => {
   const VOSEO = /(?<!\p{L})(querés|podés|tenés|sabés|hacés|decís|sos|vos|mirá|fijate|andá|vení|poné|usá|hacé|decí|tené|agregá|revisá|probá|dejá|sacá|cambiá|tomá|pasá|llamá|elegí vos|acordate|fijá|corré|escribí vos)(?!\p{L})/iu;
-  const propios = [nuevo, textoPermitido, readFileSync(fileURLToPath(import.meta.url), 'utf8'),
+  const propios = [nuevo, textoPermitido, block('SLOTS'), readFileSync(join(ROOT, 'src', 'services', 'gemini.ts'), 'utf8'), readFileSync(fileURLToPath(import.meta.url), 'utf8'),
     readFileSync(join(ROOT, 'tests', '_handler_harness.mjs'), 'utf8'), readFileSync(join(ROOT, 'tests', 'fixtures', 'personas_escenarios.mjs'), 'utf8')];
   for (const t of propios) {
     const lineas = t.split('\n').filter((l) => !l.includes('const VOSEO'));

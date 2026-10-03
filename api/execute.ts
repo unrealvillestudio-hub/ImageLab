@@ -1321,7 +1321,7 @@ export function imageRoleClause(args: {
   // 2026-10-03 — dos o más personas: cada una con cuántas fotos suyas viajan, en el orden de las imágenes.
   personas?: Array<{ name: string; refs: number }> | null;
 }): string {
-  if ((args.personas ?? []).length >= 2) return multiPersonaRoleClause(args as typeof args & { personas: Array<{ name: string; refs: number }> });
+  if ((args.personas ?? []).length >= 2) return labeledReferencesClause(args as typeof args & { personas: Array<{ name: string; refs: number }> });
   const c: string[] = [];
   const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
   const perRefs = args.personaName ? Math.max(0, args.personaRefs) : 0;
@@ -1356,20 +1356,23 @@ export function imageRoleClause(args: {
 }
 
 /**
- * Rol de las imágenes con DOS O MÁS personas. Cada imagen se nombra por POSICIÓN y por ROL
+ * EL CONSTRUCTOR DE REFERENCIAS ROTULADAS. Cada imagen se nombra por POSICIÓN y por ROL
  * («Image 1–2: SUBJECT A, <nombre>»): el modelo no tiene otra forma de saber de quién es cada cara, y
  * la prueba de la ronda 1 (2026-10-03) mostró que, rotuladas así, separa las identidades.
- * El orden es el mismo en que el handler adjunta las imágenes: actual (si se edita), personas, lugar, producto.
+ * El orden es el mismo en que se adjuntan las imágenes: actual (si se edita), personas, lugar,
+ * producto y estilo. Lo usan el carril con 2+ personas y el modo `direct` de la UI cuando manda
+ * `slots` (2026-10-03): los dos caminos rotulan igual.
  */
-function multiPersonaRoleClause(args: {
+export function labeledReferencesClause(args: {
   hasSource: boolean; personas: Array<{ name: string; refs: number }>;
   locationName?: string | null; locationRefs?: number; productNames?: string[] | null; productRefs?: number;
+  styleRefs?: number;
 }): string {
   const c: string[] = [];
   const people = args.personas.map((p, i) => ({ name: String(p.name ?? '').trim(), refs: Math.max(0, p.refs ?? 0), letter: subjectLetter(i) }));
   const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
   const prodRefs = args.productNames?.length ? Math.max(0, args.productRefs ?? 0) : 0;
-  if (people.some((p) => p.refs > 0) || locRefs + prodRefs > 0) c.push(`${REFERENCE_PHOTOS_CLAUSE}.`);
+  if (people.some((p) => p.refs > 0) || locRefs + prodRefs + Math.max(0, args.styleRefs ?? 0) > 0) c.push(`${REFERENCE_PHOTOS_CLAUSE}.`);
   if (args.hasSource) {
     c.push('The FIRST attached image is the current version of this image: edit it. Keep its composition, subjects, lighting and style, and change only what the instructions ask for.');
   }
@@ -1387,8 +1390,19 @@ function multiPersonaRoleClause(args: {
   }
   if (prodRefs > 0) {
     labels.push(`${span(prodRefs)}: PRODUCT, the real packaging (${args.productNames!.join(', ')}) — paint it into the scene at its real size, faithful to that photo.`);
+    at += prodRefs;
+  }
+  const styleRefs = Math.max(0, args.styleRefs ?? 0);
+  if (styleRefs > 0) {
+    labels.push(`${span(styleRefs)}: STYLE reference only — match its light, colour and photographic look; never copy its content, place or people.`);
   }
   if (labels.length) c.push(`The attached images, by position: ${labels.join(' ')}`);
+  if (people.length === 1) {
+    const p = people[0];
+    if (p.refs) c.push(`Whenever ${p.name} appears, keep that exact face and identity (never copy their clothing or pose).`);
+    return c.join(' ');
+  }
+  if (!people.length) return c.join(' ');
   const names = people.map((p) => `SUBJECT ${p.letter} (${p.name})`);
   const noPhoto = people.filter((p) => !p.refs).map((p) => p.name);
   c.push(
@@ -1657,6 +1671,18 @@ interface DirectImageRequest {
   sourceAssetLabel?: string;
   referenceImages?: { dataUrl: string; label?: string }[];
   model?: string;      // accepted for compatibility; ignored — gemini-2.5-flash-image is the only model.
+  // 2026-10-03 — los ESPACIOS de la UI, cada imagen con su rol. Si llega, manda sobre
+  // `sourceAssetDataUrl`/`referenceImages` y las imágenes se rotulan por posición con el MISMO
+  // constructor que el carril (`labeledReferencesClause`). Sin `slots`, el camino de siempre.
+  slots?: DirectSlots;
+}
+
+/** Los espacios de la UI sync (Slot A, Slot C «Subj 2», Slot B fondo, producto, Ref 1–3 estilo). */
+export interface DirectSlots {
+  subjects?: Array<{ dataUrl: string; label?: string }>;
+  background?: { dataUrl: string; label?: string } | null;
+  product?: Array<{ dataUrl: string; label?: string }>;
+  style?: Array<{ dataUrl: string; label?: string }>;
 }
 
 // --- Gemini 2.5 Flash Image — multimodal (subject / style references) -----
@@ -1735,6 +1761,34 @@ async function vertexPredictImagenCapability(params: {
   }
 }
 
+// ── SLOTS:BEGIN ── (2026-10-03) bloque PURO: de los espacios de la UI a imágenes y rótulo. Lo extrae
+// `tests/personas_test.mjs` junto con C y PB.
+export function directSlotsPlan(slots: DirectSlots): { images: Array<{ mimeType: string; data: string }>; clause: string; error: string | null } {
+  const ok = (x: any) => x && typeof x.dataUrl === 'string' && x.dataUrl.startsWith('data:');
+  const subjects = (slots.subjects ?? []).filter(ok);
+  if (subjects.length > MAX_PERSONAS_PER_IMAGE) {
+    return { images: [], clause: '', error: `PERSONAS_TOO_MANY: ${subjects.length} sujetos; el motor acepta hasta ${MAX_PERSONAS_PER_IMAGE} por imagen` };
+  }
+  const background = ok(slots.background) ? [slots.background!] : [];
+  const product = (slots.product ?? []).filter(ok);
+  const style = (slots.style ?? []).filter(ok);
+  const toInline = (d: string) => {
+    const comma = d.indexOf(',');
+    const m = /^data:([^;,]+)[;,]/.exec(d);
+    return { mimeType: m?.[1] || 'image/png', data: comma >= 0 ? d.slice(comma + 1) : d };
+  };
+  const images = [...subjects, ...background, ...product, ...style].map((x) => toInline(x.dataUrl));
+  const clause = labeledReferencesClause({
+    hasSource: false,
+    personas: subjects.map((x, i) => ({ name: (x.label ?? '').trim() || `subject ${subjectLetter(i)}`, refs: 1 })),
+    locationName: background.length ? ((background[0].label ?? '').trim() || 'the background') : null, locationRefs: background.length,
+    productNames: product.length ? product.map((x, i) => (x.label ?? '').trim() || `product ${i + 1}`) : null, productRefs: product.length,
+    styleRefs: style.length,
+  });
+  return { images, clause, error: null };
+}
+// ── SLOTS:END ──
+
 interface DirectImageResult {
   image_data_url: string;
   preset_used: boolean;
@@ -1766,6 +1820,18 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
     } else {
       console.log(`[ImageLab v6] No preset found for brand_id=${req.brand_id} canal=${canal}, using raw prompt`);
     }
+  }
+
+  // 2026-10-03 — espacios de la UI: imágenes en orden sujetos → fondo → producto → estilo, cada una
+  // rotulada por posición y rol. Mismo techo de personas que el carril.
+  if (req.slots) {
+    const plan = directSlotsPlan(req.slots);
+    if (plan.error) throw new Error(plan.error);
+    const finalPrompt = plan.images.length ? `${plan.clause} ${basePrompt}` : basePrompt;
+    const { image_data_url, usage } = plan.images.length
+      ? await vertexPredictImagenCapability({ prompt: finalPrompt, negativePrompt, aspectRatio, images: plan.images })
+      : await vertexPredictImagen({ prompt: finalPrompt, negativePrompt, aspectRatio });
+    return { image_data_url, preset_used: presetUsed, preset_id: presetId, usage };
   }
 
   // No images → text-to-image fast path.

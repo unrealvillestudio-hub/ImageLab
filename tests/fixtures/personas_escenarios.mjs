@@ -65,3 +65,13 @@ export const N1 = {
 
 export const PERSONAS = { PERSONA_A, PERSONA_B, PERSONA_C, LOCATION, PRODUCT };
 export { req };
+
+// Modo `direct` (UI sync). `DIRECT_LEGACY` son peticiones SIN `slots`: su cuerpo hacia Vertex se congeló
+// sobre `main` (`personas_direct_golden.json`) y no puede moverse.
+const PX = 'data:image/png;base64,' + Buffer.from('IMG:pixel').toString('base64');
+export const DIRECT_LEGACY = {
+  solo_texto: { mode: 'direct', prompt: 'una ferretería al amanecer', aspectRatio: '16:9' },
+  sujeto_y_referencias: { mode: 'direct', prompt: 'retrato en el mostrador', sourceAssetDataUrl: PX, sourceAssetLabel: 'Teodora',
+    referenceImages: [{ dataUrl: PX, label: 'Fondo: mostrador' }, { dataUrl: PX, label: 'style reference warm' }] },
+};
+export { PX };

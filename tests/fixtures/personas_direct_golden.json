@@ -1,0 +1,44 @@
+{
+ "solo_texto": {
+  "status": 200,
+  "image_parts": [],
+  "image_text": [
+   "una ferretería al amanecer Avoid: blurry, low quality, amateur, stock photo look, watermark, text overlay, logo."
+  ],
+  "aspect": "16:9",
+  "builder_user": null,
+  "response": {
+   "preset_used": false,
+   "preset_id": null,
+   "model": "gemini-2.5-flash-image",
+   "usage": {
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 1290
+   },
+   "status": "ok"
+  }
+ },
+ "sujeto_y_referencias": {
+  "status": 200,
+  "image_parts": [
+   "image/png:IMG:pixel",
+   "image/png:IMG:pixel",
+   "image/png:IMG:pixel"
+  ],
+  "image_text": [
+   "Using the provided image(s) as the exact subject (Teodora, Fondo: mostrador), keep their identity, labels, and proportions unchanged. Match the visual style of the provided style reference(s) (style reference warm). retrato en el mostrador Avoid: blurry, low quality, amateur, stock photo look, watermark, text overlay, logo."
+  ],
+  "aspect": "1:1",
+  "builder_user": null,
+  "response": {
+   "preset_used": false,
+   "preset_id": null,
+   "model": "gemini-2.5-flash-image",
+   "usage": {
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 1290
+   },
+   "status": "ok"
+  }
+ }
+}
