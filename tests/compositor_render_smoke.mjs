@@ -64,7 +64,9 @@ async function fontBytes(cssUrl, weight, italic = false) {
   const css = await (await fetch(cssUrl, { headers: { 'User-Agent': 'Mozilla/4.0 (compatible)' } })).text();
   const face = M.pickFontFace(M.parseFontFaces(css), { weight, italic });
   assert.ok(face, `sin @font-face descargable en ${cssUrl}`);
-  const out = { data: Buffer.from(await (await fetch(face.url)).arrayBuffer()), weight: face.weight };
+  // Igual que `loadFont` en el handler (1.3.1): la fuente llega a satori sin kerning.
+  const raw = new Uint8Array(await (await fetch(face.url)).arrayBuffer());
+  const out = { data: Buffer.from(M.neutralizeKerning(raw).bytes), weight: face.weight };
   fontCache.set(key, out);
   return out;
 }

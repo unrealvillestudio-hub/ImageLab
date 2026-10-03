@@ -36,7 +36,7 @@ writeFileSync(modPath, `${source.slice(i, j + END.length)}\n`, 'utf8');
 const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
   'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer',
-  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions']) {
+  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
 
@@ -176,7 +176,9 @@ test('los NOMBRES de rol son de la marca, no del motor (paletas disjuntas)', () 
     'NeuroneSCF', 'LucienSael', 'accent_secondary', 'accent_glow', 'accent_warm', 'am_l', 'ember', 'gold', 'mercurio',
     'parchment', 'obsidian', 'bone', 'surface_1', 'carbon_m', 'bg_secondary', 'bg_tertiary',
     'Montserrat', 'PT Sans', 'Cinzel', 'Space Mono', 'JetBrains', 'Cormorant', 'Crimson', 'Libre Baskerville', 'DM Sans',
-    'Desliza', 'Swipe', 'Glisser']) {
+    'Desliza', 'Swipe', 'Glisser',
+    // 1.3.1 (2026-10-03) — el caso que destapó el kerning (pieza 85517171): su vocabulario tampoco.
+    'Broward', 'Dyfensor', 'Narrow']) {
     assert.ok(!block.includes(rol), `el motor nombra '${rol}': eso es instancia, no eje`);
   }
   // Ni un hex en el bloque: todo color sale de brand_palette (o del logotipo declarado por la marca).
@@ -747,6 +749,66 @@ test('F3 · svgDimensions: atributos numéricos o viewBox', () => {
 test('F3 · determinismo: misma lámina ⇒ mismo árbol', () => {
   const c = { index: 3, total: 5, role: 'body', eyebrow: 'Campo', keyword: 'trigo', steps: [{ text: 'a' }, { text: 'b', critical: true }] };
   assert.equal(JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })), JSON.stringify(sceneN1(c, { headline: 'El trigo no espera' })));
+});
+
+console.log('\n── 1.3.1 · la fuente llega a satori sin kerning (espacio entre palabras parejo) ──');
+
+// Fuente SINTÉTICA: sólo el directorio de tablas, que es lo único que `neutralizeKerning` lee y
+// escribe. sfnt: cabecera de 12 bytes y entradas de 16 (tag, checksum, offset, length). WOFF:
+// cabecera de 44 y entradas de 20 (tag, offset, compLength, origLength, origChecksum).
+function fakeFont(signature, tags, { woff = false } = {}) {
+  const head = woff ? 44 : 12;
+  const entry = woff ? 20 : 16;
+  const b = new Uint8Array(head + tags.length * entry + 8);
+  for (let k = 0; k < 4; k++) b[k] = signature.charCodeAt(k);
+  const at = woff ? 12 : 4;
+  b[at] = tags.length >> 8; b[at + 1] = tags.length & 0xff;
+  tags.forEach((t, n) => {
+    const o = head + n * entry;
+    for (let k = 0; k < 4; k++) b[o + k] = t.charCodeAt(k);
+    for (let k = 4; k < entry; k++) b[o + k] = (n * 31 + k) & 0xff;   // resto de la entrada: no se toca
+  });
+  b.fill(0xab, head + tags.length * entry);                              // «datos» de las tablas
+  return b;
+}
+const tagsOf = (b, { woff = false } = {}) => {
+  const head = woff ? 44 : 12; const entry = woff ? 20 : 16; const n = (b[woff ? 12 : 4] << 8) | b[woff ? 13 : 5];
+  return Array.from({ length: n }, (_, k) => String.fromCharCode(...b.slice(head + k * entry, head + k * entry + 4)));
+};
+const TAGS = ['GDEF', 'GPOS', 'GSUB', 'OS/2', 'cmap', 'glyf', 'head', 'hmtx', 'kern', 'loca', 'name'];
+
+test('1.3.1 · TrueType: `kern` y `GPOS` desaparecen del directorio; GSUB, glifos y métricas quedan', () => {
+  const src = fakeFont('\u0000\u0001\u0000\u0000', TAGS);
+  const before = Uint8Array.from(src);
+  const r = M.neutralizeKerning(src);
+  assert.deepEqual(r.neutralized, ['GPOS', 'kern']);
+  assert.deepEqual(tagsOf(r.bytes), ['GDEF', 'xPOS', 'GSUB', 'OS/2', 'cmap', 'glyf', 'head', 'hmtx', 'xern', 'loca', 'name']);
+  assert.deepEqual(src, before, 'devuelve una COPIA: los bytes de entrada no cambian');
+  const diff = [...r.bytes].map((v, k) => (v !== src[k] ? k : -1)).filter((k) => k >= 0);
+  assert.deepEqual(diff, [12 + 1 * 16, 12 + 8 * 16], 'sólo cambia el primer byte de cada tag neutralizado');
+});
+
+test('1.3.1 · OpenType/CFF (OTTO) y WOFF: mismo efecto; idempotente', () => {
+  const otf = M.neutralizeKerning(fakeFont('OTTO', ['CFF ', 'GPOS', 'cmap']));
+  assert.deepEqual(tagsOf(otf.bytes), ['CFF ', 'xPOS', 'cmap']);
+  const woff = M.neutralizeKerning(fakeFont('wOFF', ['GPOS', 'glyf', 'kern'], { woff: true }));
+  assert.deepEqual(woff.neutralized, ['GPOS', 'kern']);
+  assert.deepEqual(tagsOf(woff.bytes, { woff: true }), ['xPOS', 'glyf', 'xern']);
+  const twice = M.neutralizeKerning(otf.bytes);
+  assert.deepEqual(twice.neutralized, [], 'la segunda pasada no encuentra nada');
+  assert.deepEqual(twice.bytes, otf.bytes);
+});
+
+test('1.3.1 · una fuente sin kerning, o algo que no es una fuente, pasa intacta', () => {
+  const plain = fakeFont('true', ['cmap', 'glyf', 'head']);
+  assert.deepEqual(M.neutralizeKerning(plain), { bytes: plain, neutralized: [] });
+  for (const other of [new Uint8Array([0x77, 0x4f, 0x46, 0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), new Uint8Array([1, 2, 3])]) {
+    const r = M.neutralizeKerning(other);   // woff2 (que satori no lee) y bytes cortos
+    assert.deepEqual(r, { bytes: other, neutralized: [] });
+  }
+  // Directorio que miente sobre su tamaño: no se lee fuera del búfer.
+  const lies = fakeFont('OTTO', ['GPOS']); lies[5] = 9;
+  assert.deepEqual(M.neutralizeKerning(lies).neutralized, ['GPOS']);
 });
 
 console.log(`\n${'─'.repeat(72)}`);
