@@ -1125,8 +1125,14 @@ export function subjectLetter(i: number): string { return SUBJECT_LETTERS[i] ?? 
  *   1. una foto por persona — sin foto, el modelo inventa la cara (medido, M1 de la ronda 1);
  *   2. una del producto, si lo hay — un envase sin foto es un envase inventado; si no cabe, se excede
  *      el presupuesto en esa una y se declara en `over_budget`;
- *   3. una del lugar, si cabe — el lugar también se describe en texto, así que es lo primero que cede;
- *   4. lo que sobre, más fotos de las personas, de a una y empezando por A.
+ *   3. más fotos de las personas, de a una y empezando por A (hasta 2 por persona);
+ *   4. el lugar, sólo si aún queda plaza — también va descrito en texto, así que es lo primero que cede.
+ *
+ * ⛔ NO OPERATIVO — orden anterior (2026-10-03, PR #39), se conserva por trazabilidad: persona →
+ * producto → LUGAR → fotos extra. Medido en producción (5c05a19) el mismo día, set de podcast con dos
+ * personas: con la foto del lugar, cada persona viajó con UNA foto y la identidad cumplió en 3 de 6
+ * tomas (la entrevistadora perdió el largo de pelo y la edad). Con el lugar sólo en texto y la
+ * entrevistadora con 2 fotos, 6 de 6 (hojas `motor_personas_A.jpg` y `motor_personas_A2.jpg`).
  */
 export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[] }): {
   persona: string[][]; location: string[]; product: string[];
@@ -1148,8 +1154,6 @@ export function allocateReferences(args: { personaRefs: string[][]; locationRefs
   let used = counts.reduce((a, b) => a + b, 0);
   const product = xr.length ? xr.slice(0, 1) : [];
   used += product.length;
-  const location = lr.length && used < budget ? lr.slice(0, 1) : [];
-  used += location.length;
   let grew = true;
   while (used < budget && grew) {
     grew = false;
@@ -1158,6 +1162,8 @@ export function allocateReferences(args: { personaRefs: string[][]; locationRefs
       if (counts[i] < cap) { counts[i]++; used++; grew = true; }
     }
   }
+  const location = lr.length && used < budget ? lr.slice(0, 1) : [];
+  used += location.length;
   const persona = pr.map((r, i) => (r ?? []).slice(0, counts[i]));
   const totalPersona = pr.reduce((a, r) => a + (r ?? []).length, 0);
   return {
@@ -1997,6 +2003,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = usedPersonas.length > 0;
 
+    // 2026-10-03 — el reparto se decide ANTES de sintetizar: con 2+ personas el lugar puede ceder su
+    // plaza, y entonces el constructor no debe hablar de «la foto del lugar adjunta» (no viaja).
+    const alloc = allocateReferences({
+      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
+      locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
+      productRefs: productInScene ? productInScene.items.map((i) => i.image_url) : [],
+    });
+    const builderLocation: PromptLocation | null = location && usedPersonas.length >= 2
+      ? { ...location, reference_image_urls: alloc.location } : location;
+
     let finalPrompt = built.prompt;
     if (shouldSynthesize(params)) {
       const v = await loadActivePromptBuilderVersion();
@@ -2021,7 +2037,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           persona,
           personas: usedPersonas.length >= 2 ? usedPersonas : null,
           mode,
-          location,
+          location: builderLocation,
           productComposited,
           product: productInScene,
         }),
@@ -2066,11 +2082,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // 2026-10-03 — el reparto vive en `allocateReferences` (bloque PB, con test). Con una persona, la
     // regla de siempre; con dos o más, el presupuesto del modelo. El lugar acepta también `data:image/`,
     // como la persona: el carril manda https, una prueba puede mandar la foto en línea.
-    const alloc = allocateReferences({
-      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
-      locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
-      productRefs: productInScene ? productInScene.items.map((i) => i.image_url) : [],
-    });
     const locationRefs = alloc.location;
     const productRefs = alloc.product;
     const personaRefs = alloc.persona.flat();

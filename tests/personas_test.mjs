@@ -123,8 +123,13 @@ await ok('presupuesto: con una persona, la regla de siempre; con dos, el límite
   assert.equal(M.MODEL_MAX_INPUT_IMAGES, 3);
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: [], productRefs: [] });
   assert.deepEqual(r.persona.map((x) => x.length), [2, 1]); assert.equal(r.budget, 3); assert.equal(r.over_budget, false);
-  // Dos personas y lugar: una cada una y el lugar.
+  // Dos personas y lugar (orden medido el 2026-10-03: personas > producto > fotos extra > lugar): A 2,
+  // B 1 y el lugar cede (va descrito en texto). Con la foto del lugar, 3 de 6; sin ella, 6 de 6.
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: L, productRefs: [] });
+  assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[2, 1], 0]);
+  assert.deepEqual(r.dropped, { persona: 3, location: 2, product: 0 });
+  // El lugar entra sólo si las personas no tienen más fotos que ocupen la plaza.
+  r = M.allocateReferences({ personaRefs: [[A[0]], [B[0]]], locationRefs: L, productRefs: [] });
   assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[1, 1], 1]);
   // Dos personas, lugar y producto: el lugar cede (se describe en texto); el producto no.
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: L, productRefs: X });
@@ -133,7 +138,7 @@ await ok('presupuesto: con una persona, la regla de siempre; con dos, el límite
   // Tres personas y producto: el producto viaja igual y se declara el exceso.
   r = M.allocateReferences({ personaRefs: [A, B, C], locationRefs: [], productRefs: X });
   assert.deepEqual([r.persona.map((x) => x.length), r.product.length, r.over_budget], [[1, 1, 1], 1, true]);
-  // Una persona sin fotos no gasta presupuesto.
+  // Una persona sin fotos no gasta presupuesto: A sube a 2 y la plaza que queda va al lugar.
   r = M.allocateReferences({ personaRefs: [A, []], locationRefs: L, productRefs: [] });
   assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[2, 0], 1], 'la plaza de B vuelve a A');
   assert.deepEqual(r.persona[0], A.slice(0, 2));
@@ -184,7 +189,7 @@ await ok('cláusulas del motor con dos personas: plural, mirada entre ellas y ex
 // ── 3 · el handler real con dos personas ──────────────────────────────────────────────────────────
 console.log('── 3 · el handler con dos personas ──');
 const SET = { ...LOCATION, allowed_scene_text: ['ABIERTO'] };
-await ok('dos nombradas + lugar con letrero: A, B y el lugar, rotulados; mirada entre ellas; excepción del letrero', async () => {
+await ok('dos nombradas + lugar con letrero: A con 2 fotos y B con 1; el lugar en texto; mirada entre ellas; excepción del letrero', async () => {
   const restore = silence();
   let r;
   try {
@@ -193,13 +198,18 @@ await ok('dos nombradas + lugar con letrero: A, B y el lugar, rotulados; mirada 
   } finally { restore(); }
   const d = vertexDigest(r);
   assert.equal(d.status, 200);
-  assert.deepEqual(d.image_parts.map((p) => p.split('IMG:')[1]), [PERSONA_A.reference_image_urls[0], PERSONA_B.reference_image_urls[0], LOCATION.reference_image_urls[0]]);
+  assert.deepEqual(d.image_parts.map((p) => p.split('IMG:')[1]), [...PERSONA_A.reference_image_urls.slice(0, 2), PERSONA_B.reference_image_urls[0]]);
   const text = d.image_text.join(' ');
-  assert.ok(text.includes('Image 1: SUBJECT A, Teodora Quispe. Image 2: SUBJECT B, Ignacio Huerta. Image 3: BACKGROUND'));
+  assert.ok(text.includes('Images 1–2: SUBJECT A, Teodora Quispe. Image 3: SUBJECT B, Ignacio Huerta.'));
+  assert.ok(!text.includes('BACKGROUND'), 'el lugar no viaja como foto: va descrito en el prompt');
   assert.ok(text.includes('look at each other') && text.includes('"ABIERTO" may appear') && text.includes('Frame tightly around the 2 people'));
   assert.ok(d.builder_user.includes('PEOPLE — exactly 2') && d.builder_user.includes('ALLOWED SCENE TEXT'));
   assert.deepEqual(r.json.personas_used, ['Teodora Quispe', 'Ignacio Huerta']);
-  assert.deepEqual([r.json.persona_refs, r.json.reference_budget, r.json.gaze, r.json.reference_images], [[1, 1], 3, 'each_other', 3]);
+  assert.deepEqual([r.json.persona_refs, r.json.reference_budget, r.json.gaze, r.json.reference_images, r.json.location_refs], [[2, 1], 3, 'each_other', 3, 0]);
+  assert.equal(r.json.location_used, 'Mostrador del puerto', 'el lugar sigue en la escena, descrito en texto');
+  assert.ok(d.builder_user.includes('LOCATION — the scene takes place at "Mostrador del puerto", a real place of this brand. It is the BACKDROP'),
+    'el constructor describe el lugar');
+  assert.ok(!d.builder_user.includes('shown in the attached location photo'), 'y no promete una foto del lugar que no viaja');
   assert.equal(r.json.persona_used, true);
 });
 
