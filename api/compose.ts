@@ -1860,7 +1860,7 @@ async function loadFont(slot: Slot | string, s: {
   if (!s.cssImport || !/^https?:\/\//i.test(s.cssImport)) {
     throw new CompositorError('COMPOSITOR_FONT_UNRESOLVED',
       `la ranura '${slot}' usa brand_typography.role='${s.role}' (${s.family}) y esa fila no trae un css_import ` +
-      `descargable ('${s.cssImport ?? '∅'}'). Sembrá css_import (hoja css2) o typography.${slot}.font_url con un .ttf/.otf.`);
+      `descargable ('${s.cssImport ?? '∅'}'). Siembra css_import (hoja css2) o typography.${slot}.font_url con un .ttf/.otf.`);
   }
   const css = new TextDecoder().decode(await fetchBytes(s.cssImport, 'COMPOSITOR_FONT_CSS_FAILED'));
   const face = pickFontFace(parseFontFaces(css), { weight: s.weight, italic: s.italic });
