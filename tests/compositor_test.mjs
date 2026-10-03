@@ -674,6 +674,12 @@ test('F3 · portada con foto: velo, franja, aviso de deslizar con flecha geomét
   const under = findAll(closing, (n) => String(n.props?.style?.borderBottom ?? '').includes('solid'))[0];
   assert.ok(under && under.props.style.borderBottom.endsWith('rgb(217, 164, 65)'), 'subrayado en la luz');
   assert.ok(!under.props.style.backgroundColor && !under.props.style.borderRadius, 'sin forma de botón');
+  const flechaDe = (sc) => findAll(sc, (n) => n.type === 'img' && String(n.props?.src ?? '').startsWith('data:image/svg+xml;utf8,'))
+    .map((n) => decodeURIComponent(n.props.src));
+  assert.ok(flechaDe(cover).some((f) => f.includes('M1 6H22.5')), 'portada: la flecha del aviso señala a la derecha (hay más láminas)');
+  const fc = flechaDe(closing);
+  assert.ok(fc.length === 1 && fc[0].includes('M6 1V14.5') && !fc[0].includes('M1 6H22.5'),
+    'cierre: la flecha del CTA señala ABAJO, al texto del post; nunca a la derecha, donde no queda lámina');
   const withShade = sceneN1({ index: 1, total: 4, role: 'cover' }, { headline: 'Cosecha' },
     { palette: { shade: 'tierra' }, carousel: { shade: { stops: [[0, 0.9], [100, 0.4]] } } }, 'data:image/png;base64,BG');
   assert.ok(JSON.stringify(withShade).includes('linear-gradient(180deg, rgba(59, 42, 30, 0.9) 0%, rgba(59, 42, 30, 0.4) 100%)'), 'velo de carrusel declarado');

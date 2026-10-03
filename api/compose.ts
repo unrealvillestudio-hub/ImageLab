@@ -66,7 +66,9 @@ declare const process: { env: Record<string, string | undefined> };
 //   1.3.1 (2026-10-03) — espacio entre palabras parejo: las fuentes llegan a satori sin kerning
 //         (`neutralizeKerning`), porque satori mide sin él y dibuja con él. Cambia el dibujo de TODO
 //         texto —titular, bajada, etiquetas, logotipo de texto— en lámina y en overlay.
-export const COMPOSITOR_VERSION = '1.3.1';
+//   1.3.2 (2026-10-03) — la flecha del CTA del cierre señala abajo, al texto del post: a la derecha
+//         prometía una lámina más que no existe. La del aviso de deslizar en la portada no cambia.
+export const COMPOSITOR_VERSION = '1.3.2';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -1170,11 +1172,19 @@ export function buildCarouselScene(args: {
   });
   // Flecha GEOMÉTRICA (la familia display de una marca puede no tener «→»): un trazo vectorial con el
   // color de su función. No es un carácter: no depende de qué glifos traiga la fuente.
-  const arrow = (color: string, size: number) => {
-    const w = r2(size * 1.25);
-    const h = r2(size * 0.62);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="${w}" height="${h}">` +
-      `<path d="M1 6H22.5M17.5 1.5L22.5 6L17.5 10.5" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  // La DIRECCIÓN es eje y la fija el rol de la lámina, no la marca: en la portada señala a la derecha
+  // (hay más láminas: el gesto existe); en el cierre señala ABAJO, al texto del post y al botón real
+  // del anuncio. Una flecha a la derecha en la última lámina promete un deslizamiento que no existe
+  // (Sam, 2026-10-03; Meta rechaza en anuncios la funcionalidad inexistente).
+  const arrow = (color: string, size: number, direction: 'right' | 'down' = 'right') => {
+    const down = direction === 'down';
+    const w = r2(size * (down ? 0.62 : 1.25));
+    const h = r2(size * (down ? 0.84 : 0.62));
+    const svg = down
+      ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 16" width="${w}" height="${h}">` +
+        `<path d="M6 1V14.5M2 10.5L6 14.5L10 10.5" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="${w}" height="${h}">` +
+        `<path d="M1 6H22.5M17.5 1.5L22.5 6L17.5 10.5" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     return {
       type: 'img',
       props: { src: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`, width: w, height: h, style: { width: w, height: h, flexShrink: 0, marginLeft: r2(size * 0.45) } },
@@ -1354,7 +1364,7 @@ export function buildCarouselScene(args: {
             style: { display: 'flex', flexDirection: 'row', alignItems: 'center', maxWidth: inner, paddingBottom: r2(cs * 0.45), borderBottom: `${Math.max(1, r2(cs * 0.09))}px solid ${c.cta_underline}` },
             children: [
               text(slide.cta, { ...font(T.label, cs), letterSpacing: r2(T.label.letterSpacingEm * 0.75 * cs), color: c.cta_text, flexShrink: 1 }),
-              arrow(c.cta_underline, cs),
+              arrow(c.cta_underline, cs, 'down'),
             ],
           },
         }],
