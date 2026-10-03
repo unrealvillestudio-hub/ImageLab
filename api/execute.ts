@@ -220,7 +220,9 @@ interface ExecuteRequest {
     title?: string;
     image_hook?: string;
     visual_directives?: string[];        // las directrices humanas ACUMULADAS, en orden
-    persona?: PromptPersona | null;      // dato de `public.person_blueprints`, resuelto por el carril
+    persona?: PromptPersona | null;      // ALIAS LEGACY (2026-10-03): una persona. Si llega `personas`, manda `personas`
+    personas?: PromptPersona[] | null;   // 2026-10-03 — hasta MAX_PERSONAS_PER_IMAGE, en orden A, B…; dato del carril
+    gaze?: PersonaGaze | null;           // 2026-10-03 — camera | each_other | subject_of_scene; sin dato, el defecto por N
     generation_mode?: GenerationMode;    // 'edit_from_current' exige `source_image_url`
     source_image_url?: string;           // la imagen actual, para editar en vez de repintar
     prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
@@ -314,13 +316,8 @@ async function loadOverlayTokens(brandId: string | undefined): Promise<any | nul
   return row?.tokens ?? null;
 }
 
-/** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
-const MAX_PERSONA_REFS = 3;
-/** Tope de fotos de locación por llamada: dos ángulos bastan para anclar el lugar. */
-const MAX_LOCATION_REFS = 1;
-/** Con lugar o producto, la persona viaja con 2 fotos: más fotos adjuntas empujan al modelo al collage. */
-const MAX_PERSONA_REFS_WITH_OTHERS = 2;
-const MAX_PRODUCT_REFS = 2;
+// Los topes de fotos de referencia (persona, locación, producto) viven en el bloque PB desde el
+// 2026-10-03: el reparto entre varias personas es lógica pura y su test la ejecuta tal cual.
 
 /**
  * Lector de PostgREST. Devuelve la primera fila, o `null`.
@@ -534,6 +531,41 @@ const NO_TEXT_NEGATIVE =
   'text, letters, words, typography, captions, subtitles, headlines, numbers, lettering, ' +
   'watermark, signage, labels, on-image copy, UI overlay';
 
+// ── TEXTO PERMITIDO EN ESCENA, COMO DATO (2026-10-03, motor de personas) ──
+//
+// MEDIDO el 2026-10-03 (set de un podcast, 12 tomas): un letrero encendido que es PARTE del lugar
+// («ON AIR») chocaba con la cláusula sin texto y sólo salía porque el concepto lo declaraba a mano como
+// excepción. La excepción es INSTANCIA —qué palabras muestra un lugar concreto— y vive en el dato del
+// lugar (`location_blueprints.raw_config.allowed_scene_text`, que el carril manda como
+// `params.location.allowed_scene_text`). El motor sólo sabe redactarla: sin dato, la cláusula es
+// EXACTAMENTE la de siempre.
+/** Tope de entradas y de largo: es un letrero del lugar, no un titular. Más que eso sería copy dibujado. */
+export const ALLOWED_SCENE_TEXT_MAX_ITEMS = 5;
+export const ALLOWED_SCENE_TEXT_MAX_CHARS = 40;
+
+/** Las palabras que el lugar muestra, limpias: cadenas no vacías, sin repetir, con su tope. */
+export function normalizeAllowedSceneText(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const v of raw) {
+    const s = typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : '';
+    if (!s || s.length > ALLOWED_SCENE_TEXT_MAX_CHARS || s.includes('"') || out.includes(s)) continue;
+    out.push(s);
+    if (out.length >= ALLOWED_SCENE_TEXT_MAX_ITEMS) break;
+  }
+  return out;
+}
+
+/** La cláusula sin texto. Sin palabras permitidas, la constante literal; con ellas, la constante más
+ *  una excepción que las cita tal cual y no admite nada más. Sin punto final: quien la usa lo pone. */
+export function noTextClause(allowed?: string[] | null): string {
+  const words = normalizeAllowedSceneText(allowed ?? []);
+  if (!words.length) return NO_TEXT_CLAUSE;
+  return `${NO_TEXT_CLAUSE}. Single exception, because it is part of the place itself: ` +
+    `${words.map((w) => `"${w}"`).join(', ')} may appear exactly as written, legible and correctly spelled, ` +
+    'only where the place shows it (for example a lit sign on the wall); no other letters, words or numbers anywhere';
+}
+
 // ── BRIEF-N06 · LA CLÁUSULA DE SUJETOS DISTINTOS — si hay más de una persona, son personas ──
 //
 // MEDIDO EN PRODUCCIÓN (2026-09-06): la pieza `d9a45427` salió con la MISMA mujer dos veces en el
@@ -697,7 +729,7 @@ export function mergeVisualSpec(
 export function composeVisualPrompt(
   spec: VisualSpec,
   conceptText: string,
-  opts: { styleNotes?: string | null; copyTheme?: string | null; sceneDirective?: string | null } = {},
+  opts: { styleNotes?: string | null; copyTheme?: string | null; sceneDirective?: string | null; allowedSceneText?: string[] | null } = {},
 ): string {
   const p: string[] = [];
 
@@ -705,7 +737,8 @@ export function composeVisualPrompt(
   // BRIEF 7 — segunda posición, pegada al concepto: los generadores pesan más lo que viene primero,
   // y esto no es un matiz estético sino la restricción que define qué clase de imagen es. Va aunque
   // no haya concepto, identidad ni preset: es del motor, no de la pieza.
-  p.push(`${NO_TEXT_CLAUSE}.`);
+  // 2026-10-03 — la excepción del lugar (`allowedSceneText`) es dato; sin ella, la constante de siempre.
+  p.push(`${noTextClause(opts.allowedSceneText)}.`);
   // BRIEF-N06 — tercera posición, detrás de la cláusula sin texto y delante de todo lo demás: es
   // del motor igual que aquélla, y sale aunque no haya marca, preset ni concepto.
   p.push(`${DISTINCT_SUBJECTS_CLAUSE}.`);
@@ -787,7 +820,18 @@ export interface PromptLocation {
   name: string;
   description: string;
   reference_image_urls?: string[];
+  // 2026-10-03 — las palabras que el lugar muestra (un letrero del set). Dato de
+  // `location_blueprints.raw_config.allowed_scene_text`; sin él, la cláusula sin texto de siempre.
+  allowed_scene_text?: string[];
 }
+
+/** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
+const MAX_PERSONA_REFS = 3;
+/** Tope de fotos de locación por llamada: dos ángulos bastan para anclar el lugar. */
+const MAX_LOCATION_REFS = 1;
+/** Con lugar o producto, la persona viaja con 2 fotos: más fotos adjuntas empujan al modelo al collage. */
+const MAX_PERSONA_REFS_WITH_OTHERS = 2;
+const MAX_PRODUCT_REFS = 2;
 
 /** Un producto REAL que aparece en la escena (opción (c), Sam 2026-09-27): el generador lo PINTA a partir
  *  de su foto real y a su tamaño físico. Llega resuelto por el carril desde la ficha del producto. */
@@ -956,6 +1000,191 @@ export const SUBJECT_FRAMING_CLAUSE =
 export const PRODUCT_COMPOSITED_CLAUSE =
   'A photo of the real product will be composited onto this image later, by code: do NOT draw any product, bottle, jar, tube, box, packaging or label anywhere in the scene';
 
+// ── VARIAS PERSONAS EN UNA IMAGEN (2026-10-03, motor de personas) ──────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA, medido el 2026-10-03:
+//   · El carril elegía UNA persona; si la pieza nombraba a dos, ninguna (`content-run-stage`,
+//     `selectMentionedPersona`). Este lab, además, sólo entendía `params.persona` (una).
+//   · Las cláusulas de luz, encuadre y mirada hablan de «the person», en singular.
+//   · Prueba de la ronda 1 (scratchpad `avatar_nscf.md` §4): con las fotos de dos personas ROTULADAS
+//     por posición, el modelo reconoció a las dos en 9 de 11 tomas. Sin la foto de la segunda, la
+//     inventó. La identidad se separa cuando cada imagen dice de quién es.
+//
+// LO QUE HACE: acepta `params.personas[]` (el `persona` de siempre queda como ALIAS LEGACY: una lista
+// de uno), filtra por mención como siempre, reparte el presupuesto de imágenes de entrada y rotula cada
+// imagen por posición y rol («Image 1: SUBJECT A, <nombre>»). Con UNA persona, todo sale EXACTAMENTE
+// como antes: lo fija `tests/fixtures/personas_n1_golden.json`, congelado sobre `main`.
+//
+// MULTIMARCA: cero marcas, cero nombres. Quiénes son, cuántas y qué miran llega como dato.
+
+/** Máximo de personas por imagen que el MOTOR acepta. Cuántas van es dato de la petición (`personas[]`);
+ *  esto es el techo de código, para que un dato roto no adjunte diez caras. Pasarlo es un error
+ *  declarado (400), no un recorte silencioso. Debe coincidir con el techo del carril. */
+export const MAX_PERSONAS_PER_IMAGE = 3;
+
+/** Imágenes de entrada que admite `gemini-2.5-flash-image` según su ficha de Vertex AI («Maximum images
+ *  per prompt: 3»; reportado el 2026-10-03, ficha `vertex-ai/generative-ai/docs/models/gemini/2-5-flash-image`).
+ *  Es el PRESUPUESTO cuando hay dos o más personas. Con una persona no se aplica: ese camino manda hasta
+ *  5 imágenes desde 2026-09-27 (persona 2 + lugar 1 + producto 2, medido en el golden) y no se toca. */
+export const MODEL_MAX_INPUT_IMAGES = 3;
+
+/** Hacia dónde miran las personas. Es DATO de la petición (`params.gaze`). */
+export const PERSONA_GAZES = ['camera', 'each_other', 'subject_of_scene'] as const;
+export type PersonaGaze = typeof PERSONA_GAZES[number];
+
+/** Las personas de la petición. `personas[]` manda; si no llega, `persona` (alias legacy) es una lista
+ *  de uno. Error declarado si la lista está mal formada o pasa el techo. */
+export function resolvePersonas(params: { persona?: unknown; personas?: unknown } | null | undefined):
+  { personas: PromptPersona[]; source: 'personas' | 'persona' | 'none'; error: string | null } {
+  const raw = params?.personas;
+  if (Array.isArray(raw) && raw.length) {
+    const bad = raw.findIndex((p: any) => !p || typeof p.name !== 'string' || !p.name.trim() || typeof p.description !== 'string' || !p.description.trim());
+    if (bad >= 0) return { personas: [], source: 'personas', error: `PERSONAS_INVALID: personas[${bad}] necesita name y description no vacíos` };
+    const seen = new Set<string>();
+    const list = (raw as PromptPersona[]).filter((p) => {
+      const k = p.name.trim().toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    if (list.length > MAX_PERSONAS_PER_IMAGE) {
+      return { personas: [], source: 'personas', error: `PERSONAS_TOO_MANY: ${list.length} personas; el motor acepta hasta ${MAX_PERSONAS_PER_IMAGE} por imagen` };
+    }
+    return { personas: list, source: 'personas', error: null };
+  }
+  const legacy = params?.persona;
+  if (legacy && typeof legacy === 'object') return { personas: [legacy as PromptPersona], source: 'persona', error: null };
+  return { personas: [], source: 'none', error: null };
+}
+
+/** Las personas que la pieza o una directriz NOMBRAN, en el orden de la petición (A, B, C…). */
+export function mentionedPersonas(personas: PromptPersona[], texts: Array<string | null | undefined>): PromptPersona[] {
+  return (personas ?? []).filter((p) => personaMentioned(p, texts));
+}
+
+/** La mirada efectiva. Sin dato: con dos o más personas, se miran entre ellas; con una, `null`, que
+ *  significa «la cláusula de siempre». Un valor fuera del vocabulario es un error, no un defecto. */
+export function resolveGaze(raw: unknown, count: number): { gaze: PersonaGaze | null; error: string | null } {
+  if (raw === undefined || raw === null || raw === '') return { gaze: count >= 2 ? 'each_other' : null, error: null };
+  const v = String(raw).trim();
+  if ((PERSONA_GAZES as readonly string[]).includes(v)) return { gaze: v as PersonaGaze, error: null };
+  return { gaze: null, error: `GAZE_INVALID: '${v}' no es uno de: ${PERSONA_GAZES.join(', ')}` };
+}
+
+/** La cláusula de mirada. `null` = la constante de siempre (una persona, sin dato). */
+export function gazeClause(gaze: PersonaGaze | null, count: number): string {
+  if (!gaze) return PERSONA_GAZE_CLAUSE;
+  const never = 'Never a vacant, distant or lost gaze, never looking at nothing';
+  const many = count >= 2;
+  if (gaze === 'camera') {
+    return (many ? 'Each person looks into the camera, engaging the viewer directly. ' : 'The person looks into the camera, engaging the viewer directly. ') + never;
+  }
+  if (gaze === 'each_other') {
+    return (many
+      ? 'The people look at each other as they talk and listen: each one\'s gaze goes to another person in the scene, never to the camera. '
+      : 'The person looks at the other person in the scene, never at the camera. ') + never;
+  }
+  return (many
+    ? 'The people look at what the scene is about — the product, the object in their hands or the task — not at the camera. '
+    : 'The person looks at what the scene is about — the product, the object in their hands or the task — not at the camera. ') + never;
+}
+
+/** Luz por capas para N personas. Con una o ninguna, la constante literal de siempre. */
+export function lightingCoherenceClause(count: number): string {
+  if (count < 2) return LIGHTING_COHERENCE_CLAUSE;
+  return 'Lighting is layered like a real photograph, never flat: the scene keeps its own light, depth and perspective, with natural falloff and a background slightly softer in focus; ' +
+    'each person gets a gentle key light on the face with soft modelling shadows, all coming from the same side as the scene\'s main light source, so every subject reads in three dimensions. ' +
+    'People, product and background share the same light direction, color temperature, white balance, lens, depth of field and film grain. ' +
+    'Never an evenly lit flat image, never one person lit differently from another or from the scene, never a cut-out or pasted look';
+}
+
+/** Encuadre para N personas. Con una o ninguna, la constante literal de siempre. */
+export function subjectFramingClause(count: number): string {
+  if (count < 2) return SUBJECT_FRAMING_CLAUSE;
+  return `Frame tightly around the ${count} people: together they fill most of the frame, all of them fully inside it, none cropped out or hidden behind another, ` +
+    'with only a small margin above their heads — no large empty area of ceiling, wall or sky above them. The people are the subject and the place is the backdrop behind them, never the other way round';
+}
+
+/** Identidad sin vestuario, para N personas. Con una, la constante literal de siempre. */
+export function personaIdentityOnlyClause(count: number): string {
+  if (count < 2) return PERSONA_IDENTITY_ONLY_CLAUSE;
+  return 'The reference photos of each person define that person\'s identity only — face, hair, skin tone and build. Do NOT copy their clothing, jewellery, pose, background or lighting: ' +
+    'dress and pose each person for THIS scene, with outfits different from the ones in the reference photos';
+}
+
+const SUBJECT_LETTERS = 'ABCDEFGHIJ';
+/** La letra de rol de la persona i (0 → A). */
+export function subjectLetter(i: number): string { return SUBJECT_LETTERS[i] ?? String(i + 1); }
+
+/**
+ * EL PRESUPUESTO DE IMÁGENES DE ENTRADA. Recibe las fotos DISPONIBLES de cada persona nombrada (en
+ * orden A, B…), del lugar y del producto; devuelve cuáles viajan.
+ *
+ * Con 0 o 1 persona: la regla de siempre, sin presupuesto (persona 3, o 2 si hay lugar o producto;
+ * lugar 1; producto 2). Con 2 o más: `MODEL_MAX_INPUT_IMAGES`, repartido en este orden y por este motivo:
+ *   1. una foto por persona — sin foto, el modelo inventa la cara (medido, M1 de la ronda 1);
+ *   2. una del producto, si lo hay — un envase sin foto es un envase inventado; si no cabe, se excede
+ *      el presupuesto en esa una y se declara en `over_budget`;
+ *   3. una del lugar, si cabe — el lugar también se describe en texto, así que es lo primero que cede;
+ *   4. lo que sobre, más fotos de las personas, de a una y empezando por A.
+ */
+export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[] }): {
+  persona: string[][]; location: string[]; product: string[];
+  budget: number | null; over_budget: boolean; dropped: { persona: number; location: number; product: number };
+} {
+  const pr = args.personaRefs ?? [];
+  const lr = args.locationRefs ?? [];
+  const xr = args.productRefs ?? [];
+  if (pr.length <= 1) {
+    const location = lr.slice(0, MAX_LOCATION_REFS);
+    const product = xr.slice(0, MAX_PRODUCT_REFS);
+    const cap = location.length || product.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
+    const persona = pr.map((r) => (r ?? []).slice(0, cap));
+    return { persona, location, product, budget: null, over_budget: false,
+      dropped: { persona: (pr[0]?.length ?? 0) - (persona[0]?.length ?? 0), location: lr.length - location.length, product: xr.length - product.length } };
+  }
+  const budget = MODEL_MAX_INPUT_IMAGES;
+  const counts = pr.map((r) => ((r ?? []).length ? 1 : 0));
+  let used = counts.reduce((a, b) => a + b, 0);
+  const product = xr.length ? xr.slice(0, 1) : [];
+  used += product.length;
+  const location = lr.length && used < budget ? lr.slice(0, 1) : [];
+  used += location.length;
+  let grew = true;
+  while (used < budget && grew) {
+    grew = false;
+    for (let i = 0; i < pr.length && used < budget; i++) {
+      const cap = Math.min((pr[i] ?? []).length, MAX_PERSONA_REFS_WITH_OTHERS);
+      if (counts[i] < cap) { counts[i]++; used++; grew = true; }
+    }
+  }
+  const persona = pr.map((r, i) => (r ?? []).slice(0, counts[i]));
+  const totalPersona = pr.reduce((a, r) => a + (r ?? []).length, 0);
+  return {
+    persona, location, product, budget, over_budget: used > budget,
+    dropped: { persona: totalPersona - persona.reduce((a, r) => a + r.length, 0), location: lr.length - location.length, product: xr.length - product.length },
+  };
+}
+
+/**
+ * Las cláusulas del motor que se reponen sobre la síntesis, en el orden de siempre. Con 0 o 1 persona,
+ * sin mirada ni texto permitido como dato, la lista es LITERALMENTE la anterior al 2026-10-03.
+ */
+export function engineClausesFor(args: {
+  mode: GenerationMode; textZone: string; personaCount: number; gaze: PersonaGaze | null;
+  placement: string; productInScene: boolean; productComposited: boolean; angleSeed: string;
+  allowedSceneText?: string[] | null;
+}): string[] {
+  const n = args.personaCount;
+  const edit = args.mode === 'edit_from_current';
+  return [noTextClause(args.allowedSceneText), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, lightingCoherenceClause(n),
+    ...(edit ? [] : [subjectFramingClause(n), ...(args.textZone ? [args.textZone] : []),
+      ...(n > 0 ? [personaIdentityOnlyClause(n)] : []), ...(args.placement ? [args.placement] : [])]),
+    ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
+    ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
+    ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])];
+}
+
 export interface PromptBuilderInput {
   basePrompt: string;
   copyFull: string;
@@ -968,6 +1197,9 @@ export interface PromptBuilderInput {
   location?: PromptLocation | null;
   productComposited?: boolean;
   product?: PromptProduct | null;
+  // 2026-10-03 — varias personas. Si llegan dos o más NOMBRADAS, cada una entra rotulada (A, B…); con
+  // una o ninguna, manda `persona` y el mensaje es el de siempre.
+  personas?: PromptPersona[] | null;
 }
 
 /** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
@@ -1019,7 +1251,23 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   if (directives.length) {
     parts.push(`HUMAN DIRECTIVES (chronological; later ones refine earlier ones; if two conflict, the later wins):\n${directives.map((d, k) => `${k + 1}. ${d}`).join('\n')}`);
   }
-  if (withPersona && input.persona) {
+  const many = mentionedPersonas(input.personas ?? [], [input.copyFull, input.title, input.imageHook, ...directives]);
+  if (many.length >= 2) {
+    parts.push(
+      `PEOPLE — exactly ${many.length} recurring people of this brand appear in this scene, each one exactly once and each a ` +
+      `different individual: ${many.map((p, k) => `SUBJECT ${subjectLetter(k)} = "${p.name.trim()}"`).join(', ')}. ` +
+      'Describe every one of them in the scene, by name, with their own features; never merge, swap or duplicate them.',
+    );
+    many.forEach((p, k) => {
+      const refs = (p.reference_image_urls ?? []).length;
+      parts.push(
+        `PERSONA ${subjectLetter(k)} — "${p.name.trim()}" is a real, recurring person of this brand. They must look exactly like this` +
+        `${refs ? ` and like their own attached reference photo(s) (SUBJECT ${subjectLetter(k)})` : ''}:\n${p.description.trim()}`,
+      );
+      parts.push(`PERSONA ${subjectLetter(k)} EXPRESSION:\n${personaExpressionBlock(p)}`);
+      parts.push(`PERSONA ${subjectLetter(k)} WARDROBE:\n${personaWardrobeBlock(p, input.mode)}`);
+    });
+  } else if (withPersona && input.persona) {
     const refs = (input.persona.reference_image_urls ?? []).length;
     parts.push(
       `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. Whenever the piece or a directive ` +
@@ -1036,6 +1284,13 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `recognizable and do not invent another place, but the camera frames the subject, not the room — the place never ` +
       `dominates the person:\n${input.location.description.trim()}`,
     );
+    const allowed = normalizeAllowedSceneText(input.location.allowed_scene_text);
+    if (allowed.length) {
+      parts.push(
+        `ALLOWED SCENE TEXT — this place shows ${allowed.map((w) => `"${w}"`).join(', ')} (for example on a lit sign). ` +
+        'Those words are part of the place: keep them, exactly as written, where the place shows them. They are the ONLY text allowed in the image.',
+      );
+    }
   }
   if (input.product?.items?.length) {
     parts.push(
@@ -1063,7 +1318,10 @@ export function imageRoleClause(args: {
   hasSource: boolean; personaName?: string | null; personaRefs: number;
   locationName?: string | null; locationRefs?: number;
   productNames?: string[] | null; productRefs?: number;
+  // 2026-10-03 — dos o más personas: cada una con cuántas fotos suyas viajan, en el orden de las imágenes.
+  personas?: Array<{ name: string; refs: number }> | null;
 }): string {
+  if ((args.personas ?? []).length >= 2) return multiPersonaRoleClause(args as typeof args & { personas: Array<{ name: string; refs: number }> });
   const c: string[] = [];
   const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
   const perRefs = args.personaName ? Math.max(0, args.personaRefs) : 0;
@@ -1094,6 +1352,51 @@ export function imageRoleClause(args: {
   if (prodRefs > 0) {
     c.push(`${span(prodRefs)} show the real product packaging (${args.productNames!.join(', ')}): paint it into the scene at its real size, faithful to that photo.`);
   }
+  return c.join(' ');
+}
+
+/**
+ * Rol de las imágenes con DOS O MÁS personas. Cada imagen se nombra por POSICIÓN y por ROL
+ * («Image 1–2: SUBJECT A, <nombre>»): el modelo no tiene otra forma de saber de quién es cada cara, y
+ * la prueba de la ronda 1 (2026-10-03) mostró que, rotuladas así, separa las identidades.
+ * El orden es el mismo en que el handler adjunta las imágenes: actual (si se edita), personas, lugar, producto.
+ */
+function multiPersonaRoleClause(args: {
+  hasSource: boolean; personas: Array<{ name: string; refs: number }>;
+  locationName?: string | null; locationRefs?: number; productNames?: string[] | null; productRefs?: number;
+}): string {
+  const c: string[] = [];
+  const people = args.personas.map((p, i) => ({ name: String(p.name ?? '').trim(), refs: Math.max(0, p.refs ?? 0), letter: subjectLetter(i) }));
+  const locRefs = args.locationName ? Math.max(0, args.locationRefs ?? 0) : 0;
+  const prodRefs = args.productNames?.length ? Math.max(0, args.productRefs ?? 0) : 0;
+  if (people.some((p) => p.refs > 0) || locRefs + prodRefs > 0) c.push(`${REFERENCE_PHOTOS_CLAUSE}.`);
+  if (args.hasSource) {
+    c.push('The FIRST attached image is the current version of this image: edit it. Keep its composition, subjects, lighting and style, and change only what the instructions ask for.');
+  }
+  let at = args.hasSource ? 2 : 1;
+  const span = (n: number) => (n === 1 ? `Image ${at}` : `Images ${at}–${at + n - 1}`);
+  const labels: string[] = [];
+  for (const p of people) {
+    if (!p.refs) continue;
+    labels.push(`${span(p.refs)}: SUBJECT ${p.letter}, ${p.name}.`);
+    at += p.refs;
+  }
+  if (locRefs > 0) {
+    labels.push(`${span(locRefs)}: BACKGROUND, the real place "${args.locationName}" — set the scene there, keeping its materials, colours and style recognizable; do not copy any person from it.`);
+    at += locRefs;
+  }
+  if (prodRefs > 0) {
+    labels.push(`${span(prodRefs)}: PRODUCT, the real packaging (${args.productNames!.join(', ')}) — paint it into the scene at its real size, faithful to that photo.`);
+  }
+  if (labels.length) c.push(`The attached images, by position: ${labels.join(' ')}`);
+  const names = people.map((p) => `SUBJECT ${p.letter} (${p.name})`);
+  const noPhoto = people.filter((p) => !p.refs).map((p) => p.name);
+  c.push(
+    `The scene shows exactly ${people.length} different people — ${names.join(', ')} — each one exactly once. ` +
+    'Each keeps the face, hair, skin tone and build of their OWN reference image(s), never those of another subject; never merge, swap, blend or duplicate them, and never add a lookalike. ' +
+    (noPhoto.length ? `${noPhoto.join(', ')} ${noPhoto.length === 1 ? 'has' : 'have'} no photo: follow the written description. ` : '') +
+    'Never copy clothing or pose from the photos.',
+  );
   return c.join(' ');
 }
 // ── PB:END ──
@@ -1207,6 +1510,8 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
     styleNotes: req.params.style_notes ?? null,
     copyTheme:  copyOutput ? String(copyOutput).slice(0, 150) : null,
     sceneDirective: req.params.visual_directive ?? null,
+    // 2026-10-03 — las palabras que el lugar muestra (dato del lugar); sin ellas, la cláusula de siempre.
+    allowedSceneText: normalizeAllowedSceneText(req.params.location?.allowed_scene_text),
   });
 
   console.log(
@@ -1598,12 +1903,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
     const directives = normalizeDirectives(params.visual_directives);
-    const persona = params.persona ?? null;
+    // 2026-10-03 — PERSONAS: `personas[]` manda; `persona` es el alias legacy (una lista de uno). Una
+    // lista mal formada o por encima del techo es un error declarado: nunca un recorte silencioso.
+    const resolved = resolvePersonas(params);
+    if (resolved.error) { res.status(400).json(failurePayload(new Error(resolved.error), null)); return; }
+    const usedPersonas = mentionedPersonas(resolved.personas, [params.copy_full, params.title, params.image_hook, ...directives]);
+    const persona: PromptPersona | null = usedPersonas[0] ?? resolved.personas[0] ?? null;
+    const gazeR = resolveGaze(params.gaze, usedPersonas.length);
+    if (gazeR.error) { res.status(400).json(failurePayload(new Error(gazeR.error), null)); return; }
     // Locación y producto: DATO resuelto por el carril. La locación viaja con sus fotos; el producto
     // sólo como aviso, porque su PNG real lo pega el compositor después.
     const location: PromptLocation | null =
       params.location && typeof params.location.name === 'string' && typeof params.location.description === 'string'
         ? params.location as PromptLocation : null;
+    const allowedSceneText = normalizeAllowedSceneText(location?.allowed_scene_text);
     // Opción (c) (Sam, 2026-09-27): el producto se PINTA en la escena. Sólo se pega por código si la
     // marca lo declara (`imagelab_overlay_tokens.product.mode = 'composite'`), y entonces no se pinta.
     const productIn: PromptProduct | null =
@@ -1616,7 +1929,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const textZone = textZoneClause(overlayTokens?.layout);
     const productComposited = params.product_composited === true || productMode === 'composite';
     const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
-    const personaUsed = personaMentioned(persona, [params.copy_full, params.title, params.image_hook, ...directives]);
+    const personaUsed = usedPersonas.length > 0;
 
     let finalPrompt = built.prompt;
     if (shouldSynthesize(params)) {
@@ -1640,6 +1953,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           domainDirective: params.visual_directive ?? null,
           directives,
           persona,
+          personas: usedPersonas.length >= 2 ? usedPersonas : null,
           mode,
           location,
           productComposited,
@@ -1651,12 +1965,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // cláusula de identidad y la persona salía con la ropa exacta de sus fotos, o el envase en la
       // franja del titular).
       const placement = productInScene ? productPlacementClause(overlayTokens?.layout, personaUsed, productInScene.items.length) : '';
-      finalPrompt = enforceEngineClauses(synth.text, [NO_TEXT_CLAUSE, DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, LIGHTING_COHERENCE_CLAUSE,
-        ...(mode === 'edit_from_current' ? [] : [SUBJECT_FRAMING_CLAUSE, ...(textZone ? [textZone] : []),
-          ...(personaUsed ? [PERSONA_IDENTITY_ONLY_CLAUSE] : []), ...(placement ? [placement] : [])]),
-        ...(personaUsed ? [PERSONA_GAZE_CLAUSE] : []),
-        ...(productInScene && mode !== 'edit_from_current' ? [productAngleClause(String(params.title ?? params.image_hook ?? params.copy_full ?? ''))] : []),
-        ...(productComposited && !productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])]);
+      // 2026-10-03 — la lista vive en `engineClausesFor` (bloque PB, con test). Con una persona, sin
+      // mirada ni texto permitido como dato, es literalmente la de antes (golden `personas_n1_golden.json`).
+      finalPrompt = enforceEngineClauses(synth.text, engineClausesFor({
+        mode, textZone, personaCount: usedPersonas.length, gaze: gazeR.gaze, placement,
+        productInScene: !!productInScene, productComposited,
+        angleSeed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
+        allowedSceneText,
+      }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
     }
@@ -1681,20 +1997,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // Las imágenes que acompañan al prompt: la actual (editar) y las de la persona, si se la nombra.
     const images: InlineImage[] = [];
     if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
-    const locationRefs = location ? (location.reference_image_urls ?? []).filter((u) => /^https?:\/\//.test(u)).slice(0, MAX_LOCATION_REFS) : [];
-    const productRefs = productInScene ? productInScene.items.map((i) => i.image_url).slice(0, MAX_PRODUCT_REFS) : [];
-    const personaCap = locationRefs.length || productRefs.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
-    const personaRefs = personaUsed ? (persona?.reference_image_urls ?? []).slice(0, personaCap) : [];
+    // 2026-10-03 — el reparto vive en `allocateReferences` (bloque PB, con test). Con una persona, la
+    // regla de siempre; con dos o más, el presupuesto del modelo. El lugar acepta también `data:image/`,
+    // como la persona: el carril manda https, una prueba puede mandar la foto en línea.
+    const alloc = allocateReferences({
+      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
+      locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
+      productRefs: productInScene ? productInScene.items.map((i) => i.image_url) : [],
+    });
+    const locationRefs = alloc.location;
+    const productRefs = alloc.product;
+    const personaRefs = alloc.persona.flat();
     for (const u of personaRefs) images.push(await fetchImageInline(u));
     for (const u of locationRefs) images.push(await fetchImageInline(u));
     for (const u of productRefs) images.push(await fetchImageInline(u));
+    if (alloc.over_budget) {
+      console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada: el producto no cabía en el presupuesto de ${alloc.budget} y viaja igual (sin su foto sería inventado)`);
+    }
 
     const { image_data_url: imageDataUrl, usage } = images.length
       ? await vertexPredictImagenCapability({
           prompt: [imageRoleClause({
             hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
+            personas: usedPersonas.length >= 2 ? usedPersonas.map((p, i) => ({ name: p.name, refs: alloc.persona[i].length })) : null,
             locationName: location?.name ?? null, locationRefs: locationRefs.length,
-            productNames: productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+            productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
             productRefs: productRefs.length,
           }), finalPrompt].filter(Boolean).join(' '),
           negativePrompt: built.negativePrompt,
@@ -1732,6 +2059,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
       product_refs:           productRefs.length,
       reference_images:       images.length,
+      // 2026-10-03 — sólo cuando se pidió `personas[]` o entraron dos o más: con el alias legacy y una
+      // persona, la respuesta es la de siempre, clave por clave.
+      ...(resolved.source === 'personas' || usedPersonas.length >= 2 ? {
+        personas_used: usedPersonas.map((p) => p.name),
+        persona_refs: alloc.persona.map((r) => r.length),
+        gaze: gazeR.gaze,
+        reference_budget: alloc.budget,
+        references_dropped: alloc.dropped,
+      } : {}),
       status:         'ok',
     });
   } catch (err) {
