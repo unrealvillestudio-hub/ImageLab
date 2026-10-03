@@ -45,7 +45,8 @@
  *                                           ← F3 (2026-10-02), lámina de carrusel; ver el bloque F3
  *   → 200 { status:'ok', image_data_url, compositor_version, tokens_source, width, height,
  *           fonts:[…], markers:[…], text:{ headline, subheadline },
- *           meta:{ carousel_applied, warnings:[…] } }
+ *           meta:{ carousel_applied, warnings:[…], carousel?:{ …, fit } } }
+ *                                           ← `fit` (1.3.3): qué redujo el ajuste vertical, si actuó
  *   → 4xx/5xx { error, error_label, status:'error' }  ← `error_label` es lo que lee execLab.
  */
 
@@ -68,7 +69,11 @@ declare const process: { env: Record<string, string | undefined> };
 //         texto —titular, bajada, etiquetas, logotipo de texto— en lámina y en overlay.
 //   1.3.2 (2026-10-03) — la flecha del CTA del cierre señala abajo, al texto del post: a la derecha
 //         prometía una lámina más que no existe. La del aviso de deslizar en la portada no cambia.
-export const COMPOSITOR_VERSION = '1.3.2';
+//   1.3.3 (2026-10-03) — ajuste vertical de la lámina de carrusel (`fitCarouselContent`): si el bloque
+//         central no cabe entre la cabecera y el pie, se reduce por escalones (cifra → titular →
+//         cuerpo y pasos → pasos omitidos, nunca el crítico) y el pie no se tapa ni sale del lienzo.
+//         Una lámina que ya cabía sale idéntica.
+export const COMPOSITOR_VERSION = '1.3.3';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -942,6 +947,10 @@ export function resolveCarouselChrome(args: {
   logo: CarouselLogo | null;
   fonts: Array<{ role: string; family: string; cssImport: string | null; weight: number; italic: boolean }>;
   warnings: string[];
+  // 1.3.3 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el ajuste vertical
+  // baja por ellos si el bloque central no cabe. `fitGuard` lo pone sólo `fitCarouselContent`.
+  fitLadder: { headline: number[] };
+  fitGuard?: boolean;
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
@@ -983,6 +992,7 @@ export function resolveCarouselChrome(args: {
   };
   const type = {} as Record<'headline' | 'body' | 'label' | 'figure', CarouselType>;
   let headlineOverflow = false;
+  let headlineSmaller: number[] = [];
   for (const kind of ['headline', 'body', 'label', 'figure'] as const) {
     const st = ((ct.typography ?? {})[kind] ?? {}) as Record<string, any>;
     const role = String(st.role ?? '');
@@ -995,6 +1005,8 @@ export function resolveCarouselChrome(args: {
       if (steps.length === 0) { missing.push('carousel.typography.headline.fit_steps'); continue; }
       const fit = fitFontSizePct(steps, String(args.text?.headline ?? ''));
       sizePct = fit.sizePct;
+      headlineSmaller = [...new Set(steps.map((s: any) => Number(s.size_pct)))]
+        .filter((x) => Number.isFinite(x) && x > 0 && x < sizePct).sort((a, b) => b - a);
       headlineOverflow = fit.overflow && !!String(args.text?.headline ?? '').trim();
     } else if (!Number.isFinite(sizePct) || sizePct <= 0) { missing.push(`carousel.typography.${kind}.size_pct`); continue; }
     type[kind] = {
@@ -1107,6 +1119,7 @@ export function resolveCarouselChrome(args: {
     headline: split.parts,
     subheadline: sub.trim() ? sub : null,
     swipeText, logo, fonts, warnings,
+    fitLadder: { headline: headlineSmaller },
   };
 }
 
@@ -1419,6 +1432,11 @@ export function buildCarouselScene(args: {
     },
   };
 
+  // 1.3.3 — si el ajuste vertical tuvo que actuar (`fitGuard`), la cabecera y el pie quedan rígidos y
+  // el bloque central es el único que cede: aunque la estimación se quedara corta, el pie no se tapa
+  // ni sale del lienzo. Una lámina que ya cabía no lleva estas claves y su escena no cambia.
+  const guard = chrome.fitGuard === true;
+  const rigid = (node: Record<string, any>) => (guard ? { ...node, props: { ...node.props, style: { ...node.props.style, flexShrink: 0 } } } : node);
   children.push({
     type: 'div',
     props: {
@@ -1426,11 +1444,351 @@ export function buildCarouselScene(args: {
         position: 'absolute', top: 0, left: 0, width: W, height: H,
         display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: M,
       },
-      children: [top, { type: 'div', props: { style: { display: 'flex', flexDirection: 'column', width: inner }, children: mid } }, foot],
+      children: [
+        rigid(top),
+        { type: 'div', props: { style: { display: 'flex', flexDirection: 'column', width: inner, ...(guard ? { flexShrink: 1, minHeight: 0, overflow: 'hidden' } : {}) }, children: mid } },
+        rigid(foot),
+      ],
     },
   });
 
   return { type: 'div', props: { style: { display: 'flex', position: 'relative', width: W, height: H }, children } };
+}
+
+// ── 1.3.3 (2026-10-03) · AJUSTE VERTICAL DE LA LÁMINA ─────────────────────────────────────────────
+// DEFECTO, medido en producción (barrido del 2026-10-03): el bloque central —titular, bajada, cifra,
+// pasos, CTA— se dimensionaba por número de caracteres (`fit_steps`) y nadie comprobaba que cupiera
+// entre la cabecera (progreso, etiqueta, i / n) y el pie (aviso de deslizar, logotipo). Una cifra de
+// 26,5 % del ancho más cuatro pasos empujaba el pie fuera del lienzo: el cuarto paso cortado y el
+// logotipo perdido, o una cifra de dos palabras partida en dos líneas que desplazaba el logotipo.
+//
+// LA CORRECCIÓN, determinista y sin red: se MIDE la altura que el bloque central va a ocupar con las
+// métricas de avance de la MISMA fuente que recibe satori (sin kerning desde 1.3.1, así que la suma
+// de avances es exactamente lo que satori mide), se reparte en líneas con el mismo ancho disponible
+// y, si no cabe, se reduce por escalones en un orden fijo:
+//   1. la cifra (hasta la mitad de su tamaño declarado),
+//   2. el titular (los escalones siguientes de su `fit_steps`),
+//   3. el cuerpo y los pasos (hasta el 85 %),
+//   4. y, si ni así cabe, se omiten pasos desde el final —nunca el crítico— con aviso.
+// Si una lámina ya cabe, nada de esto toca la escena: sale idéntica, clave por clave.
+// Todo es eje: los escalones son proporciones del tamaño que la marca declara, no tamaños de marca.
+
+// Proporción del tamaño declarado en cada escalón de reducción (el primero es «sin reducir»).
+const FIT_FIGURE_SCALES = [1, 0.85, 0.72, 0.6, 0.5];
+const FIT_BODY_SCALES = [0.92, 0.85];
+// Aire mínimo entre la cabecera y el bloque central, y entre éste y el pie, en tamaños de etiqueta.
+const FIT_MIN_GAP_LABELS = 0.6;
+// Ancho medio de glifo (en em) cuando no hay métricas de la fuente: el ajuste queda ESTIMADO y avisa.
+const FIT_FALLBACK_EM = 0.6;
+
+/** Métricas de avance de una fuente: ancho de cada carácter en em, y la media de los imprimibles ASCII. */
+export interface FontAdvance { advances: Map<number, number>; avgEm: number }
+
+/**
+ * Lee de una fuente sfnt (TrueType u OpenType/CFF) el avance horizontal de cada carácter: `cmap`
+ * (formato 4 o 12) → glifo → `hmtx`, dividido por `unitsPerEm` (`head`). PURO: recibe los bytes. Es
+ * la misma métrica con la que satori ubica el texto (sin kerning, 1.3.1). Lo que no sea una fuente
+ * legible —WOFF comprimido, bytes cortos, tablas fuera del búfer— devuelve null: el ajuste avisa y
+ * estima, no falla.
+ */
+export function fontAdvanceMetrics(bytes: Uint8Array): FontAdvance | null {
+  const b = bytes;
+  if (!b || b.length < 12) return null;
+  const u16 = (o: number) => (b[o] << 8) | b[o + 1];
+  const u32 = (o: number) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  const tag = (o: number) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+  const sig = tag(0);
+  if (!(sig === '\u0000\u0001\u0000\u0000' || sig === 'OTTO' || sig === 'true')) return null;
+  const tables: Record<string, { off: number; len: number }> = {};
+  for (let k = 0, n = u16(4); k < n; k++) {
+    const o = 12 + k * 16;
+    if (o + 16 > b.length) break;
+    tables[tag(o)] = { off: u32(o + 8), len: u32(o + 12) };
+  }
+  const { head, hhea, hmtx, cmap } = tables;
+  if (!head || !hhea || !hmtx || !cmap) return null;
+  if ([head, hhea, hmtx, cmap].some((t) => t.off + t.len > b.length) || head.len < 20 || hhea.len < 36) return null;
+  const upem = u16(head.off + 18);
+  const nH = u16(hhea.off + 34);
+  if (!upem || !nH || hmtx.len < nH * 4) return null;
+  const adv = (g: number) => u16(hmtx.off + 4 * Math.min(g, nH - 1)) / upem;
+
+  // Subtabla de cmap: Unicode completo (formato 12) antes que BMP (formato 4).
+  let sub = -1;
+  let rank = 0;
+  for (let k = 0, n = u16(cmap.off + 2); k < n; k++) {
+    const r = cmap.off + 4 + k * 8;
+    if (r + 8 > b.length) break;
+    const pid = u16(r);
+    const eid = u16(r + 2);
+    const at = cmap.off + u32(r + 4);
+    if (at + 4 > b.length) continue;
+    const fmt = u16(at);
+    const unicode = pid === 0 || (pid === 3 && (eid === 1 || eid === 10));
+    const rk = !unicode ? 0 : fmt === 12 ? 2 : fmt === 4 ? 1 : 0;
+    if (rk > rank) { rank = rk; sub = at; }
+  }
+  if (sub < 0) return null;
+
+  const advances = new Map<number, number>();
+  const LIMIT = 200_000;
+  if (u16(sub) === 4) {
+    const segX2 = u16(sub + 6);
+    const ends = sub + 14;
+    const starts = ends + segX2 + 2;
+    const deltas = starts + segX2;
+    const ros = deltas + segX2;
+    if (ros + segX2 > b.length) return null;
+    for (let s = 0; s < segX2 / 2 && advances.size < LIMIT; s++) {
+      const end = u16(ends + 2 * s);
+      const start = u16(starts + 2 * s);
+      const delta = u16(deltas + 2 * s);
+      const ro = u16(ros + 2 * s);
+      for (let c = start; c <= end && c !== 0xffff; c++) {
+        let g: number;
+        if (ro === 0) g = (c + delta) & 0xffff;
+        else {
+          const a = ros + 2 * s + ro + 2 * (c - start);
+          if (a + 2 > b.length) continue;
+          g = u16(a);
+          if (g) g = (g + delta) & 0xffff;
+        }
+        if (g) advances.set(c, adv(g));
+      }
+    }
+  } else {
+    const groups = u32(sub + 12);
+    for (let k = 0; k < groups && advances.size < LIMIT; k++) {
+      const o = sub + 16 + k * 12;
+      if (o + 12 > b.length) break;
+      const s = u32(o);
+      const e = Math.min(u32(o + 4), s + LIMIT);
+      const g0 = u32(o + 8);
+      for (let c = s; c <= e; c++) advances.set(c, adv(g0 + c - s));
+    }
+  }
+  let sum = 0;
+  let cnt = 0;
+  for (let c = 0x20; c <= 0x7e; c++) {
+    const a = advances.get(c);
+    if (a != null) { sum += a; cnt++; }
+  }
+  if (!cnt) return null;
+  return { advances, avgEm: sum / cnt };
+}
+
+/** Clave de una fuente en el mapa de métricas: la misma familia, peso y estilo que pide el cromo. */
+export function fitFontKey(f: { family: string; weight: number; italic: boolean }): string {
+  return `${f.family}|${f.weight}|${f.italic ? 'italic' : 'normal'}`;
+}
+
+type CarouselChrome = Extract<ReturnType<typeof resolveCarouselChrome>, { applied: true }>;
+type FitMetrics = Record<string, FontAdvance | null | undefined>;
+
+/**
+ * Altura que ocupan la cabecera, el bloque central y el pie de una lámina, con las MISMAS medidas
+ * que `buildCarouselScene` (si una cambia allí, cambia aquí: el smoke compara esta estimación con la
+ * caja que satori dibuja). PURO. `estimated` = alguna fuente no tenía métricas y se usó el ancho medio
+ * genérico.
+ */
+export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetrics | null | undefined): {
+  top: number; mid: number; foot: number; available: number; gap: number; slack: number; estimated: string[];
+} {
+  const W = chrome.canvas.width;
+  const H = chrome.canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const px = (pct: number) => r2((pct / 100) * W);
+  const T = chrome.type;
+  const L = px(T.label.sizePct);
+  const B = px(T.body.sizePct);
+  const M = px(chrome.marginPct);
+  const inner = r2(W - 2 * M);
+  const slide = chrome.slide;
+  const estimated: string[] = [];
+
+  // Ancho de un texto en una familia, a un tamaño, con su tracking y su transformación.
+  const widthFn = (k: CarouselType, size: number, letterSpacing: number, transform: string) => {
+    const m = metrics?.[fitFontKey(k)] ?? null;
+    if (!m && !estimated.includes(k.family)) estimated.push(k.family);
+    return (s: string) => {
+      const str = transform === 'uppercase' ? s.toUpperCase() : transform === 'lowercase' ? s.toLowerCase() : s;
+      let w = 0;
+      for (const ch of str) {
+        const cp = ch.codePointAt(0)!;
+        const em = m ? (m.advances.get(cp) ?? (cp === 0xa0 ? m.advances.get(0x20) : undefined) ?? m.avgEm) : FIT_FALLBACK_EM;
+        w += em * size + letterSpacing;
+      }
+      return w;
+    };
+  };
+  // Líneas de un texto partido en palabras, a lo ancho disponible (corte voraz, como el de satori).
+  const lines = (s: string, widthOf: (s: string) => number, maxW: number) => {
+    const words = String(s ?? '').split(/\s+/).filter(Boolean);
+    if (!words.length) return 0;
+    const space = widthOf(' ');
+    let n = 1;
+    let cur = -1;
+    for (const w of words) {
+      const ww = widthOf(w);
+      if (cur < 0) cur = ww;
+      else if (cur + space + ww <= maxW + 0.01) cur += space + ww;
+      else { n++; cur = ww; }
+    }
+    return n;
+  };
+  const textH = (k: CarouselType, size: number, s: string, maxW: number, letterSpacing = r2(k.letterSpacingEm * size), transform = k.transform, lh = k.lineHeight) =>
+    lines(s, widthFn(k, size, letterSpacing, transform), maxW) * size * lh;
+
+  // ── cabecera ──
+  const counterW = widthFn(T.label, L, r2(T.label.letterSpacingEm * L), 'none')(`${slide.index} / ${slide.total}`);
+  const top = Math.max(2, r2(L * 0.21)) + r2(L * 0.95) +
+    Math.max(L * T.label.lineHeight, slide.eyebrow ? textH(T.label, L, slide.eyebrow, inner - counterW) : 0);
+
+  // ── centro ──
+  let mid = 0;
+  let any = false;
+  if (chrome.headline.length) {
+    const hs = px(T.headline.sizePct);
+    const wOf = widthFn(T.headline, hs, r2(T.headline.letterSpacingEm * hs), T.headline.transform);
+    let n = 1;
+    let cur = 0;
+    for (const atom of headlineAtoms(chrome.headline)) {
+      const aw = Math.ceil(atom.reduce((s, p) => s + wOf(p.text), 0));
+      if (cur > 0 && cur + aw > inner + 0.01) { n++; cur = aw; } else cur += aw;
+    }
+    mid += n * hs * T.headline.lineHeight;
+    any = true;
+  }
+  if (slide.figure) {
+    const fs = px(T.figure.sizePct);
+    mid += (any ? r2(B * 0.8) : 0) + textH(T.figure, fs, slide.figure.value, inner);
+    any = true;
+    if (slide.figure.bar) mid += r2(L * 1.26) + Math.max(2, r2(L * 0.53));
+    if (chrome.subheadline) mid += r2(B * 0.69) + textH(T.body, B, chrome.subheadline, inner);
+    const dot = r2(L * 0.63);
+    const ls = r2(L * 1.1);
+    mid += r2(B * 0.69) + Math.max(dot,
+      textH(T.label, ls, slide.figure.source, inner - dot - r2(L * 0.74), r2(T.label.letterSpacingEm * 0.4 * ls), 'none'));
+  } else if (chrome.subheadline) {
+    mid += (any ? r2(B * 0.69) : 0) + textH(T.body, B, chrome.subheadline, inner);
+    any = true;
+  }
+  if (slide.steps.length) {
+    const ss = r2(B * 0.86);
+    const mark = r2(B * 0.55);
+    mid += any ? r2(B * 0.83) : 0;
+    slide.steps.forEach((s, k) => {
+      mid += (k > 0 ? r2(B * 0.48) : 0) + Math.max(mark, textH(T.body, ss, s.text, inner - mark - r2(B * 0.62), undefined, undefined, 1.35));
+    });
+    any = true;
+  }
+  if (slide.cta && slide.role === 'closing') {
+    const cs = r2(L * 1.16);
+    const arrowW = r2(cs * 0.62) + r2(cs * 0.45);
+    mid += (any ? r2(B * 0.97) : 0) +
+      Math.max(r2(cs * 0.84), textH(T.label, cs, slide.cta, inner - arrowW, r2(T.label.letterSpacingEm * 0.75 * cs))) +
+      r2(cs * 0.45) + Math.max(1, r2(cs * 0.09));
+  }
+
+  // ── pie ──
+  let logoH = 0;
+  if (chrome.logo?.kind === 'image') logoH = px(chrome.logo.heightPct);
+  else if (chrome.logo?.kind === 'wordmark') {
+    const S = px(chrome.logo.sizePct);
+    logoH = Math.max(0, ...chrome.logo.parts.map((p) => r2(S * p.scale)));
+  }
+  const swipeH = slide.role === 'cover' ? Math.max(L * T.label.lineHeight, r2(L * 0.62)) : 0;
+  const foot = Math.max(logoH, swipeH);
+
+  const available = H - 2 * M - top - foot;
+  const gap = r2(L * FIT_MIN_GAP_LABELS);
+  const r = (n: number) => Math.round(n * 100) / 100;
+  return { top: r(top), mid: r(mid), foot: r(foot), available: r(available), gap, slack: r(available - mid - 2 * gap), estimated };
+}
+
+/**
+ * El ajuste vertical: devuelve el cromo con el que la lámina CABE entre la cabecera y el pie, y los
+ * avisos de lo que hubo que reducir. PURO y determinista. Si la lámina ya cabe devuelve EL MISMO
+ * objeto `chrome`, sin tocar: la escena sale idéntica. Sin `metrics` (o con una fuente sin métricas)
+ * estima con un ancho medio genérico y lo avisa.
+ */
+export function fitCarouselContent(args: { chrome: CarouselChrome; metrics?: FitMetrics | null }): {
+  chrome: CarouselChrome; warnings: string[];
+  report: { adjusted: boolean; slack_px: number; figure_scale: number; headline_size_pct: number | null;
+    body_scale: number; steps_dropped: number; overflow: boolean; estimated_fonts: string[] };
+} {
+  const base = args.chrome;
+  const first = measureCarouselLayout(base, args.metrics);
+  const headlineFrom = base.headline.length ? base.type.headline.sizePct : null;
+  const untouched = {
+    chrome: base, warnings: [] as string[],
+    report: { adjusted: false, slack_px: first.slack, figure_scale: 1, headline_size_pct: headlineFrom, body_scale: 1, steps_dropped: 0, overflow: false, estimated_fonts: first.estimated },
+  };
+  if (first.estimated.length) {
+    untouched.warnings.push(`CAROUSEL_FIT_ESTIMATED: sin métricas de ${first.estimated.join(', ')}; el ajuste usó un ancho medio genérico`);
+  }
+  if (first.slack >= 0) return untouched;
+
+  // Escalera de estados, en el orden fijado: cifra → titular → cuerpo y pasos → pasos omitidos.
+  type State = { figure: number; headline: number; body: number; drop: number };
+  const ladder: State[] = [];
+  let st: State = { figure: 1, headline: base.type.headline.sizePct, body: 1, drop: 0 };
+  if (base.slide.figure) for (const f of FIT_FIGURE_SCALES.slice(1)) ladder.push(st = { ...st, figure: f });
+  if (base.headline.length) for (const h of base.fitLadder.headline) ladder.push(st = { ...st, headline: h });
+  if (base.subheadline || base.slide.steps.length) for (const b of FIT_BODY_SCALES) ladder.push(st = { ...st, body: b });
+  const droppable = base.slide.steps.filter((s) => !s.critical).length;
+  for (let d = 1; d <= droppable; d++) ladder.push(st = { ...st, drop: d });
+
+  const apply = (s: State): CarouselChrome => {
+    // Se omiten los pasos NO críticos empezando por el último; el orden de los que quedan no cambia.
+    let toDrop = s.drop;
+    const keep = [...base.slide.steps].reverse().filter((p) => {
+      if (toDrop > 0 && !p.critical) { toDrop--; return false; }
+      return true;
+    }).reverse();
+    return {
+      ...base,
+      slide: { ...base.slide, steps: keep },
+      type: {
+        ...base.type,
+        figure: { ...base.type.figure, sizePct: Math.round(base.type.figure.sizePct * s.figure * 1000) / 1000 },
+        headline: { ...base.type.headline, sizePct: s.headline },
+        body: { ...base.type.body, sizePct: Math.round(base.type.body.sizePct * s.body * 1000) / 1000 },
+      },
+      fitGuard: true,
+    };
+  };
+
+  let chosen: State | null = null;
+  let fitted: CarouselChrome = base;
+  let m = first;
+  for (const s of ladder) {
+    fitted = apply(s);
+    m = measureCarouselLayout(fitted, args.metrics);
+    if (m.slack >= 0) { chosen = s; break; }
+  }
+  const final = chosen ?? ladder[ladder.length - 1] ?? { figure: 1, headline: base.type.headline.sizePct, body: 1, drop: 0 };
+  if (!chosen) { fitted = apply(final); m = measureCarouselLayout(fitted, args.metrics); }
+
+  const warnings: string[] = [];
+  const what: string[] = [];
+  if (final.figure !== 1) what.push(`cifra ×${final.figure}`);
+  if (headlineFrom != null && final.headline !== headlineFrom) what.push(`titular ${headlineFrom}→${final.headline} %`);
+  if (final.body !== 1) what.push(`cuerpo y pasos ×${final.body}`);
+  if (what.length) {
+    warnings.push(`CAROUSEL_CONTENT_FIT_REDUCED: el bloque central no cabía entre la cabecera y el pie (faltaban ${Math.ceil(-first.slack)} px); ${what.join(' · ')}`);
+  }
+  if (final.drop > 0) {
+    warnings.push(`CAROUSEL_STEPS_TRUNCATED: se omitieron ${final.drop} de ${base.slide.steps.length} pasos desde el final para que la lámina quepa; el paso crítico se conserva`);
+  }
+  if (!chosen) {
+    warnings.push(`CAROUSEL_CONTENT_OVERFLOW: ni con el mínimo legible cabe (faltan ${Math.ceil(-m.slack)} px); el pie queda en su sitio y el bloque central se recorta`);
+  }
+  return {
+    chrome: fitted, warnings: [...warnings, ...untouched.warnings],
+    report: { adjusted: true, slack_px: m.slack, figure_scale: final.figure, headline_size_pct: headlineFrom == null ? null : final.headline,
+      body_scale: final.body, steps_dropped: final.drop, overflow: !chosen, estimated_fonts: first.estimated },
+  };
 }
 // ── COMPOSITOR:END ──
 
@@ -1654,7 +2012,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         slot: `carousel:${f.role}`,
         ...(await loadFont(`carousel:${f.role}`, { role: f.role, family: f.family, cssImport: f.cssImport, fontUrl: null, weight: f.weight, italic: f.italic })),
       })));
-      const scene = buildCarouselScene({ chrome, style, backgroundSrc });
+      // 1.3.3 — el ajuste vertical se mide con las MISMAS fuentes que recibe satori (ya sin kerning).
+      const metrics: Record<string, FontAdvance | null> = {};
+      chrome.fonts.forEach((f, k) => { metrics[fitFontKey(f)] = fontAdvanceMetrics(fonts[k].data); });
+      const fit = fitCarouselContent({ chrome, metrics });
+      warnings.push(...fit.warnings);
+      const scene = buildCarouselScene({ chrome: fit.chrome, style, backgroundSrc });
       const { width, height } = chrome.canvas;
       const svg = await satori(scene as any, {
         width, height,
@@ -1665,7 +2028,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         `[Compositor][F3] brand=${brandId} canal=${canal ?? '∅'} piece=${body.piece_id ?? '∅'} ` +
         `lámina=${chrome.slide.index}/${chrome.slide.total} ${chrome.slide.role} fondo=${chrome.slide.background} ` +
         `tokens=${picked.source} ${width}x${height} logotipo=${chrome.logo ? chrome.logo.kind : 'ninguno'} ` +
-        `avisos=${warnings.length} ${Date.now() - t0}ms`,
+        `ajuste=${fit.report.adjusted ? `sí (holgura ${fit.report.slack_px}px)` : 'no'} avisos=${warnings.length} ${Date.now() - t0}ms`,
       );
       res.status(200).json({
         status: 'ok',
@@ -1691,6 +2054,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           carousel: {
             index: chrome.slide.index, total: chrome.slide.total, role: chrome.slide.role, background: chrome.slide.background,
             keyword_found: !!chrome.headline.find((p) => p.keyword), logo: chrome.logo ? chrome.logo.kind : null,
+            // 1.3.3 — qué hizo el ajuste vertical: sin esto no se puede auditar una lámina reducida.
+            fit: fit.report,
           },
         },
         duration_ms: Date.now() - t0,
