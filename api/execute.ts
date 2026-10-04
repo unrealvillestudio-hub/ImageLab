@@ -823,6 +823,9 @@ export interface PromptPersona {
   expression_avoid?: string[];
   // Vestuario de ESTA persona (dato del carril, `person_blueprints.raw_config.wardrobe_catalog`).
   wardrobe?: Array<{ when: string; outfit: string }>;
+  // 2026-10-04 — POR QUÉ la manda el carril. Sólo `PERSONA_ENTRY_AUTHOR_VOICE` cambia algo (la exime
+  // del filtro de mención); cualquier otro valor, o ninguno, es la regla de mención de siempre.
+  entry?: string | null;
 }
 
 /** Una locación real de la marca (`public.location_blueprints`, enlazada por `public.brand_locations`).
@@ -1071,6 +1074,37 @@ export function resolvePersonas(params: { persona?: unknown; personas?: unknown 
 /** Las personas que la pieza o una directriz NOMBRAN, en el orden de la petición (A, B, C…). */
 export function mentionedPersonas(personas: PromptPersona[], texts: Array<string | null | undefined>): PromptPersona[] {
   return (personas ?? []).filter((p) => personaMentioned(p, texts));
+}
+
+// ── LA VOZ AUTORA ENTRA SIN SER NOMBRADA (2026-10-04) ───────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA: el carril (`content-run-stage`, `unrlvl-iid-functions#337`) manda a la autora
+// de la marca con `entry: "author_voice"` cuando la pieza argumenta en primera persona, aunque no la
+// nombre. Este lab volvía a filtrar por mención (`mentionedPersonas`) y la descartaba al nacer la pieza,
+// cuando el copy todavía no lleva la firma. La decisión de quién es autora y cuándo entra es del carril;
+// el lab sólo respeta la entrada declarada.
+//
+// EJE, NO INSTANCIA: `author_voice` describe la FUNCIÓN de la persona en la pieza (habla en nombre
+// propio), no a nadie. Quién es autora es dato (`brand_persons.role`), resuelto por el carril.
+
+/** Valor de `PromptPersona.entry` que exime del filtro de mención: la pieza va en la voz de esa persona.
+ *  Comparación exacta; cualquier otro valor, o ninguno, se comporta como siempre. */
+export const PERSONA_ENTRY_AUTHOR_VOICE = 'author_voice';
+
+/** ¿La persona llega como voz autora de la pieza? Exige además un nombre: sin nombre no hay a quién pintar. */
+export function isAuthorVoiceEntry(persona: PromptPersona | null | undefined): boolean {
+  return !!persona?.name?.trim() && persona.entry === PERSONA_ENTRY_AUTHOR_VOICE;
+}
+
+/** ¿Entra la persona en la escena? La voz autora entra siempre; las demás, sólo si se las nombra. */
+export function personaEntersScene(persona: PromptPersona | null | undefined, texts: Array<string | null | undefined>): boolean {
+  return isAuthorVoiceEntry(persona) || personaMentioned(persona, texts);
+}
+
+/** Las personas que entran en la escena, en el orden de la petición (A, B, C…). Sin `entry` de voz
+ *  autora, es exactamente `mentionedPersonas`. */
+export function scenePersonas(personas: PromptPersona[], texts: Array<string | null | undefined>): PromptPersona[] {
+  return (personas ?? []).filter((p) => personaEntersScene(p, texts));
 }
 
 /** La mirada efectiva. Sin dato: con dos o más personas, se miran entre ellas; con una, `null`, que
@@ -1338,7 +1372,7 @@ export function personaMentioned(persona: PromptPersona | null | undefined, text
 /** El mensaje de usuario para el modelo de texto. Rotulado, para que el modelo sepa qué es cada cosa. */
 export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   const directives = normalizeDirectives(input.directives ?? []);
-  const withPersona = personaMentioned(input.persona, [input.copyFull, input.title, input.imageHook, ...directives]);
+  const withPersona = personaEntersScene(input.persona, [input.copyFull, input.title, input.imageHook, ...directives]);
   const parts: string[] = [];
   parts.push(`MODE: ${input.mode ?? 'regenerate_full'}`);
   parts.push(`BASE PROMPT (engine-composed; keep every constraint in it):\n${input.basePrompt}`);
@@ -1349,7 +1383,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   if (directives.length) {
     parts.push(`HUMAN DIRECTIVES (chronological; later ones refine earlier ones; if two conflict, the later wins):\n${directives.map((d, k) => `${k + 1}. ${d}`).join('\n')}`);
   }
-  const many = mentionedPersonas(input.personas ?? [], [input.copyFull, input.title, input.imageHook, ...directives]);
+  const many = scenePersonas(input.personas ?? [], [input.copyFull, input.title, input.imageHook, ...directives]);
   if (many.length >= 2) {
     parts.push(
       `PEOPLE — exactly ${many.length} recurring people of this brand appear in this scene, each one exactly once and each a ` +
@@ -1367,9 +1401,13 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
     });
   } else if (withPersona && input.persona) {
     const refs = (input.persona.reference_image_urls ?? []).length;
+    // La voz autora no tiene por qué estar nombrada: el «whenever … names them» de siempre la dejaría fuera.
+    const when = isAuthorVoiceEntry(input.persona)
+      ? 'The piece is written in their own voice: they appear in the scene, and'
+      : 'Whenever the piece or a directive names them,';
     parts.push(
-      `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. Whenever the piece or a directive ` +
-      `names them, they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
+      `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. ${when} ` +
+      `they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
     parts.push(`PERSONA EXPRESSION:\n${personaExpressionBlock(input.persona)}`);
     parts.push(`PERSONA WARDROBE:\n${personaWardrobeBlock(input.persona, input.mode)}`);
@@ -2071,7 +2109,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // lista mal formada o por encima del techo es un error declarado: nunca un recorte silencioso.
     const resolved = resolvePersonas(params);
     if (resolved.error) { res.status(400).json(failurePayload(new Error(resolved.error), null)); return; }
-    const usedPersonas = mentionedPersonas(resolved.personas, [params.copy_full, params.title, params.image_hook, ...directives]);
+    // 2026-10-04 — `scenePersonas`: las nombradas y la voz autora (`entry: "author_voice"`); sin esa
+    // entrada, exactamente el filtro de mención de siempre.
+    const usedPersonas = scenePersonas(resolved.personas, [params.copy_full, params.title, params.image_hook, ...directives]);
     const persona: PromptPersona | null = usedPersonas[0] ?? resolved.personas[0] ?? null;
     const gazeR = resolveGaze(params.gaze, usedPersonas.length);
     if (gazeR.error) { res.status(400).json(failurePayload(new Error(gazeR.error), null)); return; }
