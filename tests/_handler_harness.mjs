@@ -38,7 +38,8 @@ export async function loadHandler(sourceText) {
 
 /**
  * Ejecuta una petición contra el handler con un `fetch` de fixture.
- * `db` mapea un prefijo de tabla de PostgREST a las filas que devuelve (por defecto, ninguna).
+ * `db` mapea un prefijo de tabla de PostgREST a las filas que devuelve (por defecto, ninguna), o a una
+ * función `(URLSearchParams) => filas` cuando la prueba necesita que los filtros cuenten.
  * Devuelve { status, json, vertexImage, vertexText }: los CUERPOS que se mandaron a Vertex.
  */
 export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE' } = {}) {
@@ -48,8 +49,11 @@ export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE' 
     const u = String(url);
     calls.fetched.push(u.startsWith('data:') ? u.slice(0, 40) : u);
     if (u.startsWith('https://db.example.invalid/rest/v1/')) {
-      const table = u.slice('https://db.example.invalid/rest/v1/'.length).split('?')[0];
-      const rows = db[table] ?? [];
+      const [table, query = ''] = u.slice('https://db.example.invalid/rest/v1/'.length).split('?');
+      // Una tabla puede ser una lista (se devuelve entera, sin mirar filtros: lo de siempre) o una
+      // función que recibe los parámetros de la consulta y filtra como PostgREST (2026-10-03, filas
+      // por canal: con una lista, la fila de marca y la de canal serían indistinguibles).
+      const rows = typeof db[table] === 'function' ? db[table](new URLSearchParams(query)) : (db[table] ?? []);
       return new Response(JSON.stringify(rows), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('aiplatform.googleapis.com') && u.includes('gemini-2.5-flash-image:generateContent')) {
