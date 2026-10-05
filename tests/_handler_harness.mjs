@@ -40,9 +40,11 @@ export async function loadHandler(sourceText) {
  * Ejecuta una petición contra el handler con un `fetch` de fixture.
  * `db` mapea un prefijo de tabla de PostgREST a las filas que devuelve (por defecto, ninguna), o a una
  * función `(URLSearchParams) => filas` cuando la prueba necesita que los filtros cuenten.
+ * `image` (2026-10-05, prompt del fallo) sustituye la respuesta del modelo de imagen: `{ status, body }`
+ * (el cuerpo se serializa a JSON). Sin `image`, la respuesta con imagen de siempre.
  * Devuelve { status, json, vertexImage, vertexText }: los CUERPOS que se mandaron a Vertex.
  */
-export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE' } = {}) {
+export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE', image = null } = {}) {
   const calls = { vertexImage: null, vertexText: null, fetched: [] };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -58,6 +60,7 @@ export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE' 
     }
     if (u.includes('aiplatform.googleapis.com') && u.includes('gemini-2.5-flash-image:generateContent')) {
       calls.vertexImage = JSON.parse(init.body);
+      if (image) return new Response(JSON.stringify(image.body), { status: image.status ?? 200 });
       return new Response(JSON.stringify({
         candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'AAAA' } }] } }],
         usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1290 },

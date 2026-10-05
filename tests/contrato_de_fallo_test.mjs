@@ -132,7 +132,10 @@ ok('TODO fallo del handler sale por failurePayload: ni un `{ error: … }` suelt
   // se cuentan para que un tercero no entre sin que alguien lo decida.
   assert.equal(sueltos.length, 2, `fallos sin contrato: ${sueltos.length}`);
   assert.ok((handler.match(/failurePayload\(/g) ?? []).length >= 5, 'faltan llamadas a failurePayload');
-  assert.match(handler, /res\.status\(500\)\.json\(failurePayload\(err, builder\)\)/, 'el catch final no pasa el constructor');
+  // 2026-10-05 — se mira el catch FINAL, no la forma exacta de la línea: el prompt del fallo añadió un
+  // tercer argumento y un envoltorio de log, y lo que esta comprobación guarda es que el constructor viaja.
+  const catchFinal = handler.slice(handler.lastIndexOf('} catch (err) {'));
+  assert.match(catchFinal, /res\.status\(500\)\.json\([^;]*failurePayload\(err, builder\b/, 'el catch final no pasa el constructor');
 });
 
 ok('el constructor se declara antes del try y se nombra ANTES de llamarlo', () => {
