@@ -120,18 +120,52 @@ const UPSTREAM_TIMEOUT_MS = 55_000;
 //
 // Ninguna regla de facturación vive acá: este archivo informa lo que pasó; el asiento lo decide el
 // carril con la tarifa, que es dato.
+//
+// ── EL PROMPT DEL FALLO (2026-10-05) ──────────────────────────────────────────────────────────────
+// EL DEFECTO, medido por main en la ronda de imágenes del 2026-10-05: ante un bloqueo, este endpoint
+// devolvía sólo `"Gemini image: no inlineData returned (blockReason=SAFETY)"`, sin el prompt, y el log
+// de Vercel guardaba sólo su longitud (`prompt=2561 chars`). Sin el texto no se puede saber qué
+// palabra dispara el bloqueo. Ahora el cuerpo del fallo lleva, cuando existen:
+//   · `prompt_full`: el mismo campo que la respuesta de éxito (el prompt final, antes de las fotos
+//     rotuladas y del negativo), y `negative_prompt`: el negativo que viaja como «Avoid: …».
+//   · `prompt_sent`: el texto EXACTO que se mandó al modelo de imagen (rótulos + prompt + «Avoid: …»).
+//     Lo pone la propia llamada que lo mandó, así que es lo que el filtro del proveedor leyó.
+//   · `block_reason` / `finish_reason`: los motivos del proveedor como dato, no sólo dentro del texto.
+//   · `preset_id` / `psycho_id`: la capa de preset y el estímulo que entraron en ese prompt.
+// Y el log de Vercel deja UNA línea con el texto, sólo al fallar y recortado a un tope declarado.
 type PaidStep = 'prompt_builder' | 'image';
 class ProviderCallError extends Error {
   readonly step: PaidStep;
   readonly httpStatus: number | null;
   readonly usage: Record<string, number> | null;
-  constructor(message: string, step: PaidStep, httpStatus: number | null, usage: Record<string, number> | null) {
+  readonly blockReason: string | null;
+  readonly finishReason: string | null;
+  /** El texto exacto que viajó al modelo de imagen. Lo asigna la llamada que lo mandó. */
+  promptSent: string | null = null;
+  constructor(
+    message: string, step: PaidStep, httpStatus: number | null, usage: Record<string, number> | null,
+    reasons: { blockReason?: string | null; finishReason?: string | null } = {},
+  ) {
     super(message);
     this.name = 'ProviderCallError';
     this.step = step;
     this.httpStatus = httpStatus;
     this.usage = usage;
+    this.blockReason = reasons.blockReason ?? null;
+    this.finishReason = reasons.finishReason ?? null;
   }
+}
+
+/** Lo que el handler sabe del prompt cuando algo falla. Se llena a medida que el prompt se construye:
+ *  un campo en `null` dice «todavía no existía», no «vacío». */
+interface FailurePromptContext {
+  promptFull: string | null;
+  negativePrompt: string | null;
+  presetId: string | null;
+  psychoId: string | null;
+}
+function emptyFailurePromptContext(): FailurePromptContext {
+  return { promptFull: null, negativePrompt: null, presetId: null, psychoId: null };
 }
 
 /** Lo que una llamada paga deja dicho cuando revienta dentro de su `try`: un ProviderCallError ya
@@ -148,6 +182,7 @@ function asProviderCallError(err: unknown, step: PaidStep, timeoutMessage: strin
 function failurePayload(
   err: unknown,
   builder: { version: string; model: string; usage: Record<string, number> | null } | null,
+  prompt: FailurePromptContext | null = null,
 ): Record<string, unknown> {
   const msg = err instanceof Error ? err.message : String(err);
   const fallo = err instanceof ProviderCallError ? err : null;
@@ -167,7 +202,41 @@ function failurePayload(
     prompt_builder_called: !!builder,
     prompt_builder_failed: !!delConstructor,
     prompt_builder_http_status: delConstructor ? delConstructor.httpStatus : null,
+    // El prompt del fallo (2026-10-05). `null` cuando el fallo ocurrió antes de que existiera.
+    prompt_full: prompt?.promptFull ?? null,
+    negative_prompt: (prompt?.negativePrompt ?? '').trim() || null,
+    prompt_sent: imagen?.promptSent ?? null,
+    block_reason: imagen?.blockReason ?? null,
+    finish_reason: imagen?.finishReason ?? null,
+    preset_id: prompt?.presetId ?? null,
+    psycho_id: prompt?.psychoId ?? null,
   };
+}
+
+// El log de Vercel recorta cada línea larga; además, el texto completo ya viaja en el cuerpo del fallo
+// y el carril lo recibe entero. Por eso el log lleva un tope DECLARADO y dice cuándo lo aplicó: es la
+// segunda vía para ver el prompt, no la única. Los prompts medidos rondan 2.600 caracteres, así que
+// 4.000 los deja enteros con margen.
+const FAILURE_PROMPT_LOG_MAX_CHARS = 4000;
+
+/** La línea de log de un fallo con prompt, o `null` si el fallo ocurrió antes de que existiera.
+ *  Sólo la llama el camino de fallo: en un éxito no se escribe el prompt en el log. */
+function failurePromptLogLine(p: Record<string, unknown>): string | null {
+  const fuente = typeof p.prompt_sent === 'string' ? 'prompt_sent' : typeof p.prompt_full === 'string' ? 'prompt_full' : null;
+  if (!fuente) return null;
+  const texto = p[fuente] as string;
+  const recortado = texto.length > FAILURE_PROMPT_LOG_MAX_CHARS;
+  return `[ImageLab][PROMPT-DEL-FALLO] block_reason=${p.block_reason ?? '-'} finish_reason=${p.finish_reason ?? '-'} ` +
+    `http=${p.provider_http_status ?? '-'} preset=${p.preset_id ?? 'none'} psycho=${p.psycho_id ?? 'ninguno'} ` +
+    `fuente=${fuente} chars=${texto.length} recorte=${recortado ? FAILURE_PROMPT_LOG_MAX_CHARS : 'no'} ` +
+    `texto=${JSON.stringify(recortado ? texto.slice(0, FAILURE_PROMPT_LOG_MAX_CHARS) : texto)}`;
+}
+
+/** Escribe la línea del prompt del fallo (si la hay) y devuelve el cuerpo sin tocarlo. */
+function logFailurePrompt(p: Record<string, unknown>): Record<string, unknown> {
+  const linea = failurePromptLogLine(p);
+  if (linea) console.error(linea);
+  return p;
 }
 // ── FALLO:END ──
 
@@ -396,6 +465,7 @@ interface ImageGenInput {
   canal: string;
   presetUsed: boolean;
   presetId: string | null;
+  psychoId?: string | null;   // el estímulo que entró en el prompt (sólo para el cuerpo del fallo)
 }
 
 const FALLBACK_NEGATIVE = 'blurry, low quality, amateur, stock photo look, watermark, text overlay, logo';
@@ -1701,6 +1771,7 @@ async function buildVisualPrompt(req: ExecuteRequest): Promise<ImageGenInput> {
     canal,
     presetUsed: spec.preset_source !== 'none',
     presetId: spec.preset_id,
+    psychoId: spec.psycho_id,
   };
 }
 
@@ -1766,7 +1837,14 @@ function imageFromResponse(data: any, httpStatus: number): ImageWithUsage {
   try {
     return { image_data_url: extractInlineImage(data), usage };
   } catch (err) {
-    throw new ProviderCallError(err instanceof Error ? err.message : String(err), 'image', httpStatus, usage);
+    // 2026-10-05 — los motivos del proveedor viajan también como dato, crudos: el texto del error los
+    // nombra, pero leerlos de un texto es un regex que se rompe cuando el texto cambia.
+    const block = data?.promptFeedback?.blockReason;
+    const finish = data?.candidates?.[0]?.finishReason;
+    throw new ProviderCallError(err instanceof Error ? err.message : String(err), 'image', httpStatus, usage, {
+      blockReason: typeof block === 'string' ? block : null,
+      finishReason: typeof finish === 'string' ? finish : null,
+    });
   }
 }
 // ── RESPUESTA-IMAGEN:END ──
@@ -1783,6 +1861,7 @@ async function vertexPredictImagen(params: {
   if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
 
   const token = await getAccessToken();
+  const text = appendNegative(params.prompt, params.negativePrompt);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
@@ -1795,7 +1874,7 @@ async function vertexPredictImagen(params: {
       body: JSON.stringify({
         contents: [{
           role: 'user',
-          parts: [{ text: appendNegative(params.prompt, params.negativePrompt) }],
+          parts: [{ text }],
         }],
         generationConfig: {
           responseModalities: ['IMAGE'],
@@ -1812,7 +1891,9 @@ async function vertexPredictImagen(params: {
     const data = await res.json();
     return imageFromResponse(data, res.status);
   } catch (err) {
-    throw asProviderCallError(err, 'image', `Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    const fallo = asProviderCallError(err, 'image', `Gemini image timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    fallo.promptSent = text;
+    throw fallo;
   } finally {
     clearTimeout(timeout);
   }
@@ -1886,7 +1967,8 @@ async function vertexPredictImagenCapability(params: {
   const parts: any[] = params.images.map(img => ({
     inlineData: { mimeType: img.mimeType, data: img.data },
   }));
-  parts.push({ text: appendNegative(params.prompt, params.negativePrompt) });
+  const text = appendNegative(params.prompt, params.negativePrompt);
+  parts.push({ text });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
@@ -1914,7 +1996,9 @@ async function vertexPredictImagenCapability(params: {
     const data = await res.json();
     return imageFromResponse(data, res.status);
   } catch (err) {
-    throw asProviderCallError(err, 'image', `Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    const fallo = asProviderCallError(err, 'image', `Gemini image (multimodal) timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s.`);
+    fallo.promptSent = text;
+    throw fallo;
   } finally {
     clearTimeout(timeout);
   }
@@ -1955,7 +2039,10 @@ interface DirectImageResult {
   usage: Record<string, number> | null;   // M-3 — usageMetadata crudo de Vertex (o null)
 }
 
-async function generateImageDirect(req: DirectImageRequest): Promise<DirectImageResult> {
+async function generateImageDirect(
+  req: DirectImageRequest,
+  fallo: FailurePromptContext = emptyFailurePromptContext(),   // 2026-10-05 — lo lee el cuerpo del fallo
+): Promise<DirectImageResult> {
   const hasSource = !!req.sourceAssetDataUrl;
   const hasRefs   = Array.isArray(req.referenceImages) && req.referenceImages.length > 0;
 
@@ -1981,12 +2068,16 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
     }
   }
 
+  fallo.presetId = presetId;
+  fallo.negativePrompt = negativePrompt;
+
   // 2026-10-03 — espacios de la UI: imágenes en orden sujetos → fondo → producto → estilo, cada una
   // rotulada por posición y rol. Mismo techo de personas que el carril.
   if (req.slots) {
     const plan = directSlotsPlan(req.slots);
     if (plan.error) throw new Error(plan.error);
     const finalPrompt = plan.images.length ? `${plan.clause} ${basePrompt}` : basePrompt;
+    fallo.promptFull = finalPrompt;
     const { image_data_url, usage } = plan.images.length
       ? await vertexPredictImagenCapability({ prompt: finalPrompt, negativePrompt, aspectRatio, images: plan.images })
       : await vertexPredictImagen({ prompt: finalPrompt, negativePrompt, aspectRatio });
@@ -1995,6 +2086,7 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
 
   // No images → text-to-image fast path.
   if (!hasSource && !hasRefs) {
+    fallo.promptFull = basePrompt;
     const { image_data_url, usage } = await vertexPredictImagen({
       prompt: basePrompt,
       negativePrompt,
@@ -2045,6 +2137,7 @@ async function generateImageDirect(req: DirectImageRequest): Promise<DirectImage
   const finalPrompt = roleClauses.length > 0
     ? `${roleClauses.join(' ')} ${basePrompt}`
     : basePrompt;
+  fallo.promptFull = finalPrompt;
 
   const { image_data_url, usage } = await vertexPredictImagenCapability({
     prompt: finalPrompt,
@@ -2085,12 +2178,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   if (body?.mode === 'direct') {
+    const fallo = emptyFailurePromptContext();
     try {
       if (!body.prompt || typeof body.prompt !== 'string') {
         res.status(400).json(failurePayload(new Error('prompt is required for direct mode'), null));
         return;
       }
-      const result = await generateImageDirect(body as DirectImageRequest);
+      const result = await generateImageDirect(body as DirectImageRequest, fallo);
       res.status(200).json({
         image_data_url: result.image_data_url,
         preset_used:    result.preset_used,
@@ -2104,7 +2198,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       });
       return;
     } catch (err) {
-      res.status(500).json(failurePayload(err, null));
+      res.status(500).json(logFailurePrompt(failurePayload(err, null, fallo)));
       return;
     }
   }
@@ -2114,10 +2208,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   // El constructor, declarado FUERA del try: si la imagen falla después de que él corrió, su consumo
   // tiene que llegar al cuerpo del fallo. Dentro del try se perdía con la excepción.
   let builder: { version: string; model: string; usage: Record<string, number> | null } | null = null;
+  // 2026-10-05 — el prompt del fallo, también FUERA del try y por la misma razón: se llena a medida que
+  // el prompt se construye, y el catch lo lee.
+  const fallo = emptyFailurePromptContext();
   try {
     const request = body as ExecuteRequest;
     const params = request.params ?? {};
     const built = await buildVisualPrompt(request);
+    fallo.presetId = built.presetId;
+    fallo.psychoId = built.psychoId ?? null;
+    fallo.negativePrompt = built.negativePrompt;
 
     // ── BRIEF-IMG-01 fase 2 · el constructor ────────────────────────────────────────────────
     // Sin `copy_full` no se sintetiza y el prompt es el de siempre: el cambio es inerte hasta que el
@@ -2248,6 +2348,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
+    // El prompt ya es el final: si algo falla desde aquí, el cuerpo del fallo lo lleva.
+    fallo.promptFull = finalPrompt;
+
     // Las imágenes que acompañan al prompt: la actual (editar) y las de la persona, si se la nombra.
     const images: InlineImage[] = [];
     if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
@@ -2321,6 +2424,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       status:         'ok',
     });
   } catch (err) {
-    res.status(500).json(failurePayload(err, builder));
+    res.status(500).json(logFailurePrompt(failurePayload(err, builder, fallo)));
   }
 }
