@@ -1171,6 +1171,29 @@ export function personaEntersScene(persona: PromptPersona | null | undefined, te
   return isAuthorVoiceEntry(persona) || personaMentioned(persona, texts);
 }
 
+// ── LA DIRECTRIZ DEL TEMA TAMBIÉN NOMBRA (2026-10-05, formato recurrente) ─────────────────────────────
+//
+// EL DEFECTO QUE CIERRA: el filtro de mención miraba el copy, el título, el gancho y las directrices de la
+// pieza, pero no la directriz del tema (`params.visual_directive`, `intel.brand_topics.visual_directive`).
+// Un tema cuya escena fija trae siempre a una persona (un set con su anfitriona) la declara en esa
+// directriz; el carril la elegía y este lab la descartaba si el texto de la pieza no la nombraba.
+//
+// LA REGLA: la directriz del tema es un texto más de la mención, el mismo que el carril mira
+// (`content-run-stage`, `sceneDirectiveTexts`). Se usa en los tres sitios donde se decide quién entra:
+// la escena (`execute`) y el constructor (una persona y varias). Sin directriz de tema, o con una que no
+// nombra a nadie, la lista de textos da el mismo resultado que antes.
+//
+// EJE, NO INSTANCIA: «qué textos nombran a una persona». Quién está nombrado es dato del tema.
+
+/** Los textos donde se busca la mención de una persona: los de la pieza, la directriz del tema y las
+ *  directrices de la pieza, en ese orden. Los vacíos los ignora `personaMentioned`. */
+export function sceneMentionTexts(
+  copyFull: string | null | undefined, title: string | null | undefined, imageHook: string | null | undefined,
+  domainDirective: string | null | undefined, directives: string[],
+): Array<string | null | undefined> {
+  return [copyFull, title, imageHook, domainDirective, ...directives];
+}
+
 /** Las personas que entran en la escena, en el orden de la petición (A, B, C…). Sin `entry` de voz
  *  autora, es exactamente `mentionedPersonas`. */
 export function scenePersonas(personas: PromptPersona[], texts: Array<string | null | undefined>): PromptPersona[] {
@@ -1442,7 +1465,7 @@ export function personaMentioned(persona: PromptPersona | null | undefined, text
 /** El mensaje de usuario para el modelo de texto. Rotulado, para que el modelo sepa qué es cada cosa. */
 export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   const directives = normalizeDirectives(input.directives ?? []);
-  const withPersona = personaEntersScene(input.persona, [input.copyFull, input.title, input.imageHook, ...directives]);
+  const withPersona = personaEntersScene(input.persona, sceneMentionTexts(input.copyFull, input.title, input.imageHook, input.domainDirective, directives));
   const parts: string[] = [];
   parts.push(`MODE: ${input.mode ?? 'regenerate_full'}`);
   parts.push(`BASE PROMPT (engine-composed; keep every constraint in it):\n${input.basePrompt}`);
@@ -1453,7 +1476,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   if (directives.length) {
     parts.push(`HUMAN DIRECTIVES (chronological; later ones refine earlier ones; if two conflict, the later wins):\n${directives.map((d, k) => `${k + 1}. ${d}`).join('\n')}`);
   }
-  const many = scenePersonas(input.personas ?? [], [input.copyFull, input.title, input.imageHook, ...directives]);
+  const many = scenePersonas(input.personas ?? [], sceneMentionTexts(input.copyFull, input.title, input.imageHook, input.domainDirective, directives));
   if (many.length >= 2) {
     parts.push(
       `PEOPLE — exactly ${many.length} recurring people of this brand appear in this scene, each one exactly once and each a ` +
@@ -2211,7 +2234,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (resolved.error) { res.status(400).json(failurePayload(new Error(resolved.error), null)); return; }
     // 2026-10-04 — `scenePersonas`: las nombradas y la voz autora (`entry: "author_voice"`); sin esa
     // entrada, exactamente el filtro de mención de siempre.
-    const usedPersonas = scenePersonas(resolved.personas, [params.copy_full, params.title, params.image_hook, ...directives]);
+    // 2026-10-05 — la directriz del tema también nombra (`sceneMentionTexts`), como en el carril.
+    const usedPersonas = scenePersonas(resolved.personas, sceneMentionTexts(params.copy_full, params.title, params.image_hook, params.visual_directive, directives));
     const persona: PromptPersona | null = usedPersonas[0] ?? resolved.personas[0] ?? null;
     const gazeR = resolveGaze(params.gaze, usedPersonas.length);
     if (gazeR.error) { res.status(400).json(failurePayload(new Error(gazeR.error), null)); return; }
