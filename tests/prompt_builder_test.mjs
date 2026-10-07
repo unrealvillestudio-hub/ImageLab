@@ -240,7 +240,7 @@ ok('puesta en escena del producto: kits sobre superficie, envase que rota, mano 
   for (const seed of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
     assert.equal(M.productStagingFor('kit', 1, seed), 'on_surface', `kit, semilla ${seed}`);
     assert.equal(M.productStagingFor(null, 3, seed), 'on_surface', `varios artículos, semilla ${seed}`);
-    assert.notEqual(M.productStagingFor(null, 1, seed), 'held', `sin kind declarado nunca se arriesga la mano (semilla ${seed})`);
+    assert.equal(M.productStagingFor(null, 1, seed), 'on_surface', `sin kind declarado, sobre superficie: ni mano ni uso (semilla ${seed})`);
   }
   // Un envase declarado rota entre las tres, y la semilla es estable.
   const vistos = new Set(Array.from({ length: 40 }, (_, i) => M.productStagingFor('product', 1, `pieza-${i}`)));

@@ -1056,9 +1056,9 @@ function productSide(anchor: string): string {
 //   · Un envase suelto rota entre tres puestas en escena por semilla (estable para la misma pieza):
 //     en la mano junto a la cara, en uso (aplicándolo o trabajando con él), o sobre una superficie
 //     cerca de la persona mientras ella hace otra cosa.
-//   · Si el carril no dice qué es (`kind` ausente, un carril anterior a este cambio), no se arriesga
-//     la mano: un kit con foto de grupo es indistinguible de un envase, y la mano es justo el error.
-//     Sólo rotan «en uso» y «sobre superficie» hasta que el carril declare `kind`.
+//   · Si el carril no dice qué es (`kind` ausente, un carril anterior a este cambio), va sobre una
+//     superficie: un kit con foto de grupo es indistinguible de un envase, y tanto «en la mano» como
+//     «en uso» lo pondrían en sus manos. La rotación del envase empieza cuando el carril declara `kind`.
 //
 // MULTIMARCA: cero marcas, cero productos, cero lugares. Las superficies de ejemplo son genéricas y
 // el constructor elige entre las que existen en el lugar que recibe como dato.
@@ -1068,7 +1068,10 @@ export type ProductStaging = 'held' | 'in_use' | 'on_surface';
 /** Cómo se pone el producto en escena. PURO: misma semilla, misma puesta en escena. */
 export function productStagingFor(kind: ProductKind | null | undefined, items: number, seed: string): ProductStaging {
   if (kind === 'kit' || items > 1) return 'on_surface';
-  const options: ProductStaging[] = kind === 'product' ? ['held', 'in_use', 'on_surface'] : ['in_use', 'on_surface'];
+  // Sin `kind` sólo hay una opción segura: un kit con foto de grupo llega igual que un envase, y tanto
+  // «en la mano» como «en uso» lo pondrían en sus manos.
+  if (kind !== 'product') return 'on_surface';
+  const options: ProductStaging[] = ['held', 'in_use', 'on_surface'];
   let h = 0;
   for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return options[h % options.length];
