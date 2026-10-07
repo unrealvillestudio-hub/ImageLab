@@ -220,15 +220,40 @@ ok('vestuario: las fotos son identidad, no ropa; el catálogo de la persona mand
 
 ok('lugar del producto: sale de la franja de texto de la marca, y se repone con la identidad', () => {
   const abajo = { anchor: 'bottom_left', text_zone_pct: 40 };
-  assert.ok(M.productPlacementClause(abajo, true).includes('held in the person\'s hand') );
+  // 2026-10-07 — antes un envase con persona iba SIEMPRE en la mano y un kit podía ir en la mano.
+  // Ahora el kit nunca, y el envase rota por semilla entre mano, en uso y sobre superficie.
   assert.ok(M.productPlacementClause(abajo, false).includes('raised surface in the upper part'));
-  assert.ok(M.productPlacementClause(abajo, true, 3).includes('high shelf or raised counter at the person\'s shoulder height'), 'kit: estante alto');
-  assert.ok(M.productPlacementClause(abajo, true, 1).includes('held in the person\'s hand'), 'un envase: en la mano');
+  assert.ok(M.productPlacementClause(abajo, true, 3).includes('NEVER held'), 'kit de varios artículos: nunca en la mano');
+  assert.ok(!M.productPlacementClause(abajo, true, 3).includes('holds them up'), 'kit: la salida «she holds them up» ya no existe');
+  assert.ok(M.productPlacementClause(abajo, true, 1, { kind: 'kit', seed: 'x' }).includes('NEVER held'), 'kit con foto de grupo (1 artículo): nunca en la mano');
+  assert.ok(M.productPlacementClause(abajo, true, 1, { kind: 'product', seed: 'x' }).length > 0, 'un envase: alguna puesta en escena');
   assert.ok(M.productPlacementClause({ anchor: 'top_right', text_zone_pct: 30 }, true).includes('lower part of the frame'));
   assert.equal(M.productPlacementClause({ anchor: 'bottom_left' }, true), '', 'sin franja declarada, nada');
   const l = engine();
   assert.equal(l.indexOf('PLACEMENT'), l.indexOf(M.PERSONA_IDENTITY_ONLY_CLAUSE) + 1, 'el lugar del producto va pegado a la identidad');
   assert.ok(!engine({ personaCount: 0 }).includes(M.PERSONA_IDENTITY_ONLY_CLAUSE), 'sin persona, no hay identidad que reponer');
+});
+
+ok('puesta en escena del producto: kits sobre superficie, envase que rota, mano sólo si el carril dice envase (Sam, 2026-10-07)', () => {
+  const abajo = { anchor: 'bottom_left', text_zone_pct: 40 };
+  // Un kit nunca es «held», con cualquier semilla.
+  for (const seed of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+    assert.equal(M.productStagingFor('kit', 1, seed), 'on_surface', `kit, semilla ${seed}`);
+    assert.equal(M.productStagingFor(null, 3, seed), 'on_surface', `varios artículos, semilla ${seed}`);
+    assert.notEqual(M.productStagingFor(null, 1, seed), 'held', `sin kind declarado nunca se arriesga la mano (semilla ${seed})`);
+  }
+  // Un envase declarado rota entre las tres, y la semilla es estable.
+  const vistos = new Set(Array.from({ length: 40 }, (_, i) => M.productStagingFor('product', 1, `pieza-${i}`)));
+  assert.deepEqual([...vistos].sort(), ['held', 'in_use', 'on_surface'], 'las tres puestas en escena aparecen');
+  assert.equal(M.productStagingFor('product', 1, 'p-1'), M.productStagingFor('product', 1, 'p-1'), 'misma pieza, misma escena');
+  // Cada puesta en escena produce su cláusula, y la del kit nombra la superficie del lugar.
+  const kit = M.productPlacementClause(abajo, true, 1, { kind: 'kit', seed: 's' });
+  assert.ok(kit.includes('belongs to this place') && kit.includes('never in her hands'));
+  const textos = new Set(Array.from({ length: 40 }, (_, i) => M.productPlacementClause(abajo, true, 1, { kind: 'product', seed: `pieza-${i}` })));
+  assert.equal(textos.size, 3, 'tres cláusulas distintas para un envase');
+  assert.ok([...textos].every((t) => t.includes('right half of the frame')), 'el lado contrario al texto se conserva en las tres');
+  // Franja arriba: el kit tampoco va en la mano.
+  assert.ok(M.productPlacementClause({ anchor: 'top_left', text_zone_pct: 30 }, true, 1, { kind: 'kit' }).includes('never held'));
 });
 
 ok('producto: del lado contrario al texto, con ángulo estable por semilla; mirada con destino', () => {
