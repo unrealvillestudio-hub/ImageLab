@@ -270,6 +270,30 @@ ok('producto: del lado contrario al texto, con ángulo estable por semilla; mira
   assert.ok(!engine({ personaCount: 0 }).includes(M.PERSONA_GAZE_CLAUSE), 'sin persona, sin mirada');
 });
 
+// 6 bis · LA PUESTA EN ESCENA LLEGA A TODOS (2026-10-08, medido en 0a8168af): con la cláusula «NEVER held»
+// en el prompt, el kit salió en la mano junto a la cara, porque (1) la cláusula de la franja de texto decía
+// siempre «If a person holds a product, … next to the face» y (2) el constructor no sabía qué se decidió y
+// escribió «She is holding the product in her hand».
+ok('la puesta en escena decidida llega a la franja de texto y al constructor', () => {
+  const layout = { text_zone_pct: 40, anchor: 'bottom_left' };
+  const HOLD = 'If a person holds a product';
+  assert.ok(M.textZoneClause(layout).includes(HOLD), 'sin puesta en escena declarada: la frase de siempre');
+  assert.ok(M.textZoneClause(layout, { productStaging: 'held' }).includes(HOLD), 'en la mano: la frase sigue');
+  assert.ok(!M.textZoneClause(layout, { productStaging: 'on_surface' }).includes(HOLD), 'sobre superficie: sin la frase de la mano');
+  assert.ok(!M.textZoneClause(layout, { productStaging: 'in_use' }).includes(HOLD), 'en uso: sin la frase de la mano');
+  assert.equal(M.productStagingPhrase(undefined), ' (held in a hand or placed naturally on a surface)', 'sin dato, byte a byte la de siempre');
+  assert.ok(M.productStagingPhrase('on_surface').includes('nobody holds'), 'sobre superficie: nadie lo sostiene');
+  assert.ok(!/hand/.test(M.productStagingPhrase('on_surface')), 'sobre superficie: la palabra mano no aparece');
+  assert.ok(M.productStagingPhrase('held').includes('hand'));
+  assert.ok(M.productStagingPhrase('in_use').includes('in use'));
+  const product = { name: 'Kit', kind: 'kit', items: [{ name: 'A', image_url: 'https://x/a.png' }, { name: 'B', image_url: 'https://x/b.png' }] };
+  const base = { basePrompt: 'BASE', copyFull: 'copy', product };
+  const msgSurface = M.buildBuilderUserMessage({ ...base, productStaging: 'on_surface' });
+  assert.ok(msgSurface.includes('nobody holds'), 'el constructor recibe que nadie lo sostiene');
+  assert.ok(!msgSurface.includes('held in a hand or placed naturally'), 'y ya no le dan a elegir la mano');
+  assert.ok(M.buildBuilderUserMessage(base).includes('held in a hand or placed naturally'), 'sin dato, el mensaje de siempre');
+});
+
 // 7 · MULTIMARCA: el bloque no nombra marcas ni personas reales.
 ok('el bloque PB no contiene literales de marca', () => {
   const pb = block('PB');
