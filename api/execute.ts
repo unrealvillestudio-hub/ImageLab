@@ -999,7 +999,7 @@ export const LIGHTING_COHERENCE_CLAUSE =
  *  texto donde la marca lo declara (`imagelab_overlay_tokens.layout`); el generador no lo sabía y
  *  dejaba el envase o la cara justo ahí. La franja es DATO (`layout.text_zone_pct` + `layout.anchor`):
  *  sin ella no hay cláusula. Cláusula del EJE: no nombra marca ni canal. */
-export function textZoneClause(layout: any): string {
+export function textZoneClause(layout: any, opts: { productStaging?: ProductStaging | null } = {}): string {
   const pct = Number(layout?.text_zone_pct);
   const anchor = String(layout?.anchor ?? '');
   if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
@@ -1009,9 +1009,15 @@ export function textZoneClause(layout: any): string {
   // Medido el 2026-09-28: con sólo el porcentaje, el modelo siguió poniendo el envase a la altura de
   // la cintura, justo debajo del titular. Una instrucción de CUERPO (a qué altura se sostiene) se
   // cumple mejor que una geométrica, así que viajan las dos.
-  const pose = side === 'lower'
-    ? ' If a person holds a product, it is raised to shoulder or face height, next to the face, never at waist or chest level'
-    : ' If a person holds a product, it is held at chest height, below the face';
+  // 2026-10-08 (medido en 0a8168af): esta frase viajaba SIEMPRE, también cuando el producto iba sobre una
+  // superficie o en uso, y contradecía a `productPlacementClause`: el modelo ponía el kit en la mano junto
+  // a la cara. Con una puesta en escena declarada que no es «en la mano», la frase no va. Sin puesta en
+  // escena declarada (llamantes anteriores, o sin producto), la de siempre.
+  const sinMano = opts.productStaging === 'on_surface' || opts.productStaging === 'in_use';
+  const pose = sinMano ? ''
+    : side === 'lower'
+      ? ' If a person holds a product, it is raised to shoulder or face height, next to the face, never at waist or chest level'
+      : ' If a person holds a product, it is held at chest height, below the face';
   // 2026-09-30 (medido): «the lower area may show only background» se leía como «zona reservada»; en
   // 5–8 de ~150 imágenes el modelo dejó ahí una placa lisa del tamaño de la franja (473 de 1344 filas
   // uniformes en una 9:16). La franja es parte de la MISMA fotografía, sólo sin cara, manos ni producto.
@@ -1075,6 +1081,19 @@ export function productStagingFor(kind: ProductKind | null | undefined, items: n
   let h = 0;
   for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return options[h % options.length];
+}
+
+/** Lo que el constructor tiene que escribir sobre DÓNDE está el producto, según la puesta en escena que
+ *  el motor ya decidió. PURO. Sin puesta en escena declarada, la frase de siempre (byte a byte). */
+export function productStagingPhrase(staging: ProductStaging | null | undefined): string {
+  if (staging === 'on_surface') {
+    return ' (standing on a real surface of this place, near the person; nobody holds, carries or raises it, and the prompt must never say that anyone holds it)';
+  }
+  if (staging === 'in_use') {
+    return ' (in use: the person is working with it or applying it, as she really would in this place; never posed up beside the face)';
+  }
+  if (staging === 'held') return ' (held in the person\'s hand)';
+  return ' (held in a hand or placed naturally on a surface)';
 }
 
 const SURFACE_OF_THE_PLACE =
@@ -1490,6 +1509,10 @@ export interface PromptBuilderInput {
   // 2026-10-03 — varias personas. Si llegan dos o más NOMBRADAS, cada una entra rotulada (A, B…); con
   // una o ninguna, manda `persona` y el mensaje es el de siempre.
   personas?: PromptPersona[] | null;
+  // 2026-10-08 — la puesta en escena del producto que el motor YA decidió (`productStagingFor`). Sin ella,
+  // el constructor elegía entre «en la mano» y «sobre una superficie», y elegía la mano aunque la cláusula
+  // del motor dijera «NEVER held» (medido en 0a8168af).
+  productStaging?: ProductStaging | null;
 }
 
 /** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
@@ -1589,7 +1612,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   if (input.product?.items?.length) {
     parts.push(
       `PRODUCT — the real packaging of ${input.product.items.map((i) => `"${i.name}"`).join(', ')} appears in the scene` +
-      ' (held in a hand or placed naturally on a surface), reproduced faithfully from the attached product photo(s): same shape, colours and label layout.' +
+      productStagingPhrase(input.productStaging) + ', reproduced faithfully from the attached product photo(s): same shape, colours and label layout.' +
       ` Real physical size — ${input.product.items.map(productSizeLine).join('; ')}. Do not add any other product or packaging.`,
     );
   } else if (input.productComposited) parts.push(`PRODUCT:\n${PRODUCT_COMPOSITED_CLAUSE}.`);
@@ -2339,6 +2362,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const productComposited = params.product_composited === true || productMode === 'composite';
     const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = usedPersonas.length > 0;
+    // 2026-10-08 — la puesta en escena del producto se decide UNA vez y la reciben las tres piezas que
+    // hablan de ella: la cláusula de colocación, la de la franja de texto y el constructor. Sin persona, el
+    // producto va sobre una superficie (nadie puede sostenerlo).
+    const stagingSeed = String(params.title ?? params.image_hook ?? params.copy_full ?? '');
+    const productStaging: ProductStaging | null = productInScene
+      ? (personaUsed ? productStagingFor(productInScene.kind ?? null, productInScene.items.length, stagingSeed) : 'on_surface')
+      : null;
 
     // 2026-10-03 — el reparto se decide ANTES de sintetizar: con 2+ personas el lugar puede ceder su
     // plaza, y entonces el constructor no debe hablar de «la foto del lugar adjunta» (no viaja).
@@ -2377,6 +2407,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           location: builderLocation,
           productComposited,
           product: productInScene,
+          productStaging,
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
@@ -2386,13 +2417,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const placement = productInScene
         ? productPlacementClause(overlayTokens?.layout, personaUsed, productInScene.items.length, {
             kind: productInScene.kind ?? null,
-            seed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
+            seed: stagingSeed,
           })
         : '';
       // 2026-10-03 — la lista vive en `engineClausesFor` (bloque PB, con test). Con una persona, sin
       // mirada ni texto permitido como dato, es literalmente la de antes (golden `personas_n1_golden.json`).
       finalPrompt = enforceEngineClauses(synth.text, engineClausesFor({
-        mode, textZone, personaCount: usedPersonas.length, gaze: gazeR.gaze, placement,
+        mode, textZone: textZoneClause(overlayTokens?.layout, { productStaging }), personaCount: usedPersonas.length, gaze: gazeR.gaze, placement,
         productInScene: !!productInScene, productComposited,
         angleSeed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
         allowedSceneText,
@@ -2481,6 +2512,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       location_refs:          locationRefs.length,
       product_composited:     productComposited && !productInScene,
       product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+      // Sólo con producto en escena: sin él, la respuesta es la de siempre, byte a byte.
+      ...(productStaging ? { product_staging: productStaging } : {}),
       product_refs:           productRefs.length,
       reference_images:       images.length,
       // 2026-10-03 — sólo cuando se pidió `personas[]` o entraron dos o más: con el alias legacy y una

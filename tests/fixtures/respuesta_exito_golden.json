@@ -3,9 +3,9 @@
   "escenarios": {
     "carril|LINKEDIN_FEED|copy_persona_producto|psycho": {
       "status": 200,
-      "respuesta_sha256": "d85559180cdf2ba085cc5255b2a7da963390249aeeb4531729245b5028349acc",
+      "respuesta_sha256": "8f69328115027eee10cd7a3db4fc564ebb42435d25279020980e10892f77470a",
       "vertex_imagen_sha256": "e3b5b775f9879c20deaffd40d2ef3abfc3f7009be7d4778798cb87bcac6354af",
-      "vertex_texto_sha256": "b42f81fa72f15313eeae3717cb9bab857bc284337e569e880df5245762e1086f"
+      "vertex_texto_sha256": "9f37eefec74caf3674ab964fbf0f4b680648b162f0f36841d8981e4f1df5af6a"
     },
     "carril|LINKEDIN_FEED|copy_dos_personas|psycho": {
       "status": 200,
@@ -39,9 +39,9 @@
     },
     "carril|FACEBOOK_FEED|copy_persona_producto|psycho": {
       "status": 200,
-      "respuesta_sha256": "7eefc9ad8e7614374304d03bf86c72965e72b14a946eabb8bcada3134226534a",
+      "respuesta_sha256": "d421a726c554a3626d306419a9422e29a4cf30c1e39ad8832ccb05a29103460f",
       "vertex_imagen_sha256": "e3b5b775f9879c20deaffd40d2ef3abfc3f7009be7d4778798cb87bcac6354af",
-      "vertex_texto_sha256": "b42f81fa72f15313eeae3717cb9bab857bc284337e569e880df5245762e1086f"
+      "vertex_texto_sha256": "9f37eefec74caf3674ab964fbf0f4b680648b162f0f36841d8981e4f1df5af6a"
     },
     "carril|FACEBOOK_FEED|copy_dos_personas|psycho": {
       "status": 200,
