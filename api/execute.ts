@@ -921,6 +921,8 @@ const MAX_PRODUCT_REFS = 2;
  *  de su foto real y a su tamaño físico. Llega resuelto por el carril desde la ficha del producto. */
 export interface PromptProduct {
   name: string;
+  /** 2026-10-07 — qué es, según el carril: un envase o un kit. Ausente en un carril anterior. */
+  kind?: ProductKind | null;
   items: Array<{ name: string; image_url: string; height_cm?: number | null; width_cm?: number | null }>;
 }
 
@@ -1037,21 +1039,84 @@ function productSide(anchor: string): string {
   if (anchor.endsWith('right')) return ' It sits in the left half of the frame, away from the text corner.';
   return '';
 }
-export function productPlacementClause(layout: any, withPerson: boolean, items = 1): string {
+//
+// ── KITS SOBRE UNA SUPERFICIE Y POSE QUE ROTA (Sam, 2026-10-07) ──────────────────────────────────
+//
+// EL DEFECTO, medido el 2026-10-07 sobre 113 imágenes sociales no publicadas de una marca:
+//   · casi todas repetían la misma foto —la persona de frente con el envase junto a la cara—, porque
+//     esta cláusula sólo tenía UNA forma de poner un producto con persona: «held in the person's hand».
+//   · los KITS salían en la mano. Un kit con foto de grupo propia llega con UN solo artículo (la foto
+//     del grupo), así que `items > 1` no lo detectaba y recibía la cláusula del envase suelto; y la
+//     rama de varios envases dejaba además la salida «or she holds them up at shoulder height».
+// Sam: «los kits no pueden aparecer en su mano porque no es realista … hay miles de formas».
+//
+// LA REGLA:
+//   · Un KIT (`kind === 'kit'` o varios artículos) NUNCA va en la mano: está sobre una superficie que
+//     pertenece al lugar de la escena. Qué superficie la elige el constructor mirando el lugar real.
+//   · Un envase suelto rota entre tres puestas en escena por semilla (estable para la misma pieza):
+//     en la mano junto a la cara, en uso (aplicándolo o trabajando con él), o sobre una superficie
+//     cerca de la persona mientras ella hace otra cosa.
+//   · Si el carril no dice qué es (`kind` ausente, un carril anterior a este cambio), va sobre una
+//     superficie: un kit con foto de grupo es indistinguible de un envase, y tanto «en la mano» como
+//     «en uso» lo pondrían en sus manos. La rotación del envase empieza cuando el carril declara `kind`.
+//
+// MULTIMARCA: cero marcas, cero productos, cero lugares. Las superficies de ejemplo son genéricas y
+// el constructor elige entre las que existen en el lugar que recibe como dato.
+export type ProductKind = 'product' | 'kit';
+export type ProductStaging = 'held' | 'in_use' | 'on_surface';
+
+/** Cómo se pone el producto en escena. PURO: misma semilla, misma puesta en escena. */
+export function productStagingFor(kind: ProductKind | null | undefined, items: number, seed: string): ProductStaging {
+  if (kind === 'kit' || items > 1) return 'on_surface';
+  // Sin `kind` sólo hay una opción segura: un kit con foto de grupo llega igual que un envase, y tanto
+  // «en la mano» como «en uso» lo pondrían en sus manos.
+  if (kind !== 'product') return 'on_surface';
+  const options: ProductStaging[] = ['held', 'in_use', 'on_surface'];
+  let h = 0;
+  for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return options[h % options.length];
+}
+
+const SURFACE_OF_THE_PLACE =
+  'a real surface that belongs to this place and fits the scene (for example a counter, a shelf, a display case, a vanity or mirror ledge, ' +
+  'the edge of a washbasin, a side table, a windowsill, the sand: choose what this place actually has, never the same set-up twice)';
+
+export function productPlacementClause(
+  layout: any, withPerson: boolean, items = 1,
+  opts: { kind?: ProductKind | null; seed?: string } = {},
+): string {
   const pct = Number(layout?.text_zone_pct);
   const anchor = String(layout?.anchor ?? '');
   if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
+  const kit = opts.kind === 'kit' || items > 1;
   if (anchor.startsWith('bottom')) {
     const side = productSide(anchor);
-    if (withPerson && items > 1) {
-      return 'The products stand together on a high shelf or raised counter at the person\'s shoulder height, right beside her and in the upper part of the frame, ' +
-        'or she holds them up at shoulder height; never on a low counter, table or surface in the lower part of the frame.' + side;
+    if (!withPerson) {
+      return (kit
+        ? `The products stand together, grouped like a real display, on ${SURFACE_OF_THE_PLACE}, in the upper part of the frame; never on a counter or table at the bottom of the frame.`
+        : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame.') + side;
     }
-    return (withPerson
-      ? 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame.'
-      : 'The product stands on a raised surface in the upper part of the frame; never on a counter or table at the bottom of the frame.') + side;
+    if (kit) {
+      return `The products are NEVER held: a set of several bottles does not fit in a hand. They stand together, grouped like a real display, on ${SURFACE_OF_THE_PLACE}, ` +
+        'high enough to sit in the upper part of the frame and close to the person, who is doing something natural in the scene ' +
+        '(working, explaining, reaching for one of them, looking at the camera); never in her hands or arms, never on a low surface in the lower part of the frame.' + side;
+    }
+    const staging = productStagingFor(opts.kind ?? null, items, opts.seed ?? '');
+    if (staging === 'held') {
+      return 'The product is held in the person\'s hand, raised to shoulder or face height beside the face; never standing on a counter, table or shelf in the lower part of the frame.' + side;
+    }
+    if (staging === 'in_use') {
+      return 'The product is IN USE: the person is working with it, applying it or dispensing it into her hand or onto hair, as she would really do in this place, ' +
+        'with the label still readable and the product in the upper part of the frame; not a posed product shot held up beside the face.' + side;
+    }
+    return `The product stands on ${SURFACE_OF_THE_PLACE}, in the upper part of the frame and near the person, who is doing something natural in the scene ` +
+      '(working, explaining, looking at the camera); she does not hold it up for the camera, and it never sits on a low surface in the lower part of the frame.' + side;
   }
-  if (anchor.startsWith('top')) return 'The product sits in the lower part of the frame, below the area reserved for text';
+  if (anchor.startsWith('top')) {
+    return kit
+      ? `The products stand together on ${SURFACE_OF_THE_PLACE} in the lower part of the frame, below the area reserved for text; never held in the person's hands`
+      : 'The product sits in the lower part of the frame, below the area reserved for text';
+  }
   return '';
 }
 
@@ -2249,7 +2314,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // marca lo declara (`imagelab_overlay_tokens.product.mode = 'composite'`), y entonces no se pinta.
     const productIn: PromptProduct | null =
       params.product && Array.isArray(params.product.items) && params.product.items.length
-        ? { name: String(params.product.name ?? ''), items: params.product.items.filter((i: any) => i && typeof i.image_url === 'string' && /^https?:\/\//.test(i.image_url)) }
+        ? { name: String(params.product.name ?? ''),
+            kind: params.product.kind === 'kit' || params.product.kind === 'product' ? params.product.kind : null,
+            items: params.product.items.filter((i: any) => i && typeof i.image_url === 'string' && /^https?:\/\//.test(i.image_url)) }
         : null;
     // Los tokens de la marca dicen cómo entra el producto y DÓNDE irá el texto (TEXT-ZONE).
     // 2026-10-03 — los de (marca, canal): la fila del canal manda clave a clave sobre la de marca.
@@ -2316,7 +2383,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Identidad y lugar del producto también se reponen (medido 2026-09-28: la síntesis perdía la
       // cláusula de identidad y la persona salía con la ropa exacta de sus fotos, o el envase en la
       // franja del titular).
-      const placement = productInScene ? productPlacementClause(overlayTokens?.layout, personaUsed, productInScene.items.length) : '';
+      const placement = productInScene
+        ? productPlacementClause(overlayTokens?.layout, personaUsed, productInScene.items.length, {
+            kind: productInScene.kind ?? null,
+            seed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
+          })
+        : '';
       // 2026-10-03 — la lista vive en `engineClausesFor` (bloque PB, con test). Con una persona, sin
       // mirada ni texto permitido como dato, es literalmente la de antes (golden `personas_n1_golden.json`).
       finalPrompt = enforceEngineClauses(synth.text, engineClausesFor({
