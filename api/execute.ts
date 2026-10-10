@@ -895,6 +895,8 @@ export interface PromptPersona {
   wardrobe?: Array<{ when: string; outfit: string }>;
   // 2026-10-04 — POR QUÉ la manda el carril. Sólo `PERSONA_ENTRY_AUTHOR_VOICE` cambia algo (la exime
   // del filtro de mención); cualquier otro valor, o ninguno, es la regla de mención de siempre.
+  // 2026-10-09 — `PERSONA_ENTRY_SCENE_PROTAGONIST` también la exime, y además repone la cláusula de
+  // protagonista (`sceneProtagonistClause`).
   entry?: string | null;
 }
 
@@ -1250,9 +1252,43 @@ export function isAuthorVoiceEntry(persona: PromptPersona | null | undefined): b
   return !!persona?.name?.trim() && persona.entry === PERSONA_ENTRY_AUTHOR_VOICE;
 }
 
-/** ¿Entra la persona en la escena? La voz autora entra siempre; las demás, sólo si se las nombra. */
+// ── LA PROTAGONISTA DE LA MARCA (2026-10-09) ────────────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-10-08): en una marca cuya cara es UNA persona, las piezas que no la
+// nombraban salían con un desconocido de su mismo estilo —un parecido—, porque la persona no viajaba y la
+// identidad visual de la marca describía su ropa. Decisión de Sam: todo protagonista de las imágenes de
+// esa marca es esa persona, con sus fotos.
+//
+// LA REGLA: el carril manda a la persona con `entry: "scene_protagonist"` cuando la marca la declara con
+// ese rol (`brand_persons.role`). Entra sin ser nombrada, como la voz autora, y el motor repone una
+// cláusula: si la imagen tiene protagonista, es ella; nadie más ocupa ese papel, y nunca un parecido.
+//
+// EJE, NO INSTANCIA: «protagonista de las escenas de la marca» es una función. Quién la tiene es dato.
+
+/** Valor de `PromptPersona.entry` de la persona que protagoniza toda escena de la marca. Comparación exacta. */
+export const PERSONA_ENTRY_SCENE_PROTAGONIST = 'scene_protagonist';
+
+/** ¿La persona llega como protagonista de la marca? Exige un nombre: sin nombre no hay a quién pintar. */
+export function isSceneProtagonistEntry(persona: PromptPersona | null | undefined): boolean {
+  return !!persona?.name?.trim() && persona.entry === PERSONA_ENTRY_SCENE_PROTAGONIST;
+}
+
+/** La protagonista de la escena entre las personas que entran: la primera con esa entrada, o `null`. */
+export function sceneProtagonistOf(personas: PromptPersona[] | null | undefined): PromptPersona | null {
+  return (personas ?? []).find(isSceneProtagonistEntry) ?? null;
+}
+
+/** La cláusula del motor para la protagonista. Va en inglés como el resto de cláusulas del motor. */
+export function sceneProtagonistClause(name: string): string {
+  const n = String(name ?? '').trim();
+  return `${n} is the protagonist of this brand's images: if the image shows a main person, that person is ${n}, ` +
+    `with the exact face of ${n}'s reference photos. Never give that role to a different man or woman, never a lookalike ` +
+    `or someone dressed in ${n}'s style; anyone else may appear only as an anonymous, out-of-focus background figure`;
+}
+
+/** ¿Entra la persona en la escena? La voz autora y la protagonista entran siempre; las demás, sólo si se las nombra. */
 export function personaEntersScene(persona: PromptPersona | null | undefined, texts: Array<string | null | undefined>): boolean {
-  return isAuthorVoiceEntry(persona) || personaMentioned(persona, texts);
+  return isAuthorVoiceEntry(persona) || isSceneProtagonistEntry(persona) || personaMentioned(persona, texts);
 }
 
 // ── LA DIRECTRIZ DEL TEMA TAMBIÉN NOMBRA (2026-10-05, formato recurrente) ─────────────────────────────
@@ -1483,12 +1519,17 @@ export function engineClausesFor(args: {
   allowedSceneText?: string[] | null;
   /** 2026-10-03 — el encuadre como dato (`layout.subject_framing`). Ausente: `tight`, el de siempre. */
   framing?: SubjectFraming | null;
+  /** 2026-10-09 — el nombre de la protagonista de la marca, si entró con esa entrada. Ausente: la lista de antes. */
+  protagonist?: string | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
+  const protagonist = String(args.protagonist ?? '').trim();
   return [noTextClause(args.allowedSceneText), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, lightingCoherenceClause(n),
     ...(edit ? [] : [framingClause(args.framing, n), ...(args.textZone ? [args.textZone] : []),
       ...(n > 0 ? [personaIdentityOnlyClause(n)] : []), ...(args.placement ? [args.placement] : [])]),
+    // También al editar: la identidad de la protagonista es lo que más se pierde al regenerar.
+    ...(protagonist ? [sceneProtagonistClause(protagonist)] : []),
     ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
     ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])];
@@ -1583,9 +1624,12 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   } else if (withPersona && input.persona) {
     const refs = (input.persona.reference_image_urls ?? []).length;
     // La voz autora no tiene por qué estar nombrada: el «whenever … names them» de siempre la dejaría fuera.
-    const when = isAuthorVoiceEntry(input.persona)
-      ? 'The piece is written in their own voice: they appear in the scene, and'
-      : 'Whenever the piece or a directive names them,';
+    // La protagonista de la marca tampoco (2026-10-09): es la persona principal de toda escena que la tenga.
+    const when = isSceneProtagonistEntry(input.persona)
+      ? 'They are the protagonist of every image of this brand: whenever the scene has a main person, it is them, and'
+      : isAuthorVoiceEntry(input.persona)
+        ? 'The piece is written in their own voice: they appear in the scene, and'
+        : 'Whenever the piece or a directive names them,';
     parts.push(
       `PERSONA — "${input.persona.name.trim()}" is a real, recurring person of this brand. ${when} ` +
       `they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
@@ -2428,6 +2472,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         angleSeed: String(params.title ?? params.image_hook ?? params.copy_full ?? ''),
         allowedSceneText,
         framing: framingR.framing,
+        protagonist: sceneProtagonistOf(usedPersonas)?.name ?? null,
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
@@ -2435,6 +2480,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     // Sin síntesis, la orden de no dibujar producto también viaja: la capa la pega el compositor igual.
     if (!builder && productComposited && !productInScene) finalPrompt = enforceEngineClauses(finalPrompt, [PRODUCT_COMPOSITED_CLAUSE]);
+    // Sin síntesis, la protagonista de la marca también viaja: es la cláusula que evita el parecido.
+    const protagonistSinSintesis = !builder ? sceneProtagonistOf(usedPersonas) : null;
+    if (protagonistSinSintesis) finalPrompt = enforceEngineClauses(finalPrompt, [sceneProtagonistClause(protagonistSinSintesis.name)]);
 
     // Medición en seco: el prompt y su coste, sin pagar una imagen.
     if (params.prompt_only === true) {
