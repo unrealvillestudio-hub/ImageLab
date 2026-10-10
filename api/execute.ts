@@ -1278,12 +1278,17 @@ export function sceneProtagonistOf(personas: PromptPersona[] | null | undefined)
   return (personas ?? []).find(isSceneProtagonistEntry) ?? null;
 }
 
-/** La cláusula del motor para la protagonista. Va en inglés como el resto de cláusulas del motor. */
+/** La cláusula del motor para la protagonista. Va en inglés como el resto de cláusulas del motor.
+ *  2026-10-10 — y aparece UNA vez. Medido en 69 imágenes de la primera marca con protagonista: los dos
+ *  defectos fueron la misma persona duplicada, una por su reflejo en un espejo (el texto de la imagen
+ *  hablaba de un espejo) y otra por su propia mano en primer plano mientras su figura estaba en la escena. */
 export function sceneProtagonistClause(name: string): string {
   const n = String(name ?? '').trim();
   return `${n} is the protagonist of this brand's images: if the image shows a main person, that person is ${n}, ` +
     `with the exact face of ${n}'s reference photos. Never give that role to a different man or woman, never a lookalike ` +
-    `or someone dressed in ${n}'s style; anyone else may appear only as an anonymous, out-of-focus background figure`;
+    `or someone dressed in ${n}'s style; anyone else may appear only as an anonymous, out-of-focus background figure. ` +
+    `${n} appears exactly once: never ${n}'s reflection in a mirror, window or glass, and never ${n}'s own hand in the ` +
+    `foreground while ${n} also stands in the scene; if the piece speaks of a mirror, place the camera where the mirror would be`;
 }
 
 /** ¿Entra la persona en la escena? La voz autora y la protagonista entran siempre; las demás, sólo si se las nombra. */

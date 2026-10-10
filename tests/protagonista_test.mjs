@@ -68,6 +68,14 @@ await ok('engineClausesFor sin protagonista es la lista de antes; con protagonis
   assert.ok(edit.some((c) => c.startsWith(CLAUSULA('Teodora Quispe'))));
 });
 
+await ok('la cláusula exige UNA aparición: ni reflejo ni la propia mano en primer plano (2026-10-10)', () => {
+  const c = M.sceneProtagonistClause('Teodora Quispe');
+  assert.ok(c.startsWith(CLAUSULA('Teodora Quispe')));
+  assert.ok(c.includes("Teodora Quispe appears exactly once: never Teodora Quispe's reflection in a mirror, window or glass"));
+  assert.ok(c.includes("never Teodora Quispe's own hand in the foreground while Teodora Quispe also stands in the scene"));
+  assert.ok(c.includes('if the piece speaks of a mirror, place the camera where the mirror would be'));
+});
+
 await ok('piezas puras: la entrada exige nombre y comparación exacta', () => {
   assert.equal(M.PERSONA_ENTRY_SCENE_PROTAGONIST, 'scene_protagonist');
   assert.equal(M.isSceneProtagonistEntry(prota(PERSONA_A)), true);
