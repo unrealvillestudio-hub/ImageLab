@@ -1291,6 +1291,33 @@ export function sceneProtagonistClause(name: string): string {
     `foreground while ${n} also stands in the scene; if the piece speaks of a mirror, place the camera where the mirror would be`;
 }
 
+// ── EL ROSTRO DE LA PERSONA RECURRENTE (2026-10-10) ─────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-10-10, 103 imágenes de una marca con voz autora): en 14 la mujer de
+// la escena no era la de sus fotos —más joven, más delgada, de rostro genérico— aunque las tres fotos
+// viajaron (`persona_used: true`, 4 o 5 imágenes de entrada). El constructor resume la persona en su
+// pelo y su ropa y suelta los rasgos de la cara; la única cláusula del motor que nombraba «el rostro
+// exacto de sus fotos» era la de la protagonista (`sceneProtagonistClause`). Toda persona recurrente que
+// entra con fotos pierde la cara por el mismo camino: la cláusula es de la CLASE, no de una marca.
+//
+// LA REGLA: por cada persona que entra en la escena con fotos que VIAJAN, el motor repone esta cláusula
+// literal. La protagonista no la lleva: la suya ya lo dice. Sin fotos no hay rostro al que anclar.
+
+/** La cláusula del motor que ancla el rostro de una persona recurrente a sus fotos. En inglés, como el resto. */
+export function personaFaceAnchorClause(name: string): string {
+  const n = String(name ?? '').trim();
+  return `${n} has the exact face of ${n}'s reference photos: the same face shape and proportions, the same apparent age, ` +
+    `the same build and the same smile. Never a younger, slimmer or more generic-looking version of ${n}, never a lookalike ` +
+    `or a model styled like ${n}; where a written description and the reference photos differ, the photos decide`;
+}
+
+/** Las personas cuyo rostro se ancla: las que entran con al menos una foto que viaja, salvo la protagonista. */
+export function faceAnchoredNames(personas: PromptPersona[], refsPerPersona: string[][]): string[] {
+  return personas
+    .filter((p, i) => !!p?.name?.trim() && (refsPerPersona[i] ?? []).length > 0 && !isSceneProtagonistEntry(p))
+    .map((p) => p.name.trim());
+}
+
 /** ¿Entra la persona en la escena? La voz autora y la protagonista entran siempre; las demás, sólo si se las nombra. */
 export function personaEntersScene(persona: PromptPersona | null | undefined, texts: Array<string | null | undefined>): boolean {
   return isAuthorVoiceEntry(persona) || isSceneProtagonistEntry(persona) || personaMentioned(persona, texts);
@@ -1526,15 +1553,20 @@ export function engineClausesFor(args: {
   framing?: SubjectFraming | null;
   /** 2026-10-09 — el nombre de la protagonista de la marca, si entró con esa entrada. Ausente: la lista de antes. */
   protagonist?: string | null;
+  /** 2026-10-10 — las personas cuyo rostro se ancla a sus fotos (`faceAnchoredNames`). Ausente: la lista de antes. */
+  anchored?: string[] | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
   const protagonist = String(args.protagonist ?? '').trim();
+  const anchored = (args.anchored ?? []).map((a) => String(a ?? '').trim()).filter(Boolean);
   return [noTextClause(args.allowedSceneText), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, lightingCoherenceClause(n),
     ...(edit ? [] : [framingClause(args.framing, n), ...(args.textZone ? [args.textZone] : []),
       ...(n > 0 ? [personaIdentityOnlyClause(n)] : []), ...(args.placement ? [args.placement] : [])]),
     // También al editar: la identidad de la protagonista es lo que más se pierde al regenerar.
     ...(protagonist ? [sceneProtagonistClause(protagonist)] : []),
+    // También al editar, por la misma razón que la protagonista.
+    ...anchored.map(personaFaceAnchorClause),
     ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
     ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])];
@@ -1925,6 +1957,124 @@ function appendNegative(prompt: string, negativePrompt?: string): string {
   const neg = (negativePrompt ?? '').trim();
   if (!neg) return prompt;
   return `${prompt} Avoid: ${neg}.`;
+}
+
+// ── PLACA:BEGIN ── (2026-10-10) bloque PURO: la placa lisa de un borde se MIDE, no se le pide al modelo.
+//
+// EL DEFECTO QUE CIERRA (medido 2026-10-10 sobre 103 imágenes regeneradas de una marca): 13 salieron con
+// una placa lisa de un color —blanca, gris o negra— en uno o dos bordes, de 8 a 37 % del lado: el
+// letterbox del modelo y la «franja de texto» que deja vacía. La orden de no hacerlo vive en el prompt
+// desde el 2026-09-28 (`SINGLE_FRAME_CLAUSE`, `textZoneClause`) y se incumple igual: una cláusula es una
+// petición; una medida es una barrera. El juez que la mide (`/api/inspect`, `meta.edge_bands`) sólo corre
+// para imágenes en línea, y el camino de regeneración no pasa por él.
+//
+// LA MEDIDA: la banda de cada borde con la MISMA definición que `/api/inspect` (línea con desviación de
+// luma ≤ 4 y paso de media ≤ 6 respecto de la anterior) y, además, la desviación MEDIA dentro de la banda.
+// Medido sobre las 103: las 13 placas tienen media ≤ 0,6; los cielos y paredes lisas que también cuentan
+// como banda (6 imágenes) tienen media ≥ 1,6, porque una foto conserva su grano y una placa no.
+// Es placa si la banda llega a EDGE_PLATE_MIN_PCT % del lado y su desviación media es ≤ EDGE_PLATE_MAX_MEAN_STD.
+//
+// EJE, NO INSTANCIA: nada de marca, canal ni color. Los umbrales son del motor y llevan su medida.
+export const EDGE_PLATE_LINE_MAX_STD = 4;
+export const EDGE_PLATE_LINE_MAX_STEP = 6;
+export const EDGE_PLATE_MIN_PCT = 5;
+export const EDGE_PLATE_MAX_MEAN_STD = 1;
+// Un segundo intento sólo si el primero dejó tiempo: maxDuration es 60 s y una imagen tarda ~15 s (p50,
+// p90 17 s, máximo 47 s; libro de los 3 días anteriores al 2026-10-10).
+export const EDGE_PLATE_RETRY_MAX_ELAPSED_MS = 25_000;
+
+export type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
+export interface EdgePlate {
+  sides: EdgeSide[];
+  pct: Record<EdgeSide, number>;
+  width: number;
+  height: number;
+}
+
+/** Mide las placas de los cuatro bordes sobre píxeles intercalados (`channels` 1..4, sin usar el alfa).
+ *  Devuelve `null` si ningún borde tiene placa. PURO; lanza sólo ante una entrada imposible. */
+export function measureEdgePlate(pixels: Uint8Array, width: number, height: number, channels: number): EdgePlate | null {
+  if (!(Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0 && channels >= 1 && channels <= 4) ||
+      pixels.length < width * height * channels) {
+    throw new Error(`EDGE_PLATE_INPUT: píxeles insuficientes para ${width}x${height}x${channels}`);
+  }
+  const lumaAt = (x: number, y: number): number => {
+    const p = (y * width + x) * channels;
+    return channels < 3 ? pixels[p] : 0.299 * pixels[p] + 0.587 * pixels[p + 1] + 0.114 * pixels[p + 2];
+  };
+  const lineStats = (axis: 'row' | 'col', k: number): { mean: number; std: number } => {
+    const n = axis === 'row' ? width : height;
+    let sum = 0;
+    let sq = 0;
+    for (let t = 0; t < n; t++) {
+      const v = axis === 'row' ? lumaAt(t, k) : lumaAt(k, t);
+      sum += v;
+      sq += v * v;
+    }
+    const mean = sum / n;
+    return { mean, std: Math.sqrt(Math.max(0, sq / n - mean * mean)) };
+  };
+  const band = (axis: 'row' | 'col', fromEnd: boolean): { pct: number; meanStd: number } => {
+    const n = axis === 'row' ? height : width;
+    let count = 0;
+    let stdSum = 0;
+    let prev: number | null = null;
+    for (let s = 0; s < n; s++) {
+      const st = lineStats(axis, fromEnd ? n - 1 - s : s);
+      if (st.std > EDGE_PLATE_LINE_MAX_STD || (prev !== null && Math.abs(st.mean - prev) > EDGE_PLATE_LINE_MAX_STEP)) break;
+      count++;
+      stdSum += st.std;
+      prev = st.mean;
+    }
+    return { pct: Math.round((count / n) * 1000) / 10, meanStd: count ? stdSum / count : Infinity };
+  };
+  const bands: Record<EdgeSide, { pct: number; meanStd: number }> = {
+    top: band('row', false), bottom: band('row', true), left: band('col', false), right: band('col', true),
+  };
+  const sides = (Object.keys(bands) as EdgeSide[])
+    .filter((s) => bands[s].pct >= EDGE_PLATE_MIN_PCT && bands[s].meanStd <= EDGE_PLATE_MAX_MEAN_STD);
+  if (!sides.length) return null;
+  return {
+    sides,
+    pct: { top: bands.top.pct, bottom: bands.bottom.pct, left: bands.left.pct, right: bands.right.pct },
+    width, height,
+  };
+}
+
+/** El tamaño de la peor placa (0 sin placa): para elegir entre dos intentos que la tienen. */
+export function edgePlateSize(p: EdgePlate | null): number {
+  return p ? Math.max(...p.sides.map((s) => p.pct[s])) : 0;
+}
+
+/** ¿Hay tiempo para un segundo intento? Sólo si el primero acabó antes del tope. */
+export function edgePlateRetryAllowed(elapsedMs: number): boolean {
+  return Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs <= EDGE_PLATE_RETRY_MAX_ELAPSED_MS;
+}
+
+const EDGE_SIDE_WORDS: Record<EdgeSide, string> = { top: 'top', bottom: 'bottom', left: 'left', right: 'right' };
+
+/** La corrección del segundo intento: nombra el borde que salió liso. En inglés, como las cláusulas del motor. */
+export function edgePlateRetryClause(p: EdgePlate): string {
+  const where = p.sides.map((s) => EDGE_SIDE_WORDS[s]).join(' and ');
+  return `CORRECTION: a previous attempt left a flat, empty band of solid colour along the ${where} edge of the frame. ` +
+    `This photograph must reach every edge: the scene itself — its real surfaces, light, texture and depth — continues ` +
+    `to the very ${where} edge, with no blank, white, gray or black band and no empty strip reserved for text`;
+}
+// ── PLACA:END ──
+
+// La placa se mide sobre los píxeles REALES: sharp se carga al usarse (el arnés de tests no lo resuelve
+// desde su directorio temporal, y una imagen que no se puede leer no es una imagen sin placa: se dice).
+async function edgePlateOfImage(dataUrl: string): Promise<{ plate: EdgePlate | null; error: string | null }> {
+  try {
+    const comma = dataUrl.indexOf(',');
+    if (!dataUrl.startsWith('data:') || comma < 0) throw new Error('no es una data URL');
+    const bytes = Buffer.from(dataUrl.slice(comma + 1), 'base64');
+    const { default: sharp } = await import('sharp');
+    const { data, info } = await sharp(bytes).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    return { plate: measureEdgePlate(new Uint8Array(data.buffer, data.byteOffset, data.length), info.width, info.height, info.channels), error: null };
+  } catch (err) {
+    return { plate: null, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) };
+  }
 }
 
 // ── RESPUESTA-IMAGEN:BEGIN ── bloque puro (sin red): lo extrae `tests/contrato_de_fallo_test.mjs`.
@@ -2348,6 +2498,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   // 2026-10-05 — el prompt del fallo, también FUERA del try y por la misma razón: se llena a medida que
   // el prompt se construye, y el catch lo lee.
   const fallo = emptyFailurePromptContext();
+  // 2026-10-10 — el reloj del segundo intento por placa (`edgePlateRetryAllowed`).
+  const t0Handler = Date.now();
   try {
     const request = body as ExecuteRequest;
     const params = request.params ?? {};
@@ -2478,6 +2630,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         allowedSceneText,
         framing: framingR.framing,
         protagonist: sceneProtagonistOf(usedPersonas)?.name ?? null,
+        anchored: faceAnchoredNames(usedPersonas, alloc.persona),
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
@@ -2523,24 +2676,71 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada: el producto no cabía en el presupuesto de ${alloc.budget} y viaja igual (sin su foto sería inventado)`);
     }
 
-    const { image_data_url: imageDataUrl, usage } = images.length
-      ? await vertexPredictImagenCapability({
-          prompt: [imageRoleClause({
-            hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
-            personas: usedPersonas.length >= 2 ? usedPersonas.map((p, i) => ({ name: p.name, refs: alloc.persona[i].length })) : null,
-            locationName: location?.name ?? null, locationRefs: locationRefs.length,
-            productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
-            productRefs: productRefs.length,
-          }), finalPrompt].filter(Boolean).join(' '),
-          negativePrompt: built.negativePrompt,
-          aspectRatio: built.aspectRatio,
-          images,
-        })
-      : await vertexPredictImagen({
-          prompt:         finalPrompt,
-          negativePrompt: built.negativePrompt,
-          aspectRatio:    built.aspectRatio,
-        });
+    // `correction` sólo en el segundo intento por placa: va delante del prompt final, que no cambia.
+    const generar = (correction: string | null) => {
+      const prompt = [correction, finalPrompt].filter(Boolean).join(' ');
+      return images.length
+        ? vertexPredictImagenCapability({
+            prompt: [imageRoleClause({
+              hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
+              personas: usedPersonas.length >= 2 ? usedPersonas.map((p, i) => ({ name: p.name, refs: alloc.persona[i].length })) : null,
+              locationName: location?.name ?? null, locationRefs: locationRefs.length,
+              productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
+              productRefs: productRefs.length,
+            }), prompt].filter(Boolean).join(' '),
+            negativePrompt: built.negativePrompt,
+            aspectRatio: built.aspectRatio,
+            images,
+          })
+        : vertexPredictImagen({
+            prompt,
+            negativePrompt: built.negativePrompt,
+            aspectRatio:    built.aspectRatio,
+          });
+    };
+    let { image_data_url: imageDataUrl, usage } = await generar(null);
+
+    // ── PLACA (2026-10-10) — se mide la imagen; con placa y con tiempo, UN segundo intento que nombra el
+    // borde. Se entrega la mejor de las dos; la descartada viaja en `discarded_attempts` con su consumo,
+    // para que el consumidor la asiente: se generó y se cobró. Sin placa, la respuesta es la de siempre.
+    const medida1 = await edgePlateOfImage(imageDataUrl);
+    if (medida1.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED brand=${request.brandId}: ${medida1.error}`);
+    let edgePlate: EdgePlate | null = medida1.plate;
+    const discardedAttempts: Array<{ model: string; usage: Record<string, number> | null; edge_plate: EdgePlate; reason: string }> = [];
+    if (edgePlate) {
+      const elapsed = Date.now() - t0Handler;
+      if (edgePlateRetryAllowed(elapsed)) {
+        console.warn(`[ImageLab][PLACA] brand=${request.brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) a los ${elapsed} ms: segundo intento`);
+        const primera = { image_data_url: imageDataUrl, usage, plate: edgePlate };
+        let segunda: ImageWithUsage | null = null;
+        try {
+          segunda = await generar(edgePlateRetryClause(edgePlate));
+        } catch (err) {
+          // El segundo intento falló: se entrega la primera, con su placa declarada. Si el proveedor
+          // reportó consumo del intento fallido, viaja igual: pudo cobrarse.
+          const u = (err as any)?.usage ?? null;
+          console.warn(`[ImageLab][PLACA] EDGE_PLATE_RETRY_FAILED brand=${request.brandId}: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+          if (u) discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: u, edge_plate: primera.plate, reason: 'EDGE_PLATE_RETRY_FAILED' });
+        }
+        if (segunda) {
+          const medida2 = await edgePlateOfImage(segunda.image_data_url);
+          if (medida2.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED (segundo intento) brand=${request.brandId}: ${medida2.error}`);
+          // La segunda gana si no tiene placa o si la suya es menor; si no, se entrega la primera.
+          if (!medida2.error && edgePlateSize(medida2.plate) < edgePlateSize(primera.plate)) {
+            discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: primera.usage, edge_plate: primera.plate, reason: 'EDGE_PLATE' });
+            imageDataUrl = segunda.image_data_url;
+            usage = segunda.usage;
+            edgePlate = medida2.plate;
+          } else {
+            discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: segunda.usage, edge_plate: medida2.plate ?? primera.plate,
+              reason: medida2.error ? 'EDGE_PLATE_UNMEASURED' : 'EDGE_PLATE' });
+          }
+        }
+      } else {
+        console.warn(`[ImageLab][PLACA] EDGE_PLATE_NO_RETRY brand=${request.brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) y ${elapsed} ms gastados: se entrega con la placa declarada`);
+      }
+    }
+    const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
 
     res.status(200).json({
       output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
@@ -2579,6 +2779,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         references_dropped: alloc.dropped,
       } : {}),
       ...overlayTrace,
+      ...plateTrace,
       status:         'ok',
     });
   } catch (err) {

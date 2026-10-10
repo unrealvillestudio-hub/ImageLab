@@ -2,6 +2,9 @@
 // Vertex en cada (forma × canal × base sin dato activo), y la lista de cláusulas del motor para una
 // rejilla de argumentos. Se ejecutó UNA vez sobre `main` (35eccca), antes del cambio.
 // No forma parte de `npm test`: volver a correrlo sobre el código nuevo invalidaría la comparación.
+// RECAPTURADO el 2026-10-10 a propósito, por el ancla de rostro (`personaFaceAnchorClause`): antes de
+// recapturar se comprobó que cada corrida del handler, quitada esa cláusula, da el hash anterior
+// (96 con ancla, 48 idénticas, 0 con otra diferencia). Las 128 listas del motor no cambian.
 //
 // Ejecutar (sólo para regenerar a propósito, con el `api/execute.ts` de `main` en el árbol):
 //   node tests/_capturar_golden_canal.mjs
