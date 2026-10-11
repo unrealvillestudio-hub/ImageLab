@@ -892,7 +892,12 @@ export interface PromptPersona {
   expressions?: Array<{ when: string; face: string }>;
   expression_avoid?: string[];
   // Vestuario de ESTA persona (dato del carril, `person_blueprints.raw_config.wardrobe_catalog`).
-  wardrobe?: Array<{ when: string; outfit: string }>;
+  // 2026-10-11 — `options`: las prendas de ese ambiente, una por opción; el MOTOR elige una por imagen
+  // (`wardrobeOptionFor`). Sin `options`, la línea `outfit` de siempre.
+  wardrobe?: Array<{ when: string; outfit: string; options?: string[] }>;
+  // 2026-10-11 — la ropa que lleva en sus fotos de referencia (`wardrobe_catalog.reference_outfit`). Con
+  // ella, el motor repone que no la lleve (`personaReferenceOutfitClause`). Sin ella, nada cambia.
+  wardrobe_reference_outfit?: string | null;
   // 2026-10-04 — POR QUÉ la manda el carril. Sólo `PERSONA_ENTRY_AUTHOR_VOICE` cambia algo (la exime
   // del filtro de mención); cualquier otro valor, o ninguno, es la regla de mención de siempre.
   // 2026-10-09 — `PERSONA_ENTRY_SCENE_PROTAGONIST` también la exime, y además repone la cláusula de
@@ -973,12 +978,62 @@ export const PERSONA_IDENTITY_ONLY_CLAUSE =
 
 /** El vestuario de la persona: su CATÁLOGO si la marca lo declara; si no, sólo la cláusula de identidad.
  *  Al editar la imagen actual no se dicta: manda la ropa que ya tiene, salvo que una directriz la cambie. */
-export function personaWardrobeBlock(persona: PromptPersona | null | undefined, mode?: GenerationMode | null): string {
+export function personaWardrobeBlock(persona: PromptPersona | null | undefined, mode?: GenerationMode | null, seed?: string | null): string {
   if (mode === 'edit_from_current') return 'Keep the clothing of the current image unless a directive asks to change it.';
   const entries = (persona?.wardrobe ?? []).filter((w) => w?.when?.trim() && w?.outfit?.trim());
-  if (!entries.length) return `${PERSONA_IDENTITY_ONLY_CLAUSE}.`;
-  return `${PERSONA_IDENTITY_ONLY_CLAUSE}. Choose ${persona!.name.trim()}'s outfit by the setting of the scene, and vary it from image to image:\n` +
-    entries.map((w) => `- ${w.when.trim()}: ${w.outfit.trim()}`).join('\n');
+  const ref = String(persona?.wardrobe_reference_outfit ?? '').trim();
+  const never = ref ? `\nNever the outfit of the reference photos: ${ref}.` : '';
+  if (!entries.length) return `${PERSONA_IDENTITY_ONLY_CLAUSE}.${never}`;
+  const name = persona!.name.trim();
+  // 2026-10-11 — con opciones declaradas, la prenda la decide el motor y el constructor la describe tal cual.
+  if (entries.some((w) => wardrobeOptionsOf(w).length)) {
+    return `${PERSONA_IDENTITY_ONLY_CLAUSE}. Choose ${name}'s outfit by the setting of the scene. Each line is the ONE outfit already chosen ` +
+      'for this image in that setting: describe it exactly as written, never swap it for another garment:\n' +
+      entries.map((w, k) => `- ${w.when.trim()}: ${wardrobeOptionFor(w, `${seed ?? ''}|${name}|${k}`)}`).join('\n') + never;
+  }
+  return `${PERSONA_IDENTITY_ONLY_CLAUSE}. Choose ${name}'s outfit by the setting of the scene, and vary it from image to image:\n` +
+    entries.map((w) => `- ${w.when.trim()}: ${w.outfit.trim()}`).join('\n') + never;
+}
+
+// ── LA PRENDA LA ELIGE EL MOTOR (2026-10-11) ────────────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-10-11, 105 prompts de una persona con catálogo de vestuario): el
+// catálogo decía «vary the garment: a fitted black blouse, a black wrap dress, a black knit top, or a
+// black blazer…». En 60 prompts el constructor escribió «fitted black blouse» —la primera— y en ninguno
+// las otras tres. «Varía de imagen en imagen» no se puede cumplir: cada llamada al constructor es
+// independiente y no sabe qué eligió la anterior. Y una prenda casi igual a la de las fotos deja que el
+// generador copie la de las fotos.
+//
+// LA REGLA: si la entrada del catálogo declara `options`, el motor elige UNA por imagen con la semilla de
+// la pieza (la misma familia de hash que `productStagingFor`), y el constructor la recibe ya elegida. Si
+// la persona declara `reference_outfit`, el motor repone que no la lleve. EJE: las prendas son dato.
+
+/** Las opciones válidas de una entrada del catálogo: cadenas no vacías, en su orden. */
+export function wardrobeOptionsOf(entry: { options?: unknown } | null | undefined): string[] {
+  return Array.isArray(entry?.options) ? (entry!.options as unknown[]).filter((o): o is string => typeof o === 'string' && !!o.trim()).map((o) => o.trim()) : [];
+}
+
+/** La prenda de esta imagen para una entrada: una de sus opciones por la semilla; sin opciones, `outfit`. */
+export function wardrobeOptionFor(entry: { outfit: string; options?: unknown }, seed: string): string {
+  const opts = wardrobeOptionsOf(entry);
+  if (!opts.length) return entry.outfit.trim();
+  let h = 0;
+  for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return opts[h % opts.length];
+}
+
+/** La cláusula del motor: la persona no lleva la ropa de sus fotos. En inglés, como el resto. */
+export function personaReferenceOutfitClause(name: string, outfit: string): string {
+  const n = String(name ?? '').trim();
+  return `${n} does not wear the outfit of ${n}'s reference photos (${String(outfit ?? '').trim()}): ` +
+    `dress ${n} exactly as the scene description says, in a visibly different garment`;
+}
+
+/** Las personas en escena que declaran la ropa de sus fotos, con esa ropa. */
+export function referenceOutfitsOf(personas: PromptPersona[]): Array<{ name: string; outfit: string }> {
+  return personas
+    .filter((p) => !!p?.name?.trim() && !!String(p.wardrobe_reference_outfit ?? '').trim())
+    .map((p) => ({ name: p.name.trim(), outfit: String(p.wardrobe_reference_outfit).trim() }));
 }
 
 /** LUZ COHERENTE (Sam, 2026-09-28: la persona iluminada de una forma y el fondo de otra). Con fotos de persona, lugar y producto de sesiones distintas, el modelo tiende a
@@ -1555,6 +1610,8 @@ export function engineClausesFor(args: {
   protagonist?: string | null;
   /** 2026-10-10 — las personas cuyo rostro se ancla a sus fotos (`faceAnchoredNames`). Ausente: la lista de antes. */
   anchored?: string[] | null;
+  /** 2026-10-11 — las personas con la ropa de sus fotos declarada (`referenceOutfitsOf`). Ausente: la lista de antes. */
+  outfitAvoid?: Array<{ name: string; outfit: string }> | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
@@ -1567,6 +1624,9 @@ export function engineClausesFor(args: {
     ...(protagonist ? [sceneProtagonistClause(protagonist)] : []),
     // También al editar, por la misma razón que la protagonista.
     ...anchored.map(personaFaceAnchorClause),
+    // Al editar no: la ropa de la imagen actual se conserva.
+    ...(edit ? [] : (args.outfitAvoid ?? []).filter((o) => o?.name?.trim() && o?.outfit?.trim())
+      .map((o) => personaReferenceOutfitClause(o.name, o.outfit))),
     ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
     ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])];
@@ -1591,6 +1651,9 @@ export interface PromptBuilderInput {
   // el constructor elegía entre «en la mano» y «sobre una superficie», y elegía la mano aunque la cláusula
   // del motor dijera «NEVER held» (medido en 0a8168af).
   productStaging?: ProductStaging | null;
+  // 2026-10-11 — la semilla con la que el motor elige la prenda de cada entrada con `options`
+  // (`wardrobeOptionFor`). Sin ella, la elección usa la cadena vacía: determinista igual.
+  wardrobeSeed?: string | null;
 }
 
 /** El constructor corre sólo cuando el llamante manda el copy ENTERO. Sin eso, el camino de hoy. */
@@ -1656,7 +1719,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
         `${refs ? ` and like their own attached reference photo(s) (SUBJECT ${subjectLetter(k)})` : ''}:\n${p.description.trim()}`,
       );
       parts.push(`PERSONA ${subjectLetter(k)} EXPRESSION:\n${personaExpressionBlock(p)}`);
-      parts.push(`PERSONA ${subjectLetter(k)} WARDROBE:\n${personaWardrobeBlock(p, input.mode)}`);
+      parts.push(`PERSONA ${subjectLetter(k)} WARDROBE:\n${personaWardrobeBlock(p, input.mode, input.wardrobeSeed)}`);
     });
   } else if (withPersona && input.persona) {
     const refs = (input.persona.reference_image_urls ?? []).length;
@@ -1672,7 +1735,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
       `they must look exactly like this${refs ? ' and like the attached reference photo(s)' : ''}:\n${input.persona.description.trim()}`,
     );
     parts.push(`PERSONA EXPRESSION:\n${personaExpressionBlock(input.persona)}`);
-    parts.push(`PERSONA WARDROBE:\n${personaWardrobeBlock(input.persona, input.mode)}`);
+    parts.push(`PERSONA WARDROBE:\n${personaWardrobeBlock(input.persona, input.mode, input.wardrobeSeed)}`);
   }
   if (input.location?.name?.trim() && input.location.description?.trim()) {
     const refs = (input.location.reference_image_urls ?? []).length;
@@ -2609,6 +2672,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           productComposited,
           product: productInScene,
           productStaging,
+          wardrobeSeed: stagingSeed,
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
       });
@@ -2631,6 +2695,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         framing: framingR.framing,
         protagonist: sceneProtagonistOf(usedPersonas)?.name ?? null,
         anchored: faceAnchoredNames(usedPersonas, alloc.persona),
+        outfitAvoid: referenceOutfitsOf(usedPersonas),
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
