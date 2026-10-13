@@ -85,7 +85,14 @@ declare const process: { env: Record<string, string | undefined> };
 //         (lámina): rol tipográfico, peso, itálica, transformación, escala de tamaño y tracking, más
 //         `palette.headline_emphasis` (overlay; la lámina usa la función `keyword`). Sin `emphasis` en la
 //         petición, o sin el token en la marca, la escena sale idéntica a la de 1.3.4.
-export const COMPOSITOR_VERSION = '1.4.0';
+//   1.5.0 (2026-10-13) — EL TEXTO RESPETA A LA PLATAFORMA (Sam, 2026-10-13: «que la proporción y cantidad
+//         de texto vs la imagen no sobrepase los requerimientos de cada plataforma»). Dos tokens de DATO por
+//         canal: `layout.max_text_area_pct` (el bloque de texto no ocupa más de ese % de la imagen; si no
+//         cabe, baja de escalón, luego se quita la bajada y, si aun así no cabe, se compone al mínimo y se
+//         marca) y `layout.safe_zone_pct` (bordes que la interfaz de la plataforma tapa: el texto se compone
+//         dentro). El límite rige el post y la portada del carrusel; las láminas interiores son tarjetas de
+//         texto por diseño. Sin los tokens, la escena sale idéntica a la de 1.4.0.
+export const COMPOSITOR_VERSION = '1.5.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -365,7 +372,12 @@ export function resolveOverlayStyle(args: {
   palette: Array<{ role: string; hex: string }>;
   text: OverlayText;
 }): {
-  layout: { anchor: string; marginPct: number; maxWidthPct: number; gapPct: number; align: 'left' | 'center' | 'right' };
+  layout: {
+    anchor: string; marginPct: number; maxWidthPct: number; gapPct: number; align: 'left' | 'center' | 'right';
+    // 1.5.0 — sólo existen si la marca o el canal los declaran.
+    maxTextAreaPct?: number;
+    safeZonePct?: { top: number; bottom: number; left: number; right: number };
+  };
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -373,6 +385,9 @@ export function resolveOverlayStyle(args: {
     // 1.4.0 — tramos del titular con énfasis. null ⇒ la ranura se dibuja como en 1.3.4 (un solo texto).
     parts?: null | Array<{ text: string; keyword: boolean }>;
     emphasis?: null | (EmphasisType & { color: string });
+    // 1.5.0 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el límite de área
+    // baja por ellos. Lo usa sólo `fitOverlayTextArea`; la escena no lo lee.
+    fitSmaller?: number[];
   }>;
   scrim: null | { mode: string; color: string; opacity: number; coveragePct: number };
   rule: null | { color: string; widthPct: number; thicknessPx: number; gapPct: number };
@@ -472,6 +487,8 @@ export function resolveOverlayStyle(args: {
       color: hexToRgba(String(pal.hex), 1),
       // Sin tramos, las dos claves no existen: la ranura es la de 1.3.4, clave por clave.
       ...(parts && emphasis ? { parts, emphasis } : {}),
+      fitSmaller: [...new Set(steps.map((x: any) => Number(x.size_pct)))]
+        .filter((x) => Number.isFinite(x) && x > 0 && x < fit.sizePct).sort((a, b) => b - a),
     };
   }
 
@@ -545,6 +562,23 @@ export function resolveOverlayStyle(args: {
     }
   }
 
+  // 1.5.0 — los requisitos de la plataforma, como dato del canal. Declarados mal ⇒ fail-loud, como el resto.
+  let maxTextAreaPct: number | null = null;
+  if (layoutTok.max_text_area_pct != null) {
+    const v = Number(layoutTok.max_text_area_pct);
+    if (!Number.isFinite(v) || v <= 0 || v > 100) missing.push(`layout.max_text_area_pct=${layoutTok.max_text_area_pct} (válido: 0 < x ≤ 100)`);
+    else maxTextAreaPct = v;
+  }
+  let safeZonePct: { top: number; bottom: number; left: number; right: number } | null = null;
+  if (layoutTok.safe_zone_pct != null) {
+    const z = layoutTok.safe_zone_pct as Record<string, unknown>;
+    const sides = ['top', 'bottom', 'left', 'right'] as const;
+    const vals = sides.map((k) => Number(isPlain(z) ? (z[k] ?? 0) : NaN));
+    if (!isPlain(z) || vals.some((v) => !Number.isFinite(v) || v < 0 || v >= 50)) {
+      missing.push(`layout.safe_zone_pct (objeto { top, bottom, left, right } con 0 ≤ x < 50; llegó ${JSON.stringify(layoutTok.safe_zone_pct)})`);
+    } else safeZonePct = { top: vals[0], bottom: vals[1], left: vals[2], right: vals[3] };
+  }
+
   if (missing.length) {
     throw new CompositorError(
       'COMPOSITOR_TOKENS_INCOMPLETE',
@@ -560,6 +594,8 @@ export function resolveOverlayStyle(args: {
       maxWidthPct: Number(layoutTok.max_width_pct),
       gapPct: Number(layoutTok.gap_pct ?? 2),
       align: (layoutTok.align ? String(layoutTok.align) : ANCHORS[anchor].align) as 'left' | 'center' | 'right',
+      ...(maxTextAreaPct != null ? { maxTextAreaPct } : {}),
+      ...(safeZonePct ? { safeZonePct } : {}),
     },
     slots,
     scrim,
@@ -627,6 +663,143 @@ export function resolveProductLayer(args: {
  * ancho es lo que fija cuántos caracteres entran por línea); la cobertura del velo, del ALTO. Un
  * mismo token rinde igual en 1:1 que en 9:16 sin una tabla por formato.
  */
+/**
+ * 1.5.0 — la caja donde vive el bloque de texto del overlay: los cuatro rellenos y el ancho máximo. PURO.
+ * Sin zona segura es la de siempre (margen uniforme y `max_width_pct`); con ella, cada borde toma el mayor
+ * entre el margen y el % que la interfaz de la plataforma tapa, y el ancho no pasa del hueco que queda.
+ */
+export function overlayTextBox(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number): {
+  safe: boolean; top: number; right: number; bottom: number; left: number; maxWidth: number;
+} {
+  const px = (pct: number, base: number) => Math.round((pct / 100) * base * 100) / 100;
+  const m = px(style.layout.marginPct, width);
+  const mw = px(style.layout.maxWidthPct, width);
+  const z = style.layout.safeZonePct;
+  if (!z) return { safe: false, top: m, right: m, bottom: m, left: m, maxWidth: mw };
+  const top = Math.max(m, px(z.top, height));
+  const bottom = Math.max(m, px(z.bottom, height));
+  const left = Math.max(m, px(z.left, width));
+  const right = Math.max(m, px(z.right, width));
+  return { safe: true, top, right, bottom, left, maxWidth: Math.min(mw, Math.round((width - left - right) * 100) / 100) };
+}
+
+// Ancho medio de glifo (en em) cuando no hay métricas de la fuente: la medición queda ESTIMADA y se dice.
+const AREA_FALLBACK_EM = 0.6;
+
+/**
+ * 1.5.0 — el tamaño del bloque de texto del overlay (titular, filete y bajada), con las MISMAS medidas que
+ * `buildOverlayScene`: tamaños en % del ancho, corte de línea voraz por palabras dentro de la caja, cada
+ * tramo con énfasis medido con su fuente y su tamaño, y cada línea tan alta como su letra más grande. PURO.
+ * Mide la caja de LÍNEAS (con su interlineado), que es un poco mayor que la de los glifos: el límite queda
+ * del lado seguro.
+ */
+export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): { width: number; height: number; areaPct: number; estimated: string[] } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const box = overlayTextBox(style, width, height);
+  const estimated: string[] = [];
+  const widthFn = (f: { family: string; weight: number; italic: boolean; transform: string; letterSpacingEm: number }, size: number) => {
+    const m = metrics?.[fitFontKey(f)] ?? null;
+    if (!m && !estimated.includes(f.family)) estimated.push(f.family);
+    const ls = r2(f.letterSpacingEm * size);
+    return (s: string) => {
+      const str = f.transform === 'uppercase' ? s.toUpperCase() : f.transform === 'lowercase' ? s.toLowerCase() : s;
+      let w = 0;
+      for (const ch of str) {
+        const cp = ch.codePointAt(0)!;
+        const em = m ? (m.advances.get(cp) ?? (cp === 0xa0 ? m.advances.get(0x20) : undefined) ?? m.avgEm) : AREA_FALLBACK_EM;
+        w += em * size + ls;
+      }
+      return w;
+    };
+  };
+  let maxLine = 0;
+  let total = 0;
+  const slotBlock = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>) => {
+    const size = r2((s.sizePct / 100) * width);
+    const base = widthFn(s, size);
+    const em = s.parts && s.emphasis ? s.emphasis : null;
+    const esize = em ? r2(size * em.sizeScale) : size;
+    const emw = em ? widthFn(em, esize) : base;
+    const atoms = s.parts && em ? headlineAtoms(s.parts) : headlineAtoms([{ text: s.text, keyword: false }]);
+    let cur = 0, lineMax = 0, h = 0;
+    for (const atom of atoms) {
+      const aw = atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0);
+      const ah = Math.max(...atom.map((p) => (p.keyword && em ? esize : size)));
+      if (cur > 0 && cur + aw > box.maxWidth + 0.01) { h += lineMax; maxLine = Math.max(maxLine, cur); cur = aw; lineMax = ah; }
+      else { cur += aw; lineMax = Math.max(lineMax, ah); }
+    }
+    maxLine = Math.max(maxLine, Math.min(cur, box.maxWidth));
+    return (h + lineMax) * s.lineHeight;
+  };
+  const hl = style.slots.headline;
+  if (hl) total += slotBlock(hl);
+  if (style.rule && hl) {
+    total += r2((style.rule.gapPct / 100) * width) + style.rule.thicknessPx;
+    maxLine = Math.max(maxLine, r2((style.rule.widthPct / 100) * width));
+  }
+  if (style.slots.subheadline) total += r2((style.layout.gapPct / 100) * width) + slotBlock(style.slots.subheadline);
+  const w = Math.min(maxLine, box.maxWidth);
+  return { width: r2(w), height: r2(total), areaPct: Math.round((10000 * w * total) / (width * height)) / 100, estimated };
+}
+
+/**
+ * 1.5.0 — el límite de área de la plataforma (`layout.max_text_area_pct`). PURO y determinista. Si el
+ * bloque cabe —o la marca no declara límite— devuelve EL MISMO estilo: la escena sale idéntica. Si no
+ * cabe, baja por los escalones del titular, luego por los de la bajada, luego quita la bajada; si aun así
+ * excede, compone al mínimo y lo marca. El texto nunca se recorta ni se reescribe.
+ */
+export function fitOverlayTextArea(args: {
+  style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
+  metrics?: Record<string, FontAdvance | null | undefined> | null;
+}): { style: ReturnType<typeof resolveOverlayStyle>; report: null | { limit_pct: number; area_pct_before: number; area_pct: number; adjusted: boolean; dropped_subheadline: boolean; exceeded: boolean; estimated_fonts: string[] } } {
+  const base = args.style;
+  const limit = base.layout.maxTextAreaPct;
+  if (limit == null || !base.slots.headline) return { style: base, report: null };
+  const first = measureOverlayText(base, args.width, args.height, args.metrics);
+  const est = first.estimated.length
+    ? [`OVERLAY_TEXT_AREA_ESTIMATED: sin métricas de ${first.estimated.join(', ')}; el área se estimó con un ancho medio genérico`] : [];
+  if (first.areaPct <= limit) {
+    return { style: est.length ? { ...base, markers: [...base.markers, ...est] } : base,
+      report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: first.areaPct, adjusted: false, dropped_subheadline: false, exceeded: false, estimated_fonts: first.estimated } };
+  }
+  type St = { h: number; s: number | null; drop: boolean };
+  const hl = base.slots.headline;
+  const sub = base.slots.subheadline;
+  const ladder: St[] = [];
+  let st: St = { h: hl.sizePct, s: sub ? sub.sizePct : null, drop: false };
+  for (const h of hl.fitSmaller ?? []) ladder.push(st = { ...st, h });
+  if (sub) for (const x of sub.fitSmaller ?? []) ladder.push(st = { ...st, s: x });
+  if (sub) ladder.push(st = { ...st, drop: true });
+  const apply = (x: St): ReturnType<typeof resolveOverlayStyle> => ({
+    ...base,
+    slots: {
+      headline: { ...hl, sizePct: x.h },
+      subheadline: !sub || x.drop ? null : { ...sub, sizePct: x.s ?? sub.sizePct },
+    },
+  });
+  let chosen: St | null = null;
+  let out = base;
+  let m = first;
+  for (const x of ladder) {
+    out = apply(x);
+    m = measureOverlayText(out, args.width, args.height, args.metrics);
+    if (m.areaPct <= limit) { chosen = x; break; }
+  }
+  const final = chosen ?? ladder[ladder.length - 1] ?? { h: hl.sizePct, s: sub ? sub.sizePct : null, drop: false };
+  if (!chosen) { out = apply(final); m = measureOverlayText(out, args.width, args.height, args.metrics); }
+  const markers = [...base.markers, ...est];
+  const what: string[] = [];
+  if (final.h !== hl.sizePct) what.push(`titular ${hl.sizePct}→${final.h} %`);
+  if (sub && final.s != null && final.s !== sub.sizePct && !final.drop) what.push(`bajada ${sub.sizePct}→${final.s} %`);
+  if (final.drop) what.push('sin bajada');
+  if (what.length) markers.push(`OVERLAY_TEXT_AREA_REDUCED: el texto ocupaba ${first.areaPct} % de la imagen (límite ${limit} %); ${what.join(' · ')} → ${m.areaPct} %`);
+  if (!chosen) markers.push(`OVERLAY_TEXT_AREA_EXCEEDED: ni al tamaño mínimo cabe en ${limit} % (queda en ${m.areaPct} %); se compone igual, el texto no se recorta`);
+  return { style: { ...out, markers },
+    report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: m.areaPct, adjusted: true, dropped_subheadline: !!(sub && final.drop), exceeded: !chosen, estimated_fonts: first.estimated } };
+}
+
 /**
  * 1.4.0 — los átomos del titular con énfasis, como nodos de satori. PURO. Un átomo es una palabra
  * (con su espacio duro al final, ver `headlineAtoms`); cada tramo enfatizado lleva su familia, peso,
@@ -754,6 +927,7 @@ export function buildOverlayScene(args: {
     });
   }
 
+  const box = overlayTextBox(style, width, height);
   const textChildren: Array<Record<string, any>> = [];
   const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => ({
     type: 'div',
@@ -815,7 +989,9 @@ export function buildOverlayScene(args: {
         position: 'absolute', top: 0, left: 0, width, height,
         display: 'flex', flexDirection: 'column',
         justifyContent: a.y, alignItems: a.x,
-        padding: px(style.layout.marginPct, width),
+        // 1.5.0 — con zona segura, cada borde lleva el mayor entre el margen y lo que la interfaz tapa.
+        ...(box.safe ? { paddingTop: box.top, paddingRight: box.right, paddingBottom: box.bottom, paddingLeft: box.left }
+          : { padding: px(style.layout.marginPct, width) }),
       },
       children: [{
         type: 'div',
@@ -823,7 +999,7 @@ export function buildOverlayScene(args: {
           style: {
             display: 'flex', flexDirection: 'column',
             alignItems: a.x,
-            maxWidth: px(style.layout.maxWidthPct, width),
+            maxWidth: box.maxWidth,
           },
           children: textChildren,
         },
@@ -1197,6 +1373,9 @@ export function resolveCarouselChrome(args: {
   // baja por ellos si el bloque central no cabe. `fitGuard` lo pone sólo `fitCarouselContent`.
   fitLadder: { headline: number[] };
   fitGuard?: boolean;
+  // 1.5.0 — el límite de área de la plataforma; sólo rige la PORTADA (las láminas interiores son
+  // tarjetas de texto por diseño, decisión de Sam del 2026-10-13). Ausente ⇒ sin límite.
+  maxTextAreaPct?: number;
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
@@ -1407,6 +1586,8 @@ export function resolveCarouselChrome(args: {
     subheadline: sub.trim() ? sub : null,
     swipeText, logo, fonts, warnings,
     fitLadder: { headline: headlineSmaller },
+    ...(Number.isFinite(Number((t.layout ?? {}).max_text_area_pct)) && Number(t.layout.max_text_area_pct) > 0
+      ? { maxTextAreaPct: Number(t.layout.max_text_area_pct) } : {}),
   };
 }
 
@@ -2119,6 +2300,91 @@ export function fitCarouselContent(args: { chrome: CarouselChrome; metrics?: Fit
       body_scale: final.body, steps_dropped: final.drop, overflow: !chosen, estimated_fonts: first.estimated },
   };
 }
+/**
+ * 1.5.0 — el área que ocupa el titular (y la bajada, si la lámina la lleva) de una lámina, con las mismas
+ * medidas que `measureCarouselLayout`. PURO. Caja de líneas: un poco mayor que la de los glifos.
+ */
+export function carouselTextArea(chrome: CarouselChrome, metrics: FitMetrics | null | undefined): { areaPct: number; estimated: string[] } {
+  const W = chrome.canvas.width;
+  const H = chrome.canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const T = chrome.type;
+  const inner = r2(W - 2 * r2((chrome.marginPct / 100) * W));
+  const estimated: string[] = [];
+  const widthFn = (k: { family: string; weight: number; italic: boolean; transform: string; letterSpacingEm: number }, size: number) => {
+    const m = metrics?.[fitFontKey(k)] ?? null;
+    if (!m && !estimated.includes(k.family)) estimated.push(k.family);
+    const ls = r2(k.letterSpacingEm * size);
+    return (s: string) => {
+      const str = k.transform === 'uppercase' ? s.toUpperCase() : k.transform === 'lowercase' ? s.toLowerCase() : s;
+      let w = 0;
+      for (const ch of str) {
+        const cp = ch.codePointAt(0)!;
+        w += (m ? (m.advances.get(cp) ?? (cp === 0xa0 ? m.advances.get(0x20) : undefined) ?? m.avgEm) : FIT_FALLBACK_EM) * size + ls;
+      }
+      return w;
+    };
+  };
+  let maxW = 0;
+  let total = 0;
+  if (chrome.headline.length) {
+    const hs = r2((T.headline.sizePct / 100) * W);
+    const HE = chrome.headlineEmphasis;
+    const es = HE ? r2(hs * HE.sizeScale) : hs;
+    const wOf = widthFn(T.headline, hs);
+    const eOf = HE ? widthFn(HE, es) : wOf;
+    let cur = 0, lineMax = 0, h = 0;
+    for (const atom of headlineAtoms(chrome.headline)) {
+      const aw = Math.ceil(atom.reduce((acc, p) => acc + (p.keyword && HE ? eOf(p.text) : wOf(p.text)), 0));
+      const ah = Math.max(...atom.map((p) => (p.keyword && HE ? es : hs)));
+      if (cur > 0 && cur + aw > inner + 0.01) { h += lineMax; maxW = Math.max(maxW, cur); cur = aw; lineMax = ah; }
+      else { cur += aw; lineMax = Math.max(lineMax, ah); }
+    }
+    maxW = Math.max(maxW, Math.min(cur, inner));
+    total += (h + lineMax) * T.headline.lineHeight;
+  }
+  if (chrome.subheadline) {
+    const B = r2((T.body.sizePct / 100) * W);
+    const bOf = widthFn(T.body, B);
+    let cur = 0, n = chrome.subheadline.split(/\s+/).filter(Boolean).length ? 1 : 0;
+    for (const word of chrome.subheadline.split(/\s+/).filter(Boolean)) {
+      const ww = bOf(word);
+      if (cur > 0 && cur + bOf(' ') + ww > inner + 0.01) { n++; maxW = Math.max(maxW, cur); cur = ww; } else cur = cur > 0 ? cur + bOf(' ') + ww : ww;
+    }
+    maxW = Math.max(maxW, Math.min(cur, inner));
+    total += r2(B * 0.69) + n * B * T.body.lineHeight;
+  }
+  return { areaPct: Math.round((10000 * Math.min(maxW, inner) * total) / (W * H)) / 100, estimated };
+}
+
+/**
+ * 1.5.0 — el límite de área en la PORTADA del carrusel. PURO. Si la lámina no es portada, la marca no
+ * declara límite o ya cabe, devuelve EL MISMO cromo. Si no cabe, baja el titular por sus escalones; si ni
+ * al mínimo cabe, lo dice. No toca el texto.
+ */
+export function fitCarouselCoverArea(args: { chrome: CarouselChrome; metrics?: FitMetrics | null }): {
+  chrome: CarouselChrome; warnings: string[]; report: null | { limit_pct: number; area_pct_before: number; area_pct: number; exceeded: boolean };
+} {
+  const c = args.chrome;
+  const limit = c.maxTextAreaPct;
+  if (limit == null || c.slide.role !== 'cover' || !c.headline.length) return { chrome: c, warnings: [], report: null };
+  const first = carouselTextArea(c, args.metrics);
+  if (first.areaPct <= limit) return { chrome: c, warnings: [], report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: first.areaPct, exceeded: false } };
+  let out = c;
+  let m = first;
+  for (const h of c.fitLadder.headline) {
+    out = { ...c, type: { ...c.type, headline: { ...c.type.headline, sizePct: h } },
+      fitLadder: { headline: c.fitLadder.headline.filter((x) => x < h) } };
+    m = carouselTextArea(out, args.metrics);
+    if (m.areaPct <= limit) break;
+  }
+  const warnings: string[] = [];
+  if (out.type.headline.sizePct !== c.type.headline.sizePct) {
+    warnings.push(`CAROUSEL_TEXT_AREA_REDUCED: la portada ocupaba ${first.areaPct} % (límite ${limit} %); titular ${c.type.headline.sizePct}→${out.type.headline.sizePct} % → ${m.areaPct} %`);
+  }
+  if (m.areaPct > limit) warnings.push(`CAROUSEL_TEXT_AREA_EXCEEDED: ni al tamaño mínimo cabe en ${limit} % (queda en ${m.areaPct} %); se compone igual`);
+  return { chrome: out, warnings, report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: m.areaPct, exceeded: m.areaPct > limit } };
+}
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -2346,7 +2612,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // 1.3.3 — el ajuste vertical se mide con las MISMAS fuentes que recibe satori (ya sin kerning).
       const metrics: Record<string, FontAdvance | null> = {};
       chrome.fonts.forEach((f, k) => { metrics[fitFontKey(f)] = fontAdvanceMetrics(fonts[k].data); });
-      const fit = fitCarouselContent({ chrome, metrics });
+      // 1.5.0 — primero el límite de área de la plataforma (sólo portada), después el ajuste vertical.
+      const area = fitCarouselCoverArea({ chrome, metrics });
+      warnings.push(...area.warnings);
+      const fit = fitCarouselContent({ chrome: area.chrome, metrics });
       warnings.push(...fit.warnings);
       const scene = buildCarouselScene({ chrome: fit.chrome, style, backgroundSrc });
       const { width, height } = chrome.canvas;
@@ -2397,6 +2666,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
               : null,
             // 1.3.3 — qué hizo el ajuste vertical: sin esto no se puede auditar una lámina reducida.
             fit: fit.report,
+            // 1.5.0 — el límite de área de la portada, si rigió.
+            ...(area.report ? { text_area: area.report } : {}),
           },
         },
         duration_ms: Date.now() - t0,
@@ -2454,8 +2725,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
     }
 
+    // 1.5.0 — el límite de área de la plataforma, medido con las MISMAS fuentes que recibe satori.
+    const areaMetrics: Record<string, FontAdvance | null> = {};
+    for (const f of fonts) {
+      const slotStyle = (f.slot as string) === 'headline:emphasis' ? style.slots.headline?.emphasis : style.slots[f.slot as Slot];
+      if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
+    }
+    const areaFit = fitOverlayTextArea({ style, width: dims.width, height: dims.height, metrics: areaMetrics });
+    const finalStyle = areaFit.style;
+
     const scene = buildOverlayScene({
-      style, width: dims.width, height: dims.height,
+      style: finalStyle, width: dims.width, height: dims.height,
       backgroundSrc: `data:${dims.mime};base64,${b64(cleanBytes)}`,
       products: productImgs, productLayer: prodPick.layer,
     });
@@ -2472,7 +2752,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       `fuentes=${fonts.map((f) => `${f.slot}:${f.name}@${f.weight}`).join(', ') || '∅ (sello sin titular)'} ` +
       `identidad=${style.identity ? style.identity.mode : 'ninguna'} ` +
       `producto=${productImgs.length ? `${productImgs.length}@${prodPick.layer!.anchor}` : 'ninguno'} ` +
-      `markers=${style.markers.length} ${Date.now() - t0}ms`,
+      `markers=${finalStyle.markers.length} ${Date.now() - t0}ms`,
     );
 
     res.status(200).json({
@@ -2496,13 +2776,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       product_layer: prodPick.layer && productImgs.length
         ? { anchor: prodPick.layer.anchor, height_pct: prodPick.layer.heightPct, items: productImgs.map((p) => p.name ?? null) }
         : null,
-      markers: style.markers,
+      markers: finalStyle.markers,
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
       // 1.4.0 — `emphasis` viaja sólo si la petición lo trajo: sin él, el eco es el de 1.3.4.
-      text: { headline, subheadline, ...(emphasisIn.length ? { emphasis: emphasisIn } : {}) },
+      // 1.5.0 — si el límite de área retiró la bajada, el eco lo dice: lo compuesto ya no la lleva.
+      text: { headline, subheadline: finalStyle.slots.subheadline ? subheadline : (style.slots.subheadline ? null : subheadline),
+        ...(emphasisIn.length ? { emphasis: emphasisIn } : {}) },
       // F3 — la forma de 1.2.0 se mantiene; sólo se suma `meta`.
       meta: {
         carousel_applied: false, warnings,
+        ...(areaFit.report ? { text_area: areaFit.report } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),

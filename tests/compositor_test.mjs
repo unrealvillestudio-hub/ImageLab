@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.equal(M.COMPOSITOR_VERSION, '1.4.0');
+  assert.ok(['1.4.0', '1.5.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1252,6 +1252,105 @@ test('1.4.0 · carrusel: el ajuste vertical mide el tramo agrandado con su fuent
   assert.ok(con.mid > sin.mid, `el bloque con el tramo al doble es más alto (${con.mid} > ${sin.mid})`);
   assert.throws(() => chromeN1(c, { headline: H_EM }, { carousel: { typography: { headline: { emphasis: { role: 'no_existe' } } } } }),
     (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /carousel\.typography\.headline\.emphasis\.role/.test(e.message));
+});
+
+
+console.log('\n── 1.5.0 · EL TEXTO RESPETA A LA PLATAFORMA: área máxima y zona segura, como dato ──');
+const LARGO15 = { headline: 'La cuota extraordinaria no se vota a mano alzada y el acta que diga lo contrario no vale nada', subheadline: 'Lo que dice el reglamento, sin adornos, y lo que el administrador no le va a contar.' };
+const N1_STEPS = { typography: {
+  headline: { fit_steps: [{ max_chars: 200, size_pct: 9 }, { max_chars: 300, size_pct: 7 }, { max_chars: 400, size_pct: 5 }] },
+  subheadline: { fit_steps: [{ max_chars: 200, size_pct: 4 }, { max_chars: 400, size_pct: 3 }] } } };
+
+test('1.5.0 · sin los tokens nuevos la caja es la de siempre y la escena no cambia', () => {
+  const st = styleN1(TXT);
+  assert.ok(!('maxTextAreaPct' in st.layout) && !('safeZonePct' in st.layout), 'el layout no gana claves');
+  const b = M.overlayTextBox(st, 1000, 1250);
+  assert.deepEqual(b, { safe: false, top: 60, right: 60, bottom: 60, left: 60, maxWidth: 800 });
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1250, metrics: null });
+  assert.equal(r.style, st, 'sin límite: el MISMO objeto');
+  assert.equal(r.report, null);
+});
+
+test('1.5.0 · zona segura: cada borde toma el mayor entre el margen y lo que tapa la interfaz', () => {
+  const st = styleN1(TXT, { layout: { safe_zone_pct: { top: 14, bottom: 37, left: 3, right: 22 } } });
+  const b = M.overlayTextBox(st, 1000, 1800);
+  assert.deepEqual(b, { safe: true, top: 252, right: 220, bottom: 666, left: 60, maxWidth: 720 });
+  const scene = M.buildOverlayScene({ style: st, width: 1000, height: 1800, backgroundSrc: 'data:image/png;base64,AA' });
+  const capa = findAll(scene, (n) => n.props?.style?.paddingBottom != null)[0];
+  assert.deepEqual([capa.props.style.paddingTop, capa.props.style.paddingRight, capa.props.style.paddingBottom, capa.props.style.paddingLeft], [252, 220, 666, 60]);
+  assert.ok(!('padding' in capa.props.style), 'con zona segura no hay padding uniforme');
+  assert.equal(findAll(scene, (n) => n.props?.style?.maxWidth != null)[0].props.style.maxWidth, 720, 'el ancho no pasa del hueco');
+});
+
+test('1.5.0 · tokens mal escritos → fail-loud nombrando', () => {
+  for (const [over, re] of [
+    [{ layout: { max_text_area_pct: 0 } }, /layout\.max_text_area_pct=0/],
+    [{ layout: { max_text_area_pct: 'mucho' } }, /layout\.max_text_area_pct=mucho/],
+    [{ layout: { safe_zone_pct: { top: 60 } } }, /layout\.safe_zone_pct/],
+    [{ layout: { safe_zone_pct: 'arriba' } }, /layout\.safe_zone_pct/],
+  ]) {
+    assert.throws(() => styleN1(TXT, over), (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && re.test(e.message), JSON.stringify(over));
+  }
+});
+
+test('1.5.0 · la medición crece con el tamaño y con la bajada, y dice cuando estima', () => {
+  const st = styleN1(LARGO15, N1_STEPS);
+  const a = M.measureOverlayText(st, 1000, 1000, null);
+  const chico = M.measureOverlayText({ ...st, slots: { ...st.slots, headline: { ...st.slots.headline, sizePct: 5 } } }, 1000, 1000, null);
+  const sinBajada = M.measureOverlayText({ ...st, slots: { ...st.slots, subheadline: null } }, 1000, 1000, null);
+  assert.ok(chico.areaPct < a.areaPct && sinBajada.areaPct < a.areaPct, `${chico.areaPct} y ${sinBajada.areaPct} < ${a.areaPct}`);
+  assert.ok(a.width <= M.overlayTextBox(st, 1000, 1000).maxWidth, 'el bloque no pasa de la caja');
+  assert.deepEqual(a.estimated, ['Fuente Titular', 'Fuente Texto'], 'sin métricas, se dice');
+});
+
+test('1.5.0 · límite de área: baja el titular, luego la bajada, luego la quita; el texto no cambia', () => {
+  const st = styleN1(LARGO15, M.deepMergeTokens(N1_STEPS, { layout: { max_text_area_pct: 20 } }));
+  const antes = M.measureOverlayText(st, 1000, 1000, null).areaPct;
+  assert.ok(antes > 20, `el caso excede (${antes} %)`);
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1000, metrics: null });
+  assert.ok(r.report.adjusted && r.report.area_pct <= 20, `queda en ${r.report.area_pct} %`);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_REDUCED')));
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_ESTIMATED')), 'sin métricas, el marcador lo dice');
+  assert.equal(r.style.slots.headline.text, LARGO15.headline, 'el titular es el mismo, carácter por carácter');
+  if (r.style.slots.subheadline) assert.equal(r.style.slots.subheadline.text, LARGO15.subheadline);
+  assert.ok(r.style.slots.headline.sizePct < st.slots.headline.sizePct);
+});
+
+test('1.5.0 · si ni al mínimo cabe: sin bajada, al tamaño mínimo y con marcador; se compone igual', () => {
+  const st = styleN1(LARGO15, M.deepMergeTokens(N1_STEPS, { layout: { max_text_area_pct: 1 } }));
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1000, metrics: null });
+  assert.equal(r.style.slots.subheadline, null, 'se retiró la bajada');
+  assert.equal(r.style.slots.headline.sizePct, 5, 'el escalón más chico');
+  assert.ok(r.report.exceeded && r.report.dropped_subheadline);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_EXCEEDED')));
+});
+
+test('1.5.0 · el límite cuenta el tramo agrandado del énfasis', () => {
+  const tok = M.deepMergeTokens(M.deepMergeTokens(N1_STEPS, EM_TOK), { typography: { headline: { emphasis: { size_scale: 2 } } } });
+  const plano = M.measureOverlayText(styleN1({ headline: H_EM }, tok), 1000, 1000, null).areaPct;
+  const con = M.measureOverlayText(styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria'] }, tok), 1000, 1000, null).areaPct;
+  assert.ok(con > plano, `${con} > ${plano}`);
+});
+
+test('1.5.0 · carrusel: el límite rige SÓLO la portada', () => {
+  const lim = { layout: { max_text_area_pct: 5 } };
+  const CORTO = 'El trigo no se vende a mano alzada';
+  const portada = chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: CORTO }, lim);
+  assert.equal(portada.maxTextAreaPct, 5);
+  const r = M.fitCarouselCoverArea({ chrome: portada, metrics: null });
+  assert.ok(r.report && r.report.area_pct < r.report.area_pct_before, 'la portada baja');
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_REDUCED')));
+  assert.equal(r.chrome.headline.map((p) => p.text).join(''), CORTO, 'el texto no cambia');
+  const yaMinima = M.fitCarouselCoverArea({ chrome: chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: LARGO15.headline }, lim), metrics: null });
+  assert.ok(!yaMinima.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_REDUCED')), 'sin escalón más chico no dice «reducido»');
+  assert.ok(yaMinima.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_EXCEEDED')), 'pero sí que excede');
+  const interior = chromeN1({ index: 3, total: 5, role: 'body' }, { headline: LARGO15.headline }, lim);
+  const ri = M.fitCarouselCoverArea({ chrome: interior, metrics: null });
+  assert.equal(ri.chrome, interior, 'lámina interior: el mismo cromo');
+  assert.equal(ri.report, null);
+  const sinLimite = chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: LARGO15.headline });
+  assert.ok(!('maxTextAreaPct' in sinLimite), 'sin el token, el cromo no gana claves');
+  assert.equal(M.fitCarouselCoverArea({ chrome: sinLimite, metrics: null }).chrome, sinLimite);
 });
 
 console.log(`\n${'─'.repeat(72)}`);

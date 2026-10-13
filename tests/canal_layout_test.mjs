@@ -177,6 +177,25 @@ await ok('dos personas con escena: la cláusula de escena, no el plural ceñido;
   const ed = (await go('BLOG_INLINE', { ...FORMAS.editar, prompt_only: true }, dbCon(ACTIVA('BLOG_INLINE')))).json.prompt_full;
   assert.ok(!ed.includes(M.SCENE_FRAMING_CLAUSE) && !ed.includes(CENIDO) && !ed.includes(TEXTO));
 });
+await ok('1.5.0 · capas globales: global < global de canal < marca, como el compositor; sin globales, el mismo objeto', () => {
+  const marca = { layout: { anchor: 'bottom_left', text_zone_pct: 40 } };
+  assert.equal(M.withGlobalLayers(null, null, marca), marca, 'sin globales: el mismo objeto');
+  const g = { layout: { max_text_area_pct: 20 } };
+  const gc = { layout: { safe_zone_pct: { top: 14, bottom: 37, left: 6, right: 22 }, text_zone_pct: 25 } };
+  const t = M.withGlobalLayers(g, gc, marca);
+  assert.deepEqual(t.layout, { max_text_area_pct: 20, safe_zone_pct: { top: 14, bottom: 37, left: 6, right: 22 }, text_zone_pct: 40, anchor: 'bottom_left' }, 'la marca gana clave a clave');
+  const rows = [{ id: 'a', brand_id: null, canal: null, active: true, tokens: g }, { id: 'b', brand_id: null, canal: 'VERTICAL', active: true, tokens: gc }, { id: 'c', brand_id: 'X', canal: null, active: true, tokens: marca }];
+  assert.deepEqual(t, K.pickOverlayTokens(rows, 'X', 'VERTICAL').tokens, 'mismo resultado que el compositor');
+  assert.deepEqual(M.withGlobalLayers(null, gc, null).layout.text_zone_pct, 25, 'sin fila de marca, la global vale sola');
+});
+await ok('1.5.0 · franja con zona segura: la foto deja libre la interfaz MÁS el texto; tope 70; sin zona, la de siempre', () => {
+  const base = { anchor: 'bottom_left', text_zone_pct: 25 };
+  assert.ok(M.textZoneClause(base).startsWith('The lower 25%'), 'sin zona segura, como siempre');
+  assert.ok(M.textZoneClause({ ...base, safe_zone_pct: { top: 14, bottom: 37, left: 6, right: 22 } }).startsWith('The lower 62%'));
+  assert.ok(M.textZoneClause({ anchor: 'top_left', text_zone_pct: 25, safe_zone_pct: { top: 14, bottom: 37 } }).startsWith('The upper 39%'), 'arriba suma el borde de arriba');
+  assert.ok(M.textZoneClause({ anchor: 'bottom_left', text_zone_pct: 40, safe_zone_pct: { bottom: 37 } }).startsWith('The lower 70%'), 'tope 70');
+  assert.equal(M.textZoneClause({ anchor: 'bottom_left', safe_zone_pct: { bottom: 37 } }), '', 'sin franja declarada, la zona segura sola no inventa una');
+});
 await ok('fila de canal sin fila de marca: vale sola', async () => {
   const db = { ...GOLDEN_DBS.sin_filas, imagelab_overlay_tokens: GOLDEN_DBS.sin_filas.imagelab_overlay_tokens };
   const solo = { ...db, imagelab_overlay_tokens: (q) => (q.get('canal') === 'eq.BLOG_INLINE' ? [{ canal: 'BLOG_INLINE', tokens: { layout: { subject_framing: 'scene' } } }] : []) };
@@ -189,7 +208,10 @@ await ok('la consulta de la fila de marca es la de siempre y la del canal pide a
   const q = r.fetched.filter((u) => u.includes('/imagelab_overlay_tokens?'));
   assert.ok(q.some((u) => u.endsWith('imagelab_overlay_tokens?brand_id=eq.TallerBarroNegro&canal=is.null&select=tokens')));
   assert.ok(q.some((u) => u.endsWith('imagelab_overlay_tokens?brand_id=eq.TallerBarroNegro&canal=eq.BLOG_INLINE&active=is.true&select=canal,tokens&limit=1')));
-  assert.equal(q.length, 2);
+  // 1.5.0 (2026-10-13) — más las dos capas GLOBALES, como las lee el compositor: global y global de canal.
+  assert.ok(q.some((u) => u.endsWith('imagelab_overlay_tokens?brand_id=is.null&canal=is.null&active=is.true&select=tokens&limit=1')));
+  assert.ok(q.some((u) => u.endsWith('imagelab_overlay_tokens?brand_id=is.null&canal=eq.BLOG_INLINE&active=is.true&select=tokens&limit=1')));
+  assert.equal(q.length, 4);
 });
 
 // ── 4 · multimarca y voseo ──────────────────────────────────────────────────────────────────────
