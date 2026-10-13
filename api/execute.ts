@@ -389,11 +389,14 @@ async function fetchImageInline(url: string): Promise<InlineImage> {
 async function loadOverlayTokens(brandId: string | undefined, canal: string): Promise<{ tokens: any | null; canal: string | null; declared: string[] }> {
   if (!brandId) return { tokens: null, canal: null, declared: [] };
   const b = encodeURIComponent(brandId);
-  const [row, canalRow] = await Promise.all([
+  const [row, canalRow, globalRow, globalCanalRow] = await Promise.all([
     sb<any>(`imagelab_overlay_tokens?brand_id=eq.${b}&canal=is.null&select=tokens`),
     canal ? sb<any>(`imagelab_overlay_tokens?brand_id=eq.${b}&canal=eq.${encodeURIComponent(canal)}&active=is.true&select=canal,tokens&limit=1`) : null,
+    // 1.5.0 — las capas globales, como las lee el compositor (`pickOverlayTokens`).
+    sb<any>(`imagelab_overlay_tokens?brand_id=is.null&canal=is.null&active=is.true&select=tokens&limit=1`),
+    canal ? sb<any>(`imagelab_overlay_tokens?brand_id=is.null&canal=eq.${encodeURIComponent(canal)}&active=is.true&select=tokens&limit=1`) : null,
   ]);
-  return overlayTokensForCanal(row?.tokens ?? null, canalRow, canal);
+  return overlayTokensForCanal(withGlobalLayers(globalRow?.tokens ?? null, globalCanalRow?.tokens ?? null, row?.tokens ?? null), canalRow, canal);
 }
 
 // Los topes de fotos de referencia (persona, locación, producto) viven en el bloque PB desde el
@@ -1057,11 +1060,18 @@ export const LIGHTING_COHERENCE_CLAUSE =
  *  dejaba el envase o la cara justo ahí. La franja es DATO (`layout.text_zone_pct` + `layout.anchor`):
  *  sin ella no hay cláusula. Cláusula del EJE: no nombra marca ni canal. */
 export function textZoneClause(layout: any, opts: { productStaging?: ProductStaging | null } = {}): string {
-  const pct = Number(layout?.text_zone_pct);
+  const declared = Number(layout?.text_zone_pct);
   const anchor = String(layout?.anchor ?? '');
-  if (!Number.isFinite(pct) || pct < 10 || pct > 70) return '';
+  if (!Number.isFinite(declared) || declared < 10 || declared > 70) return '';
   const side = anchor.startsWith('bottom') ? 'lower' : anchor.startsWith('top') ? 'upper' : '';
   if (!side) return '';
+  // 1.5.0 del compositor (Sam, 2026-10-13: el texto respeta a la plataforma) — con zona segura
+  // (`layout.safe_zone_pct`, lo que la interfaz de la plataforma tapa) el compositor sube el texto por
+  // encima de ella; la franja que la foto deja libre es entonces la de la interfaz MÁS la del texto. Tope
+  // 70, el mismo del dato. Sin zona segura, el porcentaje de siempre.
+  const z = layout?.safe_zone_pct;
+  const extra = z && typeof z === 'object' ? Number(side === 'lower' ? z.bottom : z.top) : 0;
+  const pct = Number.isFinite(extra) && extra > 0 ? Math.min(70, declared + extra) : declared;
   const other = side === 'lower' ? 'upper' : 'lower';
   // Medido el 2026-09-28: con sólo el porcentaje, el modelo siguió poniendo el envase a la altura de
   // la cintura, justo debajo del titular. Una instrucción de CUERPO (a qué altura se sostiene) se
@@ -1500,6 +1510,17 @@ export function overlayTokensForCanal(brandTokens: any | null, canalRow: any | n
   if (!want || got !== want || t == null || typeof t !== 'object' || Array.isArray(t)) return { tokens: brandTokens, canal: null, declared: [] };
   const lay = t.layout != null && typeof t.layout === 'object' ? t.layout : {};
   return { tokens: mergeTokenLayers(brandTokens, t), canal: want, declared: GENERATOR_LAYOUT_KEYS.filter((k) => k in lay) };
+}
+
+/** 1.5.0 (2026-10-13) — las capas GLOBALES (`brand_id` NULL) debajo de la de marca, en el orden del
+ *  compositor: global < global de canal < marca. Así el generador lee lo mismo que compone el compositor
+ *  (la zona segura de una plataforma es del canal, no de una marca). Sin capas globales devuelve EL MISMO
+ *  objeto de marca: nada cambia. */
+export function withGlobalLayers(globalTokens: any | null, globalCanalTokens: any | null, brandTokens: any | null): any | null {
+  const plain = (v: any) => v != null && typeof v === 'object' && !Array.isArray(v);
+  if (!plain(globalTokens) && !plain(globalCanalTokens)) return brandTokens;
+  return mergeTokenLayers(mergeTokenLayers(plain(globalTokens) ? globalTokens : {}, plain(globalCanalTokens) ? globalCanalTokens : {}),
+    plain(brandTokens) ? brandTokens : {});
 }
 
 /** El vocabulario del encuadre. `tight` es el de siempre. */

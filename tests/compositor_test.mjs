@@ -1081,6 +1081,278 @@ test('1.3.4 · función de color inexistente → fail-loud como los demás color
   assert.equal(conAlfa.textEffect.color, 'rgba(59, 42, 30, 0.8)');
 });
 
+
+console.log('\n── 1.4.0 · ÉNFASIS POR PALABRA en el titular ──');
+
+// La marca N+1 declara su énfasis con SUS roles: otra familia, más chica de peso, itálica, en
+// mayúsculas, un 30 % más grande y en el color 'trigo'. Ningún nombre de esto vive en el motor.
+const EM_TOK = { typography: { headline: { emphasis: { role: 'texto', weight: 400, italic: true, transform: 'uppercase', size_scale: 1.3 } } },
+  palette: { headline_emphasis: 'trigo' } };
+const H_EM = 'La cuota extraordinaria no se vota a mano alzada';
+const styleN1 = (text, over = {}) => M.resolveOverlayStyle({ tokens: M.deepMergeTokens(N1_BASE, over), typography: N1_TYPO, palette: N1_PAL, text });
+const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1250, backgroundSrc: 'data:image/png;base64,AA' });
+const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
+
+test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
+  assert.ok(['1.4.0', '1.5.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+});
+
+test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
+  assert.deepEqual(M.parseEmphasisRequest(undefined), []);
+  assert.deepEqual(M.parseEmphasisRequest(null), []);
+  assert.deepEqual(M.parseEmphasisRequest(['cuota', 'cuota', 'mano alzada']), ['cuota', 'mano alzada'], 'duplicados fuera, orden conservado');
+  for (const bad of ['cuota', [1], [''], ['  '], ['a', 'b', 'c', 'd'], ['x'.repeat(61)], { 0: 'cuota' }]) {
+    assert.throws(() => M.parseEmphasisRequest(bad), (e) => e.label === 'COMPOSITOR_EMPHASIS_INVALID' && e.status === 400, JSON.stringify(bad));
+  }
+});
+
+test('1.4.0 · splitEmphasis: varios tramos, el primero gana si se solapan, los ausentes se dicen', () => {
+  const r = M.splitEmphasis(H_EM, ['cuota extraordinaria', 'cuota', 'mano alzada', 'asamblea']);
+  assert.deepEqual(r.found, ['cuota extraordinaria', 'mano alzada']);
+  assert.deepEqual(r.missing, ['cuota', 'asamblea'], '«cuota» se solapa con un tramo anterior y no tiene otra aparición');
+  assert.equal(r.parts.map((p) => p.text).join(''), H_EM, 'el texto visible es el mismo, carácter por carácter');
+  assert.deepEqual(r.parts.filter((p) => p.keyword).map((p) => p.text), ['cuota extraordinaria', 'mano alzada']);
+  // Una segunda aparición libre se toma si la primera está ocupada.
+  const r2 = M.splitEmphasis('la cuota y la cuota', ['la cuota', 'cuota']);
+  assert.deepEqual(r2.parts, [{ text: 'la cuota', keyword: true }, { text: ' y la ', keyword: false }, { text: 'cuota', keyword: true }]);
+});
+
+test('1.4.0 · con un solo término, splitEmphasis da lo mismo que splitKeyword (1.3.4)', () => {
+  for (const [h, k] of [[H_EM, 'cuota'], [H_EM, 'alzada'], [H_EM, 'La'], [H_EM, 'nada'], [H_EM, null], ['', 'x'], ['SAME GOAL. BROKEN.', 'BROKEN']]) {
+    const a = M.splitKeyword(h, k);
+    const b = M.splitEmphasis(h, [k]);
+    assert.deepEqual(b.parts, a.parts, `${h} / ${k}`);
+    assert.equal(b.found.length > 0, a.found);
+  }
+});
+
+test('1.4.0 · sin token de énfasis en la marca: marcador, y la escena es la de 1.3.4', () => {
+  const sin = styleN1({ headline: H_EM });
+  const con = styleN1({ headline: H_EM, emphasis: ['cuota'] });
+  assert.ok(con.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_NOT_DECLARED')));
+  assert.ok(!('parts' in con.slots.headline) && !('emphasis' in con.slots.headline), 'la ranura no gana claves');
+  assert.equal(JSON.stringify(overlayN1(con)), JSON.stringify(overlayN1(sin)));
+});
+
+test('1.4.0 · token declarado y pieza sin tramos: la escena es la de 1.3.4, clave por clave', () => {
+  const sin = styleN1({ headline: H_EM });
+  const tokSinTramos = styleN1({ headline: H_EM }, EM_TOK);
+  assert.equal(JSON.stringify(overlayN1(tokSinTramos)), JSON.stringify(overlayN1(sin)));
+  assert.deepEqual(tokSinTramos.markers, sin.markers);
+});
+
+test('1.4.0 · con token y tramos: cada tramo con la familia, peso, estilo, tamaño, mayúsculas y color de la marca', () => {
+  const st = styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria', 'mano alzada'] }, EM_TOK);
+  const h = st.slots.headline;
+  assert.equal(h.text, H_EM);
+  assert.equal(h.parts.map((p) => p.text).join(''), H_EM);
+  assert.equal(h.emphasis.family, 'Fuente Texto');
+  assert.equal(h.emphasis.color, 'rgb(217, 164, 65)', "palette.headline_emphasis → rol 'trigo'");
+  const scene = overlayN1(st);
+  const spans = findAll(scene, (n) => n.type === 'span');
+  const enf = spans.filter((n) => n.props.style.fontFamily);
+  assert.deepEqual(enf.map((n) => n.props.children.replace(/ /g, ' ').trim()), ['cuota', 'extraordinaria', 'mano', 'alzada']);
+  const size = Math.round((h.sizePct * 1.3 / 100) * 1000 * 100) / 100;
+  for (const n of enf) {
+    assert.deepEqual(n.props.style, { fontFamily: 'Fuente Texto', fontWeight: 400, fontStyle: 'italic', fontSize: size,
+      letterSpacing: 0, textTransform: 'uppercase', color: 'rgb(217, 164, 65)' });
+  }
+  for (const n of spans.filter((x) => !x.props.style.fontFamily)) assert.deepEqual(n.props.style, {}, 'lo demás hereda del titular');
+  assert.equal(spanTexts(scene).join('').replace(/ /g, ' '), H_EM, 'el texto visible es el mismo carácter por carácter');
+  const slotDiv = findAll(scene, (n) => n.props?.style?.flexWrap === 'wrap')[0];
+  assert.equal(slotDiv.props.style.alignItems, 'baseline', 'tamaños distintos alineados por la línea de base');
+  assert.equal(slotDiv.props.style.fontFamily, 'Fuente Titular', 'la base del titular sigue siendo la suya');
+});
+
+test('1.4.0 · lo que el token no declara se hereda del titular', () => {
+  const st = styleN1({ headline: H_EM, emphasis: ['cuota'] }, { typography: { headline: { emphasis: { size_scale: 1.2 } } } });
+  const e = st.slots.headline.emphasis;
+  assert.equal(e.family, 'Fuente Titular');
+  assert.equal(e.weight, 700);
+  assert.equal(e.italic, false);
+  assert.equal(e.color, 'rgb(244, 239, 230)', 'sin palette.headline_emphasis, el color del titular');
+});
+
+test('1.4.0 · un tramo que no está literal se dice y no se resalta; los demás sí', () => {
+  const st = styleN1({ headline: H_EM, emphasis: ['Cuota', 'mano alzada'] }, EM_TOK);
+  assert.ok(st.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_NOT_IN_HEADLINE') && m.includes('«Cuota»')), 'literal: sin normalizar mayúsculas');
+  assert.deepEqual(st.slots.headline.parts.filter((p) => p.keyword).map((p) => p.text), ['mano alzada']);
+  const ninguno = styleN1({ headline: H_EM, emphasis: ['asamblea'] }, EM_TOK);
+  assert.ok(!('parts' in ninguno.slots.headline), 'ningún tramo encontrado ⇒ ranura de 1.3.4');
+});
+
+test('1.4.0 · token mal escrito → fail-loud nombrando, aunque la pieza no traiga tramos', () => {
+  for (const [over, re] of [
+    [{ typography: { headline: { emphasis: { role: 'no_existe' } } } }, /brand_typography\.role='no_existe' \(pedido por typography\.headline\.emphasis\.role\)/],
+    [{ typography: { headline: { emphasis: { size_scale: 4 } } } }, /typography\.headline\.emphasis\.size_scale=4/],
+    [{ typography: { headline: { emphasis: { size_scale: 'x' } } } }, /typography\.headline\.emphasis\.size_scale=x/],
+    [{ ...EM_TOK, palette: { headline_emphasis: 'no_existe' } }, /brand_palette\.role='no_existe' \(pedido por palette\.headline_emphasis\)/],
+  ]) {
+    assert.throws(() => styleN1({ headline: H_EM, emphasis: ['cuota'] }, over), (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && re.test(e.message), JSON.stringify(over));
+  }
+  assert.throws(() => styleN1({ headline: H_EM }, { typography: { headline: { emphasis: { role: 'no_existe' } } } }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE');
+});
+
+test('1.4.0 · la escalera de tamaños cuenta el tramo agrandado: un titular que cabía puede bajar un escalón', () => {
+  const steps = { typography: { headline: { fit_steps: [{ max_chars: 50, size_pct: 9 }, { max_chars: 90, size_pct: 7 }] } } };
+  const plano = styleN1({ headline: H_EM }, steps);
+  assert.equal(plano.slots.headline.sizePct, 9, `${H_EM.length} caracteres caben en el primer escalón`);
+  const grande = styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria'] },
+    M.deepMergeTokens(steps, { typography: { headline: { emphasis: { size_scale: 1.5 } } } }));
+  assert.equal(M.emphasisEffectiveLength(grande.slots.headline.parts, 1.5), 58);
+  assert.equal(grande.slots.headline.sizePct, 7);
+});
+
+const EM_CAR = { carousel: { typography: { headline: { emphasis: { role: 'texto', weight: 400, italic: true, transform: 'uppercase', size_scale: 1.25 } } } } };
+
+test('1.4.0 · carrusel sin token de énfasis ni tramos: el cromo es el de 1.3.4', () => {
+  const a = chromeN1({ index: 2, total: 5, role: 'body', keyword: 'cuota' }, { headline: H_EM });
+  assert.equal(a.headlineEmphasis, null);
+  assert.deepEqual(a.headline, M.splitKeyword(H_EM, 'cuota').parts);
+  assert.ok(!a.fonts.some((f) => f.italic), 'ninguna fuente de más (la de énfasis es la única itálica de este fixture)');
+  const conTramos = chromeN1({ index: 2, total: 5, role: 'body', keyword: 'cuota' }, { headline: H_EM, emphasis: [] });
+  assert.deepEqual(conTramos, a, 'emphasis vacío ⇒ el mismo cromo');
+});
+
+test('1.4.0 · carrusel con token: la palabra clave y los tramos llevan la tipografía de énfasis y el color de `keyword`', () => {
+  const c = { index: 2, total: 5, role: 'body', keyword: 'cuota' };
+  const text = { headline: H_EM, emphasis: ['mano alzada', 'cuota'] };
+  const ch = chromeN1(c, text, EM_CAR);
+  assert.equal(ch.headlineEmphasis.family, 'Fuente Texto');
+  assert.deepEqual(ch.headline.filter((p) => p.keyword).map((p) => p.text), ['cuota', 'mano alzada'], 'la clave de la lámina primero; sin duplicar');
+  assert.ok(ch.fonts.some((f) => f.family === 'Fuente Texto' && f.weight === 400 && f.italic), 'la fuente del énfasis se carga');
+  const tokens = n1Tokens(EM_CAR);
+  const style = M.resolveOverlayStyle({ tokens, typography: N1_TYPO, palette: N1_PAL, text });
+  const scene = M.buildCarouselScene({ chrome: ch, style, backgroundSrc: 'data:image/png;base64,AA' });
+  const titular = findAll(scene, (n) => n.props?.style?.flexWrap === 'wrap')[0];
+  const spans = findAll(titular, (n) => n.type === 'span');
+  const hs = Math.round((ch.type.headline.sizePct / 100) * 1000 * 100) / 100;
+  const enf = spans.filter((n) => n.props.style.fontFamily === 'Fuente Texto');
+  assert.deepEqual(enf.map((n) => n.props.children.replace(/ /g, ' ').trim()), ['cuota', 'mano', 'alzada']);
+  for (const n of enf) {
+    assert.equal(n.props.style.fontSize, Math.round(hs * 1.25 * 100) / 100);
+    assert.equal(n.props.style.color, ch.colors.keyword);
+    assert.equal(n.props.style.textTransform, 'uppercase');
+  }
+  assert.equal(spans.map((n) => n.props.children).join('').replace(/ /g, ' '), H_EM);
+});
+
+test('1.4.0 · carrusel: un tramo ausente se avisa; la clave ausente conserva su aviso de siempre', () => {
+  const ch = chromeN1({ index: 2, total: 5, role: 'body', keyword: 'nada' }, { headline: H_EM, emphasis: ['asamblea', 'cuota'] }, EM_CAR);
+  assert.ok(ch.warnings.includes('CAROUSEL_KEYWORD_NOT_IN_HEADLINE'));
+  assert.ok(ch.warnings.some((w) => w.startsWith('CAROUSEL_EMPHASIS_NOT_IN_HEADLINE') && w.includes('«asamblea»')));
+  assert.deepEqual(ch.headline.filter((p) => p.keyword).map((p) => p.text), ['cuota']);
+});
+
+test('1.4.0 · carrusel: el ajuste vertical mide el tramo agrandado con su fuente y su tamaño', () => {
+  const c = { index: 2, total: 5, role: 'body', keyword: 'cuota extraordinaria' };
+  const sin = M.measureCarouselLayout(chromeN1(c, { headline: H_EM }), null);
+  const con = M.measureCarouselLayout(chromeN1(c, { headline: H_EM }, { carousel: { typography: { headline: { emphasis: { size_scale: 2 } } } } }), null);
+  assert.ok(con.mid > sin.mid, `el bloque con el tramo al doble es más alto (${con.mid} > ${sin.mid})`);
+  assert.throws(() => chromeN1(c, { headline: H_EM }, { carousel: { typography: { headline: { emphasis: { role: 'no_existe' } } } } }),
+    (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && /carousel\.typography\.headline\.emphasis\.role/.test(e.message));
+});
+
+
+console.log('\n── 1.5.0 · EL TEXTO RESPETA A LA PLATAFORMA: área máxima y zona segura, como dato ──');
+const LARGO15 = { headline: 'La cuota extraordinaria no se vota a mano alzada y el acta que diga lo contrario no vale nada', subheadline: 'Lo que dice el reglamento, sin adornos, y lo que el administrador no le va a contar.' };
+const N1_STEPS = { typography: {
+  headline: { fit_steps: [{ max_chars: 200, size_pct: 9 }, { max_chars: 300, size_pct: 7 }, { max_chars: 400, size_pct: 5 }] },
+  subheadline: { fit_steps: [{ max_chars: 200, size_pct: 4 }, { max_chars: 400, size_pct: 3 }] } } };
+
+test('1.5.0 · sin los tokens nuevos la caja es la de siempre y la escena no cambia', () => {
+  const st = styleN1(TXT);
+  assert.ok(!('maxTextAreaPct' in st.layout) && !('safeZonePct' in st.layout), 'el layout no gana claves');
+  const b = M.overlayTextBox(st, 1000, 1250);
+  assert.deepEqual(b, { safe: false, top: 60, right: 60, bottom: 60, left: 60, maxWidth: 800 });
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1250, metrics: null });
+  assert.equal(r.style, st, 'sin límite: el MISMO objeto');
+  assert.equal(r.report, null);
+});
+
+test('1.5.0 · zona segura: cada borde toma el mayor entre el margen y lo que tapa la interfaz', () => {
+  const st = styleN1(TXT, { layout: { safe_zone_pct: { top: 14, bottom: 37, left: 3, right: 22 } } });
+  const b = M.overlayTextBox(st, 1000, 1800);
+  assert.deepEqual(b, { safe: true, top: 252, right: 220, bottom: 666, left: 60, maxWidth: 720 });
+  const scene = M.buildOverlayScene({ style: st, width: 1000, height: 1800, backgroundSrc: 'data:image/png;base64,AA' });
+  const capa = findAll(scene, (n) => n.props?.style?.paddingBottom != null)[0];
+  assert.deepEqual([capa.props.style.paddingTop, capa.props.style.paddingRight, capa.props.style.paddingBottom, capa.props.style.paddingLeft], [252, 220, 666, 60]);
+  assert.ok(!('padding' in capa.props.style), 'con zona segura no hay padding uniforme');
+  assert.equal(findAll(scene, (n) => n.props?.style?.maxWidth != null)[0].props.style.maxWidth, 720, 'el ancho no pasa del hueco');
+});
+
+test('1.5.0 · tokens mal escritos → fail-loud nombrando', () => {
+  for (const [over, re] of [
+    [{ layout: { max_text_area_pct: 0 } }, /layout\.max_text_area_pct=0/],
+    [{ layout: { max_text_area_pct: 'mucho' } }, /layout\.max_text_area_pct=mucho/],
+    [{ layout: { safe_zone_pct: { top: 60 } } }, /layout\.safe_zone_pct/],
+    [{ layout: { safe_zone_pct: 'arriba' } }, /layout\.safe_zone_pct/],
+  ]) {
+    assert.throws(() => styleN1(TXT, over), (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && re.test(e.message), JSON.stringify(over));
+  }
+});
+
+test('1.5.0 · la medición crece con el tamaño y con la bajada, y dice cuando estima', () => {
+  const st = styleN1(LARGO15, N1_STEPS);
+  const a = M.measureOverlayText(st, 1000, 1000, null);
+  const chico = M.measureOverlayText({ ...st, slots: { ...st.slots, headline: { ...st.slots.headline, sizePct: 5 } } }, 1000, 1000, null);
+  const sinBajada = M.measureOverlayText({ ...st, slots: { ...st.slots, subheadline: null } }, 1000, 1000, null);
+  assert.ok(chico.areaPct < a.areaPct && sinBajada.areaPct < a.areaPct, `${chico.areaPct} y ${sinBajada.areaPct} < ${a.areaPct}`);
+  assert.ok(a.width <= M.overlayTextBox(st, 1000, 1000).maxWidth, 'el bloque no pasa de la caja');
+  assert.deepEqual(a.estimated, ['Fuente Titular', 'Fuente Texto'], 'sin métricas, se dice');
+});
+
+test('1.5.0 · límite de área: baja el titular, luego la bajada, luego la quita; el texto no cambia', () => {
+  const st = styleN1(LARGO15, M.deepMergeTokens(N1_STEPS, { layout: { max_text_area_pct: 20 } }));
+  const antes = M.measureOverlayText(st, 1000, 1000, null).areaPct;
+  assert.ok(antes > 20, `el caso excede (${antes} %)`);
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1000, metrics: null });
+  assert.ok(r.report.adjusted && r.report.area_pct <= 20, `queda en ${r.report.area_pct} %`);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_REDUCED')));
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_ESTIMATED')), 'sin métricas, el marcador lo dice');
+  assert.equal(r.style.slots.headline.text, LARGO15.headline, 'el titular es el mismo, carácter por carácter');
+  if (r.style.slots.subheadline) assert.equal(r.style.slots.subheadline.text, LARGO15.subheadline);
+  assert.ok(r.style.slots.headline.sizePct < st.slots.headline.sizePct);
+});
+
+test('1.5.0 · si ni al mínimo cabe: sin bajada, al tamaño mínimo y con marcador; se compone igual', () => {
+  const st = styleN1(LARGO15, M.deepMergeTokens(N1_STEPS, { layout: { max_text_area_pct: 1 } }));
+  const r = M.fitOverlayTextArea({ style: st, width: 1000, height: 1000, metrics: null });
+  assert.equal(r.style.slots.subheadline, null, 'se retiró la bajada');
+  assert.equal(r.style.slots.headline.sizePct, 5, 'el escalón más chico');
+  assert.ok(r.report.exceeded && r.report.dropped_subheadline);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_AREA_EXCEEDED')));
+});
+
+test('1.5.0 · el límite cuenta el tramo agrandado del énfasis', () => {
+  const tok = M.deepMergeTokens(M.deepMergeTokens(N1_STEPS, EM_TOK), { typography: { headline: { emphasis: { size_scale: 2 } } } });
+  const plano = M.measureOverlayText(styleN1({ headline: H_EM }, tok), 1000, 1000, null).areaPct;
+  const con = M.measureOverlayText(styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria'] }, tok), 1000, 1000, null).areaPct;
+  assert.ok(con > plano, `${con} > ${plano}`);
+});
+
+test('1.5.0 · carrusel: el límite rige SÓLO la portada', () => {
+  const lim = { layout: { max_text_area_pct: 5 } };
+  const CORTO = 'El trigo no se vende a mano alzada';
+  const portada = chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: CORTO }, lim);
+  assert.equal(portada.maxTextAreaPct, 5);
+  const r = M.fitCarouselCoverArea({ chrome: portada, metrics: null });
+  assert.ok(r.report && r.report.area_pct < r.report.area_pct_before, 'la portada baja');
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_REDUCED')));
+  assert.equal(r.chrome.headline.map((p) => p.text).join(''), CORTO, 'el texto no cambia');
+  const yaMinima = M.fitCarouselCoverArea({ chrome: chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: LARGO15.headline }, lim), metrics: null });
+  assert.ok(!yaMinima.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_REDUCED')), 'sin escalón más chico no dice «reducido»');
+  assert.ok(yaMinima.warnings.some((w) => w.startsWith('CAROUSEL_TEXT_AREA_EXCEEDED')), 'pero sí que excede');
+  const interior = chromeN1({ index: 3, total: 5, role: 'body' }, { headline: LARGO15.headline }, lim);
+  const ri = M.fitCarouselCoverArea({ chrome: interior, metrics: null });
+  assert.equal(ri.chrome, interior, 'lámina interior: el mismo cromo');
+  assert.equal(ri.report, null);
+  const sinLimite = chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: LARGO15.headline });
+  assert.ok(!('maxTextAreaPct' in sinLimite), 'sin el token, el cromo no gana claves');
+  assert.equal(M.fitCarouselCoverArea({ chrome: sinLimite, metrics: null }).chrome, sinLimite);
+});
+
 console.log(`\n${'─'.repeat(72)}`);
 console.log(`${pass} ok · ${fails.length} fail`);
 if (fails.length) { console.error('\nFALLOS:'); for (const [n, e] of fails) console.error(`  ${n}: ${e.stack}`); process.exit(1); }
