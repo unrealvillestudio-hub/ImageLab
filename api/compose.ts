@@ -41,10 +41,11 @@
  *   POST /api/compose
  *   { brand_id, canal?, image_url? | image_data_url?, headline, subheadline?, piece_id?,
  *     products?: [{ image_url, name? }],    ← capa de producto (2026-09-27), PNG real con alfa
- *     carousel?: { index, total, role, background?, eyebrow?, keyword?, figure?, steps?, cta? } }
+ *     carousel?: { index, total, role, background?, eyebrow?, keyword?, figure?, steps?, cta? },
  *                                           ← F3 (2026-10-02), lámina de carrusel; ver el bloque F3
+ *     emphasis?: [subcadena literal del titular, …] }   ← 1.4.0 (2026-10-13), hasta 3 tramos
  *   → 200 { status:'ok', image_data_url, compositor_version, tokens_source, width, height,
- *           fonts:[…], markers:[…], text:{ headline, subheadline },
+ *           fonts:[…], markers:[…], text:{ headline, subheadline, emphasis? },
  *           meta:{ carousel_applied, warnings:[…], carousel?:{ …, fit } } }
  *                                           ← `fit` (1.3.3): qué redujo el ajuste vertical, si actuó
  *   → 4xx/5xx { error, error_label, status:'error' }  ← `error_label` es lo que lee execLab.
@@ -77,7 +78,14 @@ declare const process: { env: Record<string, string | undefined> };
 //         sombra por glifo, del color de una FUNCIÓN de la paleta, que da contraste local al texto sin
 //         tocar el velo ni la imagen. Sólo con `background:'image'`; ni la superficie, ni el logotipo,
 //         ni la barra de progreso. Sin el token, la escena sale idéntica a la de 1.3.3.
-export const COMPOSITOR_VERSION = '1.3.4';
+//   1.4.0 (2026-10-13) — ÉNFASIS POR PALABRA en el titular (Sam, 2026-10-13: «que en los textos de las
+//         imágenes se resalten las palabras clave con negritas, mayúsculas, tamaños y colores de la
+//         marca»). La petición trae `emphasis: [subcadenas LITERALES del titular]`; la marca declara
+//         cómo se ven en `typography.headline.emphasis` (overlay) y `carousel.typography.headline.emphasis`
+//         (lámina): rol tipográfico, peso, itálica, transformación, escala de tamaño y tracking, más
+//         `palette.headline_emphasis` (overlay; la lámina usa la función `keyword`). Sin `emphasis` en la
+//         petición, o sin el token en la marca, la escena sale idéntica a la de 1.3.4.
+export const COMPOSITOR_VERSION = '1.4.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -113,7 +121,128 @@ const IDENTITY_MODES = new Set(['none', 'edge_left', 'edge_right', 'edge_bottom'
 const SLOTS = ['headline', 'subheadline'] as const;
 type Slot = (typeof SLOTS)[number];
 
-export interface OverlayText { headline: string; subheadline?: string | null }
+export interface OverlayText { headline: string; subheadline?: string | null; emphasis?: string[] | null }
+
+// ── 1.4.0 · ÉNFASIS POR PALABRA ────────────────────────────────────────────────────────────────
+// EJE: que un titular pueda llevar tramos con otro peso, tamaño, transformación y color, y cómo se
+// arman en la escena. INSTANCIA: QUÉ tramos (los marca quien escribe el copy y llegan en `emphasis`)
+// y CÓMO se ven (tokens de la marca). El motor no elige palabras ni estilos: sigue el dato.
+//
+// Los tramos son subcadenas LITERALES del titular. El texto visible es el mismo carácter por carácter
+// con énfasis o sin él (regla (a)): el énfasis sólo agrupa y estiliza, nunca escribe.
+export const EMPHASIS_MAX_TERMS = 3;
+export const EMPHASIS_MAX_CHARS = 60;
+// Escala de tamaño admitida para el tramo enfatizado, respecto del titular. Fuera de rango es un
+// token mal escrito y se dice (fail-loud), no se recorta en silencio.
+const EMPHASIS_SCALE_MIN = 0.5;
+const EMPHASIS_SCALE_MAX = 2.5;
+
+/** Valida el campo `emphasis` de la petición. Ausente ⇒ []. Error del LLAMADOR ⇒ 400 con etiqueta. */
+export function parseEmphasisRequest(raw: unknown): string[] {
+  if (raw == null) return [];
+  const bad = (msg: string) => new CompositorError('COMPOSITOR_EMPHASIS_INVALID', msg, 400);
+  if (!Array.isArray(raw)) throw bad('emphasis debe ser una lista de subcadenas del titular');
+  if (raw.length > EMPHASIS_MAX_TERMS) throw bad(`emphasis trae ${raw.length} tramos; el máximo es ${EMPHASIS_MAX_TERMS}`);
+  const out: string[] = [];
+  raw.forEach((v, k) => {
+    if (typeof v !== 'string' || !v.trim()) throw bad(`emphasis[${k}] debe ser texto no vacío`);
+    if (v.length > EMPHASIS_MAX_CHARS) throw bad(`emphasis[${k}] excede ${EMPHASIS_MAX_CHARS} caracteres`);
+    if (!out.includes(v)) out.push(v);
+  });
+  return out;
+}
+
+/**
+ * Parte el titular en tramos alrededor de VARIAS subcadenas literales. Cada término marca su primera
+ * aparición que no se solape con un término anterior (el orden de la lista es la prioridad). Los que
+ * no aparecen se devuelven en `missing`; el titular nunca cambia. Con un solo término el resultado es
+ * el mismo que el de `splitKeyword`.
+ */
+export function splitEmphasis(headline: string, terms: Array<string | null | undefined>): {
+  parts: Array<{ text: string; keyword: boolean }>; found: string[]; missing: string[];
+} {
+  const h = String(headline ?? '');
+  const ranges: Array<[number, number]> = [];
+  const found: string[] = [];
+  const missing: string[] = [];
+  for (const raw of terms ?? []) {
+    const k = raw ?? '';
+    if (!k) continue;
+    let from = 0;
+    let at = -1;
+    while (from <= h.length) {
+      const i = h.indexOf(k, from);
+      if (i < 0) break;
+      if (!ranges.some(([a, b]) => i < b && i + k.length > a)) { at = i; break; }
+      from = i + 1;
+    }
+    if (at < 0) { missing.push(k); continue; }
+    ranges.push([at, at + k.length]);
+    found.push(k);
+  }
+  if (!h) return { parts: [], found, missing };
+  ranges.sort((a, b) => a[0] - b[0]);
+  const parts: Array<{ text: string; keyword: boolean }> = [];
+  let cur = 0;
+  for (const [a, b] of ranges) {
+    if (a > cur) parts.push({ text: h.slice(cur, a), keyword: false });
+    parts.push({ text: h.slice(a, b), keyword: true });
+    cur = b;
+  }
+  if (cur < h.length) parts.push({ text: h.slice(cur), keyword: false });
+  return { parts, found, missing };
+}
+
+/** Estilo de un tramo enfatizado: lo que la marca declara y, lo que no declara, heredado del titular. */
+export interface EmphasisType {
+  role: string; family: string; cssImport: string | null; fallback: string | null; fontUrl: string | null;
+  weight: number; italic: boolean; transform: string; letterSpacingEm: number; sizeScale: number;
+}
+
+/**
+ * Resuelve `…headline.emphasis` contra `brand_typography`. Token ausente ⇒ null (la marca no declara
+ * énfasis: la escena sale como antes). Token presente y mal escrito ⇒ se acumula en `missing` y el
+ * llamador falla nombrando, como el resto del bloque.
+ */
+export function resolveEmphasisType(
+  tok: unknown,
+  base: { role: string; weight: number; italic: boolean; transform: string; letterSpacingEm: number },
+  typoBy: Map<string, { role: string; font_family: string; css_import?: string | null; fallback?: string | null }>,
+  where: string,
+  missing: string[],
+): EmphasisType | null {
+  if (!isPlain(tok) || Object.keys(tok).length === 0) return null;
+  const e = tok as Record<string, any>;
+  const role = e.role != null ? String(e.role) : base.role;
+  const typo = typoBy.get(role);
+  if (!typo) { missing.push(`brand_typography.role='${role}' (pedido por ${where}.role)`); return null; }
+  const scale = e.size_scale == null ? 1 : Number(e.size_scale);
+  if (!Number.isFinite(scale) || scale < EMPHASIS_SCALE_MIN || scale > EMPHASIS_SCALE_MAX) {
+    missing.push(`${where}.size_scale=${e.size_scale} (válido: ${EMPHASIS_SCALE_MIN}..${EMPHASIS_SCALE_MAX})`);
+    return null;
+  }
+  return {
+    role, family: String(typo.font_family),
+    cssImport: typo.css_import ? String(typo.css_import) : null,
+    fallback: typo.fallback ? String(typo.fallback) : null,
+    fontUrl: e.font_url ? String(e.font_url) : null,
+    weight: e.weight != null ? Number(e.weight) : base.weight,
+    italic: e.italic != null ? e.italic === true : base.italic,
+    transform: e.transform != null ? String(e.transform) : base.transform,
+    letterSpacingEm: e.letter_spacing_em != null ? Number(e.letter_spacing_em) : base.letterSpacingEm,
+    sizeScale: scale,
+  };
+}
+
+/**
+ * Largo efectivo de un titular con tramos de otra escala, para la escalera `fit_steps` (que cuenta
+ * caracteres): un tramo al 130 % ocupa como 1,3 veces sus caracteres. Sin énfasis es el largo de siempre.
+ */
+export function emphasisEffectiveLength(parts: Array<{ text: string; keyword: boolean }>, scale: number): number {
+  let n = 0;
+  for (const p of parts) n += p.keyword ? p.text.length * scale : p.text.length;
+  return Math.round(n);
+}
 
 /** Error del compositor con etiqueta estable: es lo que el carril asienta y lo que se grepea. */
 export class CompositorError extends Error {
@@ -241,6 +370,9 @@ export function resolveOverlayStyle(args: {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
     lineHeight: number; letterSpacingEm: number; sizePct: number; color: string;
+    // 1.4.0 — tramos del titular con énfasis. null ⇒ la ranura se dibuja como en 1.3.4 (un solo texto).
+    parts?: null | Array<{ text: string; keyword: boolean }>;
+    emphasis?: null | (EmphasisType & { color: string });
   }>;
   scrim: null | { mode: string; color: string; opacity: number; coveragePct: number };
   rule: null | { color: string; widthPct: number; thicknessPx: number; gapPct: number };
@@ -288,7 +420,35 @@ export function resolveOverlayStyle(args: {
     if (steps.length === 0) missing.push(`typography.${slot}.fit_steps`);
     if (!typo || !pal || steps.length === 0) continue;
 
-    const fit = fitFontSizePct(steps, value);
+    // 1.4.0 — énfasis: sólo en el titular. El token se valida siempre que exista (un dato mal escrito
+    // se ve aunque esta pieza no traiga tramos); los tramos se aplican sólo si la marca lo declara.
+    let parts: Array<{ text: string; keyword: boolean }> | null = null;
+    let emphasis: (EmphasisType & { color: string }) | null = null;
+    if (slot === 'headline') {
+      const emType = resolveEmphasisType(st.emphasis, {
+        role: typoRole, weight: Number(st.weight ?? 400), italic: st.italic === true,
+        transform: String(st.transform ?? 'none'), letterSpacingEm: Number(st.letter_spacing_em ?? 0),
+      }, typoBy, `typography.${slot}.emphasis`, missing);
+      const emRole = (t.palette ?? {}).headline_emphasis;
+      let emColor = hexToRgba(String(pal.hex), 1);
+      if (emType && emRole != null) {
+        const ep = palBy.get(String(emRole));
+        if (!ep) missing.push(`brand_palette.role='${emRole}' (pedido por palette.headline_emphasis)`);
+        else emColor = hexToRgba(String(ep.hex), 1);
+      }
+      const terms = (args.text?.emphasis ?? []).filter((x) => typeof x === 'string' && x);
+      if (terms.length && !emType) {
+        markers.push('OVERLAY_EMPHASIS_NOT_DECLARED: la petición trae tramos de énfasis y la marca no declara typography.headline.emphasis; se compone sin énfasis');
+      } else if (terms.length && emType) {
+        const split = splitEmphasis(value, terms);
+        if (split.missing.length) {
+          markers.push(`OVERLAY_EMPHASIS_NOT_IN_HEADLINE: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en el titular; ese tramo no se resalta`);
+        }
+        if (split.found.length) { parts = split.parts; emphasis = { ...emType, color: emColor }; }
+      }
+    }
+
+    const fit = fitFontSizePct(steps, parts && emphasis ? 'x'.repeat(emphasisEffectiveLength(parts, emphasis.sizeScale)) : value);
     if (fit.overflow) {
       markers.push(
         `OVERLAY_TEXT_OVERFLOW: ${slot} de ${value.length} caracteres excede el último escalón declarado ` +
@@ -310,6 +470,8 @@ export function resolveOverlayStyle(args: {
       letterSpacingEm: Number(st.letter_spacing_em ?? 0),
       sizePct: fit.sizePct,
       color: hexToRgba(String(pal.hex), 1),
+      // Sin tramos, las dos claves no existen: la ranura es la de 1.3.4, clave por clave.
+      ...(parts && emphasis ? { parts, emphasis } : {}),
     };
   }
 
@@ -465,6 +627,32 @@ export function resolveProductLayer(args: {
  * ancho es lo que fija cuántos caracteres entran por línea); la cobertura del velo, del ALTO. Un
  * mismo token rinde igual en 1:1 que en 9:16 sin una tabla por formato.
  */
+/**
+ * 1.4.0 — los átomos del titular con énfasis, como nodos de satori. PURO. Un átomo es una palabra
+ * (con su espacio duro al final, ver `headlineAtoms`); cada tramo enfatizado lleva su familia, peso,
+ * estilo, tamaño (escala del titular), tracking, transformación y color. Los demás heredan del padre.
+ */
+function emphasisAtomsNode(
+  parts: Array<{ text: string; keyword: boolean }>,
+  base: { sizePct: number },
+  em: EmphasisType & { color: string },
+  width: number,
+): Array<Record<string, any>> {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const size = r2((base.sizePct * em.sizeScale / 100) * width);
+  const emStyle = {
+    fontFamily: em.family, fontWeight: em.weight, fontStyle: em.italic ? 'italic' : 'normal',
+    fontSize: size, letterSpacing: r2(em.letterSpacingEm * size), textTransform: em.transform, color: em.color,
+  };
+  return headlineAtoms(parts).map((atom) => ({
+    type: 'div',
+    props: {
+      style: { display: 'flex', flexDirection: 'row', alignItems: 'baseline' },
+      children: atom.map((p) => ({ type: 'span', props: { style: p.keyword ? emStyle : {}, children: p.text } })),
+    },
+  }));
+}
+
 export function buildOverlayScene(args: {
   style: ReturnType<typeof resolveOverlayStyle>;
   width: number; height: number; backgroundSrc: string;
@@ -582,8 +770,14 @@ export function buildOverlayScene(args: {
         letterSpacing: px(s.letterSpacingEm * s.sizePct, width),
         textTransform: s.transform,
         textAlign: style.layout.align,
+        // 1.4.0 — con tramos, la ranura es una fila que envuelve átomos (palabras que no se cortan),
+        // alineados por la línea de base: un tramo más grande no descoloca a sus vecinos.
+        ...(s.parts && s.emphasis ? {
+          flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline',
+          justifyContent: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
+        } : {}),
       },
-      children: s.text,
+      children: s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width) : s.text,
     },
   });
 
@@ -991,6 +1185,9 @@ export function resolveCarouselChrome(args: {
   textEffect: null | CarouselTextEffect;
   type: Record<'headline' | 'body' | 'label' | 'figure', CarouselType>;
   headline: Array<{ text: string; keyword: boolean }>;
+  // 1.4.0 — cómo se ven los tramos resaltados del titular (palabra clave + énfasis). null ⇒ sólo
+  // cambian de color, como en 1.3.4.
+  headlineEmphasis: null | (CarouselType & { sizeScale: number });
   subheadline: string | null;
   swipeText: string;
   logo: CarouselLogo | null;
@@ -1068,6 +1265,22 @@ export function resolveCarouselChrome(args: {
     };
     addFont({ role, family: type[kind].family, cssImport: type[kind].cssImport, weight: type[kind].weight, italic: type[kind].italic });
   }
+  // 1.4.0 — énfasis de la lámina: `carousel.typography.headline.emphasis`. Hereda del titular lo que no declara.
+  let headlineEmphasis: null | (CarouselType & { sizeScale: number }) = null;
+  if (type.headline) {
+    const hb = type.headline;
+    const em = resolveEmphasisType(((ct.typography ?? {}).headline ?? {}).emphasis,
+      { role: hb.role, weight: hb.weight, italic: hb.italic, transform: hb.transform, letterSpacingEm: hb.letterSpacingEm },
+      typoBy, 'carousel.typography.headline.emphasis', missing);
+    if (em) {
+      headlineEmphasis = {
+        role: em.role, family: em.family, cssImport: em.cssImport, weight: em.weight, italic: em.italic,
+        transform: em.transform, lineHeight: hb.lineHeight, letterSpacingEm: em.letterSpacingEm,
+        sizePct: hb.sizePct, sizeScale: em.sizeScale,
+      };
+      addFont({ role: em.role, family: em.family, cssImport: em.cssImport, weight: em.weight, italic: em.italic });
+    }
+  }
   if (headlineOverflow) {
     warnings.push(`CAROUSEL_HEADLINE_OVERFLOW: el titular excede el último escalón de carousel.typography.headline.fit_steps; se compone entero al tamaño más chico`);
   }
@@ -1117,9 +1330,16 @@ export function resolveCarouselChrome(args: {
   }
 
   // ── textos ──
-  const split = splitKeyword(String(args.text?.headline ?? ''), slide.keyword);
-  if (slide.keyword && !split.found) {
+  // 1.4.0 — la palabra clave de la lámina y los tramos de `emphasis` se resaltan juntos; la clave
+  // tiene prioridad si se solapan. Con sólo la clave, el resultado es el de `splitKeyword` (1.3.4).
+  const emTerms = (args.text?.emphasis ?? []).filter((x) => typeof x === 'string' && x && x !== slide.keyword);
+  const split = splitEmphasis(String(args.text?.headline ?? ''), [slide.keyword, ...emTerms]);
+  if (slide.keyword && split.missing.includes(slide.keyword)) {
     warnings.push('CAROUSEL_KEYWORD_NOT_IN_HEADLINE');
+  }
+  const emMissing = emTerms.filter((x) => split.missing.includes(x));
+  if (emMissing.length) {
+    warnings.push(`CAROUSEL_EMPHASIS_NOT_IN_HEADLINE: ${emMissing.map((m) => `«${m}»`).join(', ')} no está literal en el titular; ese tramo no se resalta`);
   }
   const sub = String(args.text?.subheadline ?? '');
 
@@ -1183,6 +1403,7 @@ export function resolveCarouselChrome(args: {
     canvas: { width: canvasW, height: canvasH },
     marginPct, colors, surface, shade, textEffect, type,
     headline: split.parts,
+    headlineEmphasis,
     subheadline: sub.trim() ? sub : null,
     swipeText, logo, fonts, warnings,
     fitLadder: { headline: headlineSmaller },
@@ -1365,17 +1586,25 @@ export function buildCarouselScene(args: {
   if (chrome.headline.length) {
     const hs = px(T.headline.sizePct);
     const hf = font(T.headline, hs);
+    const HE = chrome.headlineEmphasis;
     mid.push({
       type: 'div',
       props: {
-        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline, ...fx },
+        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline, ...fx, ...(HE ? { alignItems: 'baseline' } : {}) },
         children: headlineAtoms(chrome.headline).map((atom) => ({
           type: 'div',
           props: {
-            style: { display: 'flex', flexDirection: 'row' },
+            style: { display: 'flex', flexDirection: 'row', ...(HE ? { alignItems: 'baseline' } : {}) },
             children: atom.map((p) => ({
               type: 'span',
-              props: { style: { textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline, ...fx }, children: p.text },
+              props: {
+                style: {
+                  textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline, ...fx,
+                  // 1.4.0 — el tramo resaltado con la tipografía de énfasis de la marca.
+                  ...(HE && p.keyword ? { ...font(HE, r2(hs * HE.sizeScale)) } : {}),
+                },
+                children: p.text,
+              },
             })),
           },
         })),
@@ -1732,13 +1961,31 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   if (chrome.headline.length) {
     const hs = px(T.headline.sizePct);
     const wOf = widthFn(T.headline, hs, r2(T.headline.letterSpacingEm * hs), T.headline.transform);
-    let n = 1;
-    let cur = 0;
-    for (const atom of headlineAtoms(chrome.headline)) {
-      const aw = Math.ceil(atom.reduce((s, p) => s + wOf(p.text), 0));
-      if (cur > 0 && cur + aw > inner + 0.01) { n++; cur = aw; } else cur += aw;
+    const HE = chrome.headlineEmphasis;
+    if (!HE) {
+      let n = 1;
+      let cur = 0;
+      for (const atom of headlineAtoms(chrome.headline)) {
+        const aw = Math.ceil(atom.reduce((s, p) => s + wOf(p.text), 0));
+        if (cur > 0 && cur + aw > inner + 0.01) { n++; cur = aw; } else cur += aw;
+      }
+      mid += n * hs * T.headline.lineHeight;
+    } else {
+      // 1.4.0 — con énfasis, cada tramo se mide con SU fuente y SU tamaño, y cada línea es tan alta
+      // como su letra más grande.
+      const es = r2(hs * HE.sizeScale);
+      const eOf = widthFn(HE, es, r2(HE.letterSpacingEm * es), HE.transform);
+      let cur = 0;
+      let lineMax = 0;
+      let total = 0;
+      for (const atom of headlineAtoms(chrome.headline)) {
+        const aw = Math.ceil(atom.reduce((s, p) => s + (p.keyword ? eOf(p.text) : wOf(p.text)), 0));
+        const ah = Math.max(...atom.map((p) => (p.keyword ? es : hs)));
+        if (cur > 0 && cur + aw > inner + 0.01) { total += lineMax; cur = aw; lineMax = ah; }
+        else { cur += aw; lineMax = Math.max(lineMax, ah); }
+      }
+      mid += (total + lineMax) * T.headline.lineHeight;
     }
-    mid += n * hs * T.headline.lineHeight;
     any = true;
   }
   if (slide.figure) {
@@ -2032,6 +2279,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // F3 — el campo `carousel` se valida contra el contrato ANTES de leer nada: un 400 es un error
     // del llamador y no depende de los datos de la marca.
     const carouselIn = parseCarouselRequest(body.carousel);
+    // 1.4.0 — tramos de énfasis del titular. Se validan con el resto del contrato, antes de leer dato.
+    const emphasisIn = parseEmphasisRequest(body.emphasis);
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -2051,7 +2300,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     ]);
 
     const picked = pickOverlayTokens(tokenRows as any[], brandId, canal);
-    const style = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline } });
+    const style = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline, emphasis: emphasisIn } });
 
     // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
     // Si no, todo lo de abajo es exactamente 1.2.0.
@@ -2073,7 +2322,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const logo = await loadSignatureLogo(brandId, warnings);
       const chrome = resolveCarouselChrome({
         tokens: picked.tokens, typography: typography as any[], palette: palette as any[],
-        carousel: carouselIn, text: { headline, subheadline }, logo,
+        carousel: carouselIn, text: { headline, subheadline, emphasis: emphasisIn }, logo,
       });
       if (!chrome.applied) throw new CompositorError('COMPOSITOR_FAILED', 'cromo de carrusel no resuelto', 500);
       warnings.push(...chrome.warnings);
@@ -2129,13 +2378,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         sealed_without_title: false,
         product_layer: null,
         markers: style.markers,
-        text: { headline, subheadline },
+        text: { headline, subheadline, ...(emphasisIn.length ? { emphasis: emphasisIn } : {}) },
         meta: {
           carousel_applied: true,
           warnings,
           carousel: {
             index: chrome.slide.index, total: chrome.slide.total, role: chrome.slide.role, background: chrome.slide.background,
             keyword_found: !!chrome.headline.find((p) => p.keyword), logo: chrome.logo ? chrome.logo.kind : null,
+            // 1.4.0 — qué tramos se resaltaron y con qué estilo (null si la marca no declara énfasis).
+            emphasis: emphasisIn.length || chrome.headlineEmphasis
+              ? { requested: emphasisIn, highlighted: chrome.headline.filter((p) => p.keyword).map((p) => p.text),
+                  styled: !!chrome.headlineEmphasis }
+              : null,
             // 1.3.4 — si la lámina llevó efecto de texto, y cuál: sólo en láminas con foto.
             text_effect: chrome.textEffect && backgroundSrc
               ? { kind: chrome.textEffect.kind, color: chrome.textEffect.fn, alpha: chrome.textEffect.alpha,
@@ -2185,6 +2439,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const fonts = await Promise.all(
       SLOTS.filter((s) => style.slots[s]).map(async (s) => ({ slot: s, ...(await loadFont(s, style.slots[s]!)) })),
     );
+    // 1.4.0 — la fuente del énfasis, si es otra familia, otro peso u otro estilo que la del titular.
+    // Si la hoja de la marca no sirve ese peso exacto se compone con el más cercano y SE DICE.
+    const hl = style.slots.headline;
+    if (hl?.emphasis) {
+      const em = hl.emphasis;
+      const same = fonts.some((f) => f.name === em.family && f.weight === em.weight && (f.style === 'italic') === em.italic);
+      if (!same) {
+        const f = await loadFont('headline:emphasis', em);
+        if (f.weight !== em.weight || (f.style === 'italic') !== em.italic) {
+          style.markers.push(`OVERLAY_EMPHASIS_FONT_SUBSTITUTED: ${em.family} ${em.weight}${em.italic ? ' itálica' : ''} no está en css_import; se usó ${f.weight}${f.style === 'italic' ? ' itálica' : ''}`);
+        }
+        fonts.push({ slot: 'headline:emphasis' as any, ...f });
+      }
+    }
 
     const scene = buildOverlayScene({
       style, width: dims.width, height: dims.height,
@@ -2230,9 +2498,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         : null,
       markers: style.markers,
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
-      text: { headline, subheadline },
+      // 1.4.0 — `emphasis` viaja sólo si la petición lo trajo: sin él, el eco es el de 1.3.4.
+      text: { headline, subheadline, ...(emphasisIn.length ? { emphasis: emphasisIn } : {}) },
       // F3 — la forma de 1.2.0 se mantiene; sólo se suma `meta`.
-      meta: { carousel_applied: false, warnings },
+      meta: {
+        carousel_applied: false, warnings,
+        ...(emphasisIn.length ? { emphasis: {
+          requested: emphasisIn,
+          highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
+          styled: !!hl?.emphasis,
+        } } : {}),
+      },
       duration_ms: Date.now() - t0,
     });
   } catch (err) {
