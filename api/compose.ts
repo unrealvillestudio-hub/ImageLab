@@ -119,7 +119,18 @@ declare const process: { env: Record<string, string | undefined> };
 //         fondo claro, con ella. `meta.text_effect` dice qué midió y qué decidió. Sin `when`, idéntico a 1.6.1.
 //         `layout.text_effect.color` admite además un hex literal, para que la regla viva en la capa GLOBAL sin
 //         nombrar un rol de paleta que una marca nueva quizá no tenga.
-export const COMPOSITOR_VERSION = '1.6.2';
+//   1.6.3 (2026-10-15) — EL TEXTO ESQUIVA LOS LETREROS Y EL ÉNFASIS SE LEE (Sam, 2026-10-15: «los textos en imagen sí
+//         deben esquivar el letrero si hace falta o puedes probar haciendo un blur sutil de dicho letrero»; «el accent
+//         color azul del embedded text no contrasta… con el cielo de la imagen»). Dos tokens de DATO:
+//         `layout.avoid_scene_text` { enabled, margin_pct?, blur_pct? } — la MISMA llamada de detección de caras pide
+//         también el texto legible de la escena (letreros, pantallas, carteles). Las caras siguen decidiendo el tamaño;
+//         entre las anclas que tapan lo mismo de caras se elige la que menos tapa un letrero. Si aun así lo tapa y la
+//         marca declara `blur_pct`, ese letrero se desenfoca sutilmente bajo el texto (no se oscurece nada).
+//         `layout.emphasis_contrast` { min_contrast, fallbacks: [roles de brand_palette] } — se mide el color del
+//         énfasis contra lo que tiene detrás (foto + velo, la mediana del área); si no llega al umbral, se usa el rol de
+//         la lista que más contrasta, si contrasta más. `meta.faces.signs` y `meta.emphasis_contrast` lo dicen.
+//         Sin los tokens, idéntico a 1.6.2.
+export const COMPOSITOR_VERSION = '1.6.3';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -406,6 +417,9 @@ export function resolveOverlayStyle(args: {
     safeZonePct?: { top: number; bottom: number; left: number; right: number };
     // 1.6.0 — sólo existe si la marca o el canal lo declaran.
     avoidFaces?: { anchors: string[]; marginPct: number; keepAlign: boolean };
+    // 1.6.3 — sólo existen si la marca o el canal los declaran.
+    avoidSceneText?: { marginPct: number; blurPct: number | null };
+    emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }> };
   };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
   // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
@@ -658,6 +672,44 @@ export function resolveOverlayStyle(args: {
     }
   }
 
+  // 1.6.3 — el texto esquiva los letreros de la escena. Va con `avoid_faces`: usa su detección y sus anclas.
+  let avoidSceneText: { marginPct: number; blurPct: number | null } | null = null;
+  const astTok = layoutTok.avoid_scene_text as unknown;
+  if (astTok != null && !(isPlain(astTok) && (astTok as Record<string, unknown>).enabled === false)) {
+    const a = astTok as Record<string, unknown>;
+    const marginPct = Number(a.margin_pct ?? 1);
+    const blurPct = a.blur_pct == null ? null : Number(a.blur_pct);
+    if (!isPlain(astTok) || a.enabled !== true) {
+      missing.push(`layout.avoid_scene_text (objeto { enabled: true, margin_pct?: 0..20, blur_pct?: 0..3 }; llegó ${JSON.stringify(astTok)})`);
+    } else if (!Number.isFinite(marginPct) || marginPct < 0 || marginPct > 20) {
+      missing.push(`layout.avoid_scene_text.margin_pct=${a.margin_pct} (0 ≤ x ≤ 20)`);
+    } else if (blurPct !== null && !(Number.isFinite(blurPct) && blurPct > 0 && blurPct <= 3)) {
+      missing.push(`layout.avoid_scene_text.blur_pct=${a.blur_pct} (0 < x ≤ 3, % del ancho)`);
+    } else if (!avoidFaces) {
+      missing.push('layout.avoid_scene_text pide layout.avoid_faces encendido: comparte su detección y sus anclas');
+    } else {
+      avoidSceneText = { marginPct, blurPct };
+    }
+  }
+  // 1.6.3 — el énfasis se lee: umbral y colores alternativos, por rol de la marca.
+  let emphasisContrast: { minContrast: number; fallbacks: Array<{ role: string; hex: string }> } | null = null;
+  if (layoutTok.emphasis_contrast != null) {
+    const ec = layoutTok.emphasis_contrast as Record<string, unknown>;
+    const min = Number(isPlain(ec) ? ec.min_contrast : NaN);
+    const roles = isPlain(ec) && Array.isArray(ec.fallbacks) ? (ec.fallbacks as unknown[]).map(String) : null;
+    if (!isPlain(ec) || !(Number.isFinite(min) && min >= 1 && min <= 21) || !roles || !roles.length) {
+      missing.push(`layout.emphasis_contrast (objeto { min_contrast: 1..21, fallbacks: [roles de brand_palette] }; llegó ${JSON.stringify(layoutTok.emphasis_contrast)})`);
+    } else {
+      const fb: Array<{ role: string; hex: string }> = [];
+      for (const r of roles) {
+        const pal = palBy.get(r);
+        if (!pal) missing.push(`brand_palette.role='${r}' (pedido por layout.emphasis_contrast.fallbacks)`);
+        else fb.push({ role: r, hex: String(pal.hex) });
+      }
+      if (fb.length === roles.length) emphasisContrast = { minContrast: min, fallbacks: fb };
+    }
+  }
+
   if (missing.length) {
     throw new CompositorError(
       'COMPOSITOR_TOKENS_INCOMPLETE',
@@ -676,6 +728,8 @@ export function resolveOverlayStyle(args: {
       ...(maxTextAreaPct != null ? { maxTextAreaPct } : {}),
       ...(safeZonePct ? { safeZonePct } : {}),
       ...(avoidFaces ? { avoidFaces } : {}),
+      ...(avoidSceneText ? { avoidSceneText } : {}),
+      ...(emphasisContrast ? { emphasisContrast } : {}),
     },
     ...(textEffect ? { textEffect } : {}),
     slots,
@@ -2506,10 +2560,10 @@ export function overlayTextRect(style: ReturnType<typeof resolveOverlayStyle>, w
 
 /** Las cajas de caras que devuelve el modelo (`{ faces: [{ box_2d: [ymin, xmin, ymax, xmax] }] }`, 0..1000) a
  *  0..1. Lo que no tiene forma de caja se descarta; nunca se inventa una. PURO. */
-export function parseFaceBoxes(text: string): FaceBox[] {
+export function parseFaceBoxes(text: string, key: 'faces' | 'signs' = 'faces'): FaceBox[] {
   let data: any;
   try { data = JSON.parse(text); } catch { return []; }
-  const list = Array.isArray(data?.faces) ? data.faces : Array.isArray(data) ? data : [];
+  const list = Array.isArray(data?.[key]) ? data[key] : (key === 'faces' && Array.isArray(data)) ? data : [];
   const out: FaceBox[] = [];
   for (const f of list) {
     const b = Array.isArray(f?.box_2d) ? f.box_2d.map(Number) : null;
@@ -2554,9 +2608,13 @@ function faceFitLadder(base: ReturnType<typeof resolveOverlayStyle>): Array<{ st
 export function chooseOverlayAnchor(args: {
   style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
   metrics?: Record<string, FontAdvance | null | undefined> | null; faces: FaceBox[]; productAnchor?: string | null;
+  // 1.6.3 — letreros de la escena (0..1). Sólo cuentan con `layout.avoidSceneText`; nunca deciden el tamaño.
+  signs?: FaceBox[] | null;
 }): { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
   faces: number; anchor_declared: string; anchor_used: string; moved: boolean; overlap_pct: number;
   candidates: Array<{ anchor: string; overlap_pct: number }>; reduced: string[];
+  // 1.6.3 — sólo con letreros detectados y el token encendido.
+  signs?: number; sign_overlap_pct?: number; signs_under_text?: FaceBox[];
 } } {
   const { style, width, height } = args;
   const af = style.layout.avoidFaces;
@@ -2594,15 +2652,56 @@ export function chooseOverlayAnchor(args: {
     }
     if (!best) { best = low.c; base = low.st; what = low.what; }
   }
+  // 1.6.3 — LETREROS. Las caras ya decidieron el tamaño (`base`) y el solape mínimo de caras (`best`). Entre las
+  // anclas de ese mismo tamaño que tapan lo mismo de caras, gana la que menos tapa un letrero; a igualdad, la que ya
+  // ganó y luego el orden de las candidatas. Sin letreros o sin el token, nada de esto existe.
+  const faceAnchor = best.anchor;
+  const ast = style.layout.avoidSceneText;
+  const signList = ast && args.signs && args.signs.length ? args.signs : null;
+  let signOverlap = 0;
+  let signsUnder: FaceBox[] = [];
+  const signMarkers: string[] = [];
+  if (signList) {
+    const sp = (ast!.marginPct / 100) * Math.min(width, height);
+    const sboxes = signList.map((f) => ({ x0: f.x0 * width - sp, y0: f.y0 * height - sp, x1: f.x1 * width + sp, y1: f.y1 * height + sp }));
+    const overlapWith = (r: { x0: number; y0: number; x1: number; y1: number }, bs: typeof sboxes) => {
+      const area = Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
+      let inter = 0;
+      for (const b of bs) {
+        const w = Math.min(r.x1, b.x1) - Math.max(r.x0, b.x0);
+        const h = Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0);
+        if (w > 0 && h > 0) inter += w * h;
+      }
+      return Math.round((10000 * inter) / area) / 100;
+    };
+    const atBase = score(base);
+    const tied = atBase.filter((c) => c.overlap_pct <= best!.overlap_pct)
+      .map((c) => ({ ...c, sign: overlapWith(overlayTextRect(base, width, height, args.metrics, c.anchor), sboxes) }));
+    const current = tied.find((c) => c.anchor === best!.anchor);
+    const minSign = Math.min(...tied.map((c) => c.sign));
+    const pick = current && current.sign === minSign ? current : tied.find((c) => c.sign === minSign);
+    if (pick) {
+      if (pick.anchor !== best.anchor) {
+        signMarkers.push(`OVERLAY_ANCHOR_MOVED_FOR_SIGN: en ${best.anchor} el texto tapaba un letrero (${current?.sign ?? '?'} % de su caja); se compone en ${pick.anchor}`);
+        best = { anchor: pick.anchor, overlap_pct: pick.overlap_pct };
+      }
+      signOverlap = pick.sign;
+      const r = overlayTextRect(base, width, height, args.metrics, pick.anchor);
+      signsUnder = signList.filter((f, k) => overlapWith(r, [sboxes[k]]) > 0);
+      if (signOverlap > 0) signMarkers.push(`OVERLAY_SIGN_OVERLAP: ninguna ancla libre de caras deja el texto lejos de los letreros; ${pick.anchor} tapa ${signOverlap} %`);
+    }
+  }
+
   const declaredScore = scored.find((c) => c.anchor === declared)?.overlap_pct ?? 0;
   const markers = [...style.markers];
-  if (best.anchor !== declared) {
-    markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${best.anchor}`);
+  if (faceAnchor !== declared) {
+    markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${faceAnchor}`);
   }
   if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : 'sin tapar una cara'}: ${what.join(' · ')}`);
   if (best.overlap_pct > 0) {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto libre de caras ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
+  markers.push(...signMarkers);
   const out = best.anchor === declared && markers.length === style.markers.length ? style : {
     ...base,
     layout: { ...base.layout, anchor: best.anchor, align: af.keepAlign ? base.layout.align : ANCHORS[best.anchor].align },
@@ -2611,7 +2710,51 @@ export function chooseOverlayAnchor(args: {
   return { style: out, report: {
     faces: args.faces.length, anchor_declared: declared, anchor_used: best.anchor, moved: best.anchor !== declared,
     overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
+    ...(signList ? { signs: signList.length, sign_overlap_pct: signOverlap, signs_under_text: signsUnder } : {}),
   } };
+}
+
+/**
+ * 1.6.3 — ¿Se lee el énfasis? PURO. Mide el contraste del color actual del énfasis contra el fondo con la MEDIANA
+ * del área (no el peor 10 % de la sombra: para ELEGIR un color, el peor 10 % castiga a todos por igual —pelo
+ * oscuro a uno, camisa clara a otro— y no separa; medido en c3762333: azul 2,34 vs marino 6,02 en mediana, 1,22 vs
+ * 1,31 en el peor 10 %). Si la mediana no llega a `minContrast`, prueba los roles alternativos de la marca y se queda
+ * con el que MÁS contrasta, sólo si contrasta más que el actual. Sin muestras no cambia nada.
+ */
+export function decideEmphasisColor(args: {
+  currentColor: string; fallbacks: Array<{ role: string; hex: string }>; bgLuminances: number[]; minContrast: number;
+}): { changed: boolean; role: string | null; hex: string | null; contrast_before: number | null; contrast_after: number | null;
+  min_contrast: number; reason: string } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const base = { min_contrast: args.minContrast };
+  if (!args.bgLuminances.length) {
+    return { changed: false, role: null, hex: null, contrast_before: null, contrast_after: null, ...base, reason: 'sin muestras del fondo: no se cambia el énfasis' };
+  }
+  const median = (color: string) => {
+    const L = relLuminanceHex(color);
+    const cs = args.bgLuminances.map((bgL) => contrastRatio(L, bgL)).sort((x, y) => x - y);
+    const m = cs.length >> 1;
+    return cs.length % 2 ? cs[m] : (cs[m - 1] + cs[m]) / 2;
+  };
+  const before = median(args.currentColor);
+  if (before >= args.minContrast) {
+    return { changed: false, role: null, hex: null, contrast_before: r2(before), contrast_after: r2(before), ...base,
+      reason: `contraste ${r2(before)} ≥ ${args.minContrast}: el énfasis se lee con su color` };
+  }
+  const best = args.fallbacks.map((f) => ({ ...f, c: median(f.hex) })).sort((a, b) => b.c - a.c)[0];
+  if (!best || best.c <= before) {
+    return { changed: false, role: null, hex: null, contrast_before: r2(before), contrast_after: r2(before), ...base,
+      reason: `contraste ${r2(before)} < ${args.minContrast} y ningún rol alternativo contrasta más` };
+  }
+  return { changed: true, role: best.role, hex: best.hex, contrast_before: r2(before), contrast_after: r2(best.c), ...base,
+    reason: `contraste ${r2(before)} < ${args.minContrast}: el énfasis pasa a ${best.role} (${r2(best.c)})` };
+}
+
+/** 1.6.3 — el estilo con el color del énfasis cambiado. PURO; devuelve el MISMO objeto si no hay énfasis. */
+export function withEmphasisColor<S extends { slots: Record<string, any> }>(style: S, color: string): S {
+  const hl = style.slots.headline;
+  if (!hl?.emphasis) return style;
+  return { ...style, slots: { ...style.slots, headline: { ...hl, emphasis: { ...hl.emphasis, color } } } } as S;
 }
 
 // ── 1.6.2 — CUÁNDO SE APLICA LA SOMBRA: MEDIDO, NO DECLARADO POR PIEZA ──
@@ -2708,6 +2851,32 @@ export function overlayTextShadow(te: { color: string; blurPct: number; offsetPc
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
+
+/** 1.6.3 — desenfoca, en la foto limpia, las cajas de los letreros que quedan bajo el texto (0..1). Sutil: el
+ *  desenfoque es un % del ancho y la caja se agranda un poco para que no quede un borde duro. Devuelve PNG. Nunca
+ *  lanza: si falla, el letrero queda como está y se dice. */
+async function blurRegions(bytes: Uint8Array, boxes: FaceBox[], width: number, height: number, blurPct: number)
+  : Promise<{ bytes: Uint8Array | null; error: string | null }> {
+  try {
+    const sigma = Math.max(0.3, (blurPct / 100) * width);
+    const grow = Math.round(sigma * 2);
+    const layers: Array<{ input: Buffer; left: number; top: number }> = [];
+    for (const b of boxes) {
+      const left = Math.max(0, Math.floor(b.x0 * width) - grow);
+      const top = Math.max(0, Math.floor(b.y0 * height) - grow);
+      const w = Math.min(width - left, Math.ceil(b.x1 * width) + grow - left);
+      const h = Math.min(height - top, Math.ceil(b.y1 * height) + grow - top);
+      if (w < 2 || h < 2) continue;
+      const input = await sharp(Buffer.from(bytes)).extract({ left, top, width: w, height: h }).blur(sigma).png().toBuffer();
+      layers.push({ input, left, top });
+    }
+    if (!layers.length) return { bytes: null, error: 'cajas de letrero vacías' };
+    const out = await sharp(Buffer.from(bytes)).composite(layers).png().toBuffer();
+    return { bytes: new Uint8Array(out), error: null };
+  } catch (e) {
+    return { bytes: null, error: `desenfoque falló: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200) };
+  }
+}
 
 /** 1.6.2 — luminancias WCAG del fondo debajo del bloque de texto. Se reduce la región a ≤ 64 px de ancho (la
  *  decisión es de área, no de detalle). Nunca lanza: sin muestras, `decideTextEffect` aplica la sombra y se dice. */
@@ -2875,6 +3044,11 @@ const FACES_PROMPT =
   'Detect every human face visible in this image, including faces in profile, partially visible or turned away. ' +
   'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, tightly around the FACE ONLY: ' +
   'from the eyebrows to the chin and from ear to ear. Do not include hair, neck or shoulders. If there are no faces, return an empty list.';
+// 1.6.3 — se suma sólo si la marca declara `avoid_scene_text`: sin el token, la petición es la de 1.6.2.
+const SIGNS_PROMPT =
+  ' Also detect every area of legible text or signage that is part of the scene itself: lit signs (for example an ON AIR sign), ' +
+  'posters, screens, boards and lettering on walls. Return each one in signs as box_2d with the same format, tightly around the sign. ' +
+  'Do not include product packaging or labels, nor text on clothing. If there are none, return an empty signs list.';
 
 // ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
 // Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
@@ -2928,13 +3102,14 @@ async function getAccessToken(): Promise<string> {
 // ── AUTH-VERTEX:END ──
 
 type FaceCheck = {
-  faces: FaceBox[] | null; model: string; called: boolean; http_status: number | null;
+  faces: FaceBox[] | null; signs: FaceBox[] | null; model: string; called: boolean; http_status: number | null;
   usage: { input_tokens: number; output_tokens: number } | null; error: string | null; duration_ms: number;
 };
 
-async function detectFaces(bytes: Uint8Array, mime: string): Promise<FaceCheck> {
+async function detectFaces(bytes: Uint8Array, mime: string, opts: { signs?: boolean } = {}): Promise<FaceCheck> {
   const t0 = Date.now();
-  const out: FaceCheck = { faces: null, model: FACES_MODEL(), called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const out: FaceCheck = { faces: null, signs: null, model: FACES_MODEL(), called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const boxList = { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'], properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } };
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), FACES_TIMEOUT_MS);
   try {
@@ -2946,14 +3121,12 @@ async function detectFaces(bytes: Uint8Array, mime: string): Promise<FaceCheck> 
       method: 'POST', signal: controller.signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT }] }],
+        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') }] }],
         generationConfig: {
           temperature: 0, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 },
-          responseSchema: {
-            type: 'OBJECT', required: ['faces'],
-            properties: { faces: { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'],
-              properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } } },
-          },
+          responseSchema: opts.signs
+            ? { type: 'OBJECT', required: ['faces', 'signs'], properties: { faces: boxList, signs: boxList } }
+            : { type: 'OBJECT', required: ['faces'], properties: { faces: boxList } },
         },
       }),
     });
@@ -2967,6 +3140,7 @@ async function detectFaces(bytes: Uint8Array, mime: string): Promise<FaceCheck> 
     const text = (data?.candidates?.[0]?.content?.parts ?? []).map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('');
     if (!text) throw new Error(`sin respuesta (${data?.candidates?.[0]?.finishReason ?? 'sin texto'})`);
     out.faces = parseFaceBoxes(text);
+    if (opts.signs) out.signs = parseFaceBoxes(text, 'signs');
   } catch (err) {
     out.error = err instanceof Error && err.name === 'AbortError' ? `el detector superó ${FACES_TIMEOUT_MS / 1000} s`
       : (err instanceof Error ? err.message : String(err)).slice(0, 240);
@@ -3191,32 +3365,55 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let finalStyle = areaFit.style;
 
     // 1.6.0 — el texto no tapa una cara. Sólo si la marca o el canal lo declaran y hay titular.
+    // 1.6.3 — con `avoid_scene_text`, la MISMA llamada pide también los letreros de la escena.
     let faceMeta: Record<string, unknown> | null = null;
+    let signsUnder: FaceBox[] = [];
     if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
-      const fc = await detectFaces(cleanBytes, dims.mime);
+      const wantSigns = !!finalStyle.layout.avoidSceneText;
+      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns });
       faceMeta = { model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
-        duration_ms: fc.duration_ms, boxes: fc.faces, error: fc.error };
+        duration_ms: fc.duration_ms, boxes: fc.faces, ...(wantSigns ? { sign_boxes: fc.signs } : {}), error: fc.error };
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
-          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null });
+          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs });
         finalStyle = ch.style;
         faceMeta = { ...faceMeta, ...(ch.report ?? {}) };
+        signsUnder = ch.report?.signs_under_text ?? [];
       } else {
         finalStyle = { ...finalStyle, markers: [...finalStyle.markers,
           `OVERLAY_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; se compone en el ancla declarada (${finalStyle.layout.anchor})`] };
       }
     }
 
-    // 1.6.2 — la sombra con `when: 'low_contrast'` se decide midiendo el fondo debajo del bloque YA ubicado.
+    // 1.6.3 — si el texto igual cae sobre un letrero y la marca declara `blur_pct`, ese letrero se desenfoca.
+    let bgBytes: Uint8Array = cleanBytes;
+    const blurPct = finalStyle.layout.avoidSceneText?.blurPct ?? null;
+    if (signsUnder.length && blurPct) {
+      const bl = await blurRegions(cleanBytes, signsUnder, dims.width, dims.height, blurPct);
+      if (bl.bytes) {
+        bgBytes = bl.bytes;
+        finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_SIGN_BLURRED: ${signsUnder.length} letrero(s) bajo el texto, desenfoque ${blurPct} % del ancho`] };
+        if (faceMeta) faceMeta = { ...faceMeta, signs_blurred: signsUnder.length };
+      } else {
+        finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_SIGN_BLUR_FAILED: ${bl.error}; el letrero queda como está`] };
+      }
+    }
+    // `blurRegions` devuelve PNG; sin desenfoque, la foto limpia con su tipo de siempre.
+    const bgSrc = `data:${bgBytes === cleanBytes ? dims.mime : 'image/png'};base64,${b64(bgBytes)}`;
+
+    // 1.6.2 / 1.6.3 — lo que se mide sobre el fondo debajo del bloque YA ubicado: el color del énfasis
+    // (`emphasis_contrast`) y la sombra con `when: 'low_contrast'`. Una sola composición sin texto para las dos.
     let textEffectMeta: Record<string, unknown> | null = null;
+    let emphasisContrastMeta: Record<string, unknown> | null = null;
     const teLow = finalStyle.textEffect?.when === 'low_contrast' ? finalStyle.textEffect : null;
-    if (teLow && finalStyle.slots.headline) {
+    const ec = finalStyle.layout.emphasisContrast && finalStyle.slots.headline?.emphasis ? finalStyle.layout.emphasisContrast : null;
+    if ((teLow || ec) && finalStyle.slots.headline) {
       const rect = overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor);
       // Lo que el texto tendrá detrás: la escena entera sin texto (foto + velo + franja + producto).
-      let underBytes: Uint8Array = cleanBytes;
+      let underBytes: Uint8Array = bgBytes;
       try {
         const under = buildOverlayScene({ style: backgroundOnlyStyle(finalStyle), width: dims.width, height: dims.height,
-          backgroundSrc: `data:${dims.mime};base64,${b64(cleanBytes)}`, products: productImgs, productLayer: prodPick.layer });
+          backgroundSrc: bgSrc, products: productImgs, productLayer: prodPick.layer });
         const underSvg = await satori(under as any, { width: dims.width, height: dims.height,
           fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })) });
         underBytes = new Uint8Array(new Resvg(underSvg, { fitTo: { mode: 'original' } }).render().asPng());
@@ -3224,24 +3421,37 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_CONTRAST_ON_CLEAN_IMAGE: no se pudo componer el fondo sin texto (${e instanceof Error ? e.message.slice(0, 120) : String(e)}); se mide sobre la foto limpia`] };
       }
       const bg = await sampleRegionLuminance(underBytes, rect, dims.width, dims.height);
-      const textHexes = (['headline', 'subheadline'] as const).flatMap((s) => {
-        const sl = finalStyle.slots[s];
-        return sl ? [sl.color, ...(sl.emphasis?.color ? [sl.emphasis.color] : [])] : [];
-      });
-      const d = decideTextEffect({ textHexes, bgLuminances: bg.luminances, minContrast: teLow.minContrast!, shadowHex: teLow.shadowHex! });
-      textEffectMeta = { when: 'low_contrast', applied: d.apply, ...d, samples: bg.luminances.length,
-        rect: { x0: Math.round(rect.x0), y0: Math.round(rect.y0), x1: Math.round(rect.x1), y1: Math.round(rect.y1) },
-        ...(bg.error ? { sample_error: bg.error } : {}) };
-      if (!d.apply) {
-        const { textEffect: _omit, ...rest } = finalStyle;
-        finalStyle = rest as typeof finalStyle;
+      const rectOut = { x0: Math.round(rect.x0), y0: Math.round(rect.y0), x1: Math.round(rect.x1), y1: Math.round(rect.y1) };
+
+      if (ec) {
+        const d = decideEmphasisColor({ currentColor: finalStyle.slots.headline!.emphasis!.color, fallbacks: ec.fallbacks,
+          bgLuminances: bg.luminances, minContrast: ec.minContrast });
+        emphasisContrastMeta = { ...d, samples: bg.luminances.length, rect: rectOut };
+        if (d.changed && d.hex) {
+          finalStyle = withEmphasisColor(finalStyle, hexToRgba(d.hex, 1));
+          finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_EMPHASIS_RECOLORED: ${d.reason}`] };
+        }
       }
-      if (bg.error) finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_CONTRAST_UNMEASURED: ${bg.error}; se aplica la sombra declarada`] };
+
+      if (teLow) {
+        const textHexes = (['headline', 'subheadline'] as const).flatMap((s) => {
+          const sl = finalStyle.slots[s];
+          return sl ? [sl.color, ...(sl.emphasis?.color ? [sl.emphasis.color] : [])] : [];
+        });
+        const d = decideTextEffect({ textHexes, bgLuminances: bg.luminances, minContrast: teLow.minContrast!, shadowHex: teLow.shadowHex! });
+        textEffectMeta = { when: 'low_contrast', applied: d.apply, ...d, samples: bg.luminances.length, rect: rectOut,
+          ...(bg.error ? { sample_error: bg.error } : {}) };
+        if (!d.apply) {
+          const { textEffect: _omit, ...rest } = finalStyle;
+          finalStyle = rest as typeof finalStyle;
+        }
+        if (bg.error) finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_CONTRAST_UNMEASURED: ${bg.error}; se aplica la sombra declarada`] };
+      }
     }
 
     const scene = buildOverlayScene({
       style: finalStyle, width: dims.width, height: dims.height,
-      backgroundSrc: `data:${dims.mime};base64,${b64(cleanBytes)}`,
+      backgroundSrc: bgSrc,
       products: productImgs, productLayer: prodPick.layer,
     });
 
@@ -3295,6 +3505,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(faceMeta ? { faces: faceMeta } : {}),
         // 1.6.2 — qué contraste se midió debajo del texto y si la sombra se aplicó.
         ...(textEffectMeta ? { text_effect: textEffectMeta } : {}),
+        // 1.6.3 — si el énfasis cambió de color para leerse, y por qué.
+        ...(emphasisContrastMeta ? { emphasis_contrast: emphasisContrastMeta } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
