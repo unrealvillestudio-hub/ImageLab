@@ -54,6 +54,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
+import { GoogleAuth } from 'google-auth-library';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -92,7 +93,16 @@ declare const process: { env: Record<string, string | undefined> };
 //         marca) y `layout.safe_zone_pct` (bordes que la interfaz de la plataforma tapa: el texto se compone
 //         dentro). El límite rige el post y la portada del carrusel; las láminas interiores son tarjetas de
 //         texto por diseño. Sin los tokens, la escena sale idéntica a la de 1.4.0.
-export const COMPOSITOR_VERSION = '1.5.0';
+//   1.6.0 (2026-10-15) — EL TEXTO NO TAPA UNA CARA, Y SE LEE SOBRE FONDO CLARO (Sam, 2026-10-15, pieza c3762333:
+//         «el texto está casi encima de la cara cuando hay mucho espacio disponible»; «las letras blancas quedan
+//         sobre fondo claro… un sutil tratamiento visual de sombra… No oscurezcas el fondo»). Dos tokens de DATO:
+//         `layout.avoid_faces` { enabled, anchors?, margin_pct? } — las caras de la escena se detectan (Gemini, la
+//         misma vía de Vertex que el inspector) y el bloque se compone en la primera ancla candidata cuya caja no
+//         toca ninguna (por defecto: la declarada y luego las otras dos de su misma columna); si ninguna queda
+//         libre, la de menor solape, y se dice. Si la detección falla, se compone en el ancla declarada y se dice.
+//         `layout.text_effect` { kind:'shadow', color: <rol de brand_palette>, alpha, blur_pct, offset_pct } — la
+//         sombra por glifo de 1.3.4, ahora también en el overlay. Sin los tokens, la escena sale idéntica a 1.5.0.
+export const COMPOSITOR_VERSION = '1.6.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -377,7 +387,11 @@ export function resolveOverlayStyle(args: {
     // 1.5.0 — sólo existen si la marca o el canal los declaran.
     maxTextAreaPct?: number;
     safeZonePct?: { top: number; bottom: number; left: number; right: number };
+    // 1.6.0 — sólo existe si la marca o el canal lo declaran.
+    avoidFaces?: { anchors: string[]; marginPct: number; keepAlign: boolean };
   };
+  // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
+  textEffect?: { color: string; blurPct: number; offsetPct: number };
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -579,6 +593,38 @@ export function resolveOverlayStyle(args: {
     } else safeZonePct = { top: vals[0], bottom: vals[1], left: vals[2], right: vals[3] };
   }
 
+  // 1.6.0 — el texto no tapa una cara. Ausente o `enabled: false` ⇒ no existe y nada cambia.
+  let avoidFaces: { anchors: string[]; marginPct: number; keepAlign: boolean } | null = null;
+  const afTok = layoutTok.avoid_faces as unknown;
+  if (afTok != null && !(isPlain(afTok) && (afTok as Record<string, unknown>).enabled === false)) {
+    const af = afTok as Record<string, unknown>;
+    if (!isPlain(afTok) || af.enabled !== true) {
+      missing.push(`layout.avoid_faces (objeto { enabled: true, anchors?: [anclas], margin_pct?: 0..20 }; llegó ${JSON.stringify(afTok)})`);
+    } else {
+      const list = af.anchors == null ? faceAnchorCandidates(anchor) : (Array.isArray(af.anchors) ? af.anchors.map(String) : null);
+      const bad = list === null ? ['(no es una lista)'] : list.filter((a) => !ANCHORS[a]);
+      const marginPct = Number(af.margin_pct ?? 2);
+      if (bad.length) missing.push(`layout.avoid_faces.anchors: ${bad.join(', ')} (válidos: ${Object.keys(ANCHORS).join(', ')})`);
+      if (!Number.isFinite(marginPct) || marginPct < 0 || marginPct > 20) missing.push(`layout.avoid_faces.margin_pct=${af.margin_pct} (0 ≤ x ≤ 20)`);
+      if (!bad.length && list && ANCHORS[anchor] && Number.isFinite(marginPct) && marginPct >= 0 && marginPct <= 20) {
+        avoidFaces = { anchors: [...new Set([anchor, ...list])], marginPct, keepAlign: layoutTok.align != null };
+      }
+    }
+  }
+  // 1.6.0 — sombra por glifo del overlay: la MISMA forma que `carousel.text_effect` (1.3.4), con el color como
+  // ROL de `brand_palette` (como el velo y el filete del overlay), no como función del cromo de carrusel.
+  let textEffect: { color: string; blurPct: number; offsetPct: number } | null = null;
+  if (layoutTok.text_effect != null) {
+    try {
+      const te = parseCarouselTextEffect(layoutTok.text_effect);
+      const pal = palBy.get(te.fn);
+      if (!pal) missing.push(`brand_palette.role='${te.fn}' (pedido por layout.text_effect.color)`);
+      else textEffect = { color: hexToRgba(String(pal.hex), te.alpha), blurPct: te.blurPct, offsetPct: te.offsetPct };
+    } catch (e) {
+      missing.push(`layout.text_effect: ${e instanceof Error ? e.message.replace(/carousel\.text_effect/g, 'layout.text_effect').replace('función de tokens.palette', 'rol de brand_palette') : String(e)}`);
+    }
+  }
+
   if (missing.length) {
     throw new CompositorError(
       'COMPOSITOR_TOKENS_INCOMPLETE',
@@ -596,7 +642,9 @@ export function resolveOverlayStyle(args: {
       align: (layoutTok.align ? String(layoutTok.align) : ANCHORS[anchor].align) as 'left' | 'center' | 'right',
       ...(maxTextAreaPct != null ? { maxTextAreaPct } : {}),
       ...(safeZonePct ? { safeZonePct } : {}),
+      ...(avoidFaces ? { avoidFaces } : {}),
     },
+    ...(textEffect ? { textEffect } : {}),
     slots,
     scrim,
     rule,
@@ -810,12 +858,15 @@ function emphasisAtomsNode(
   base: { sizePct: number },
   em: EmphasisType & { color: string },
   width: number,
+  // 1.6.0 — la sombra del overlay viaja también a los tramos con énfasis (sin depender de la herencia).
+  textShadow?: string,
 ): Array<Record<string, any>> {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const size = r2((base.sizePct * em.sizeScale / 100) * width);
   const emStyle = {
     fontFamily: em.family, fontWeight: em.weight, fontStyle: em.italic ? 'italic' : 'normal',
     fontSize: size, letterSpacing: r2(em.letterSpacingEm * size), textTransform: em.transform, color: em.color,
+    ...(textShadow ? { textShadow } : {}),
   };
   return headlineAtoms(parts).map((atom) => ({
     type: 'div',
@@ -929,6 +980,8 @@ export function buildOverlayScene(args: {
 
   const box = overlayTextBox(style, width, height);
   const textChildren: Array<Record<string, any>> = [];
+  // 1.6.0 — sin token es undefined y ningún estilo cambia: la escena es la de 1.5.0, clave por clave.
+  const shadow = style.textEffect ? overlayTextShadow(style.textEffect, width) : undefined;
   const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => ({
     type: 'div',
     props: {
@@ -944,6 +997,7 @@ export function buildOverlayScene(args: {
         letterSpacing: px(s.letterSpacingEm * s.sizePct, width),
         textTransform: s.transform,
         textAlign: style.layout.align,
+        ...(shadow ? { textShadow: shadow } : {}),
         // 1.4.0 — con tramos, la ranura es una fila que envuelve átomos (palabras que no se cortan),
         // alineados por la línea de base: un tramo más grande no descoloca a sus vecinos.
         ...(s.parts && s.emphasis ? {
@@ -951,7 +1005,7 @@ export function buildOverlayScene(args: {
           justifyContent: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
         } : {}),
       },
-      children: s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width) : s.text,
+      children: s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
     },
   });
 
@@ -2385,6 +2439,150 @@ export function fitCarouselCoverArea(args: { chrome: CarouselChrome; metrics?: F
   if (m.areaPct > limit) warnings.push(`CAROUSEL_TEXT_AREA_EXCEEDED: ni al tamaño mínimo cabe en ${limit} % (queda en ${m.areaPct} %); se compone igual`);
   return { chrome: out, warnings, report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: m.areaPct, exceeded: m.areaPct > limit } };
 }
+// ── 1.6.0 · EL TEXTO NO TAPA UNA CARA ──────────────────────────────────────────────────────────────
+// EJE (código): QUÉ se evita —la caja del bloque de texto no toca la caja de una cara, con un margen— y CÓMO se
+// elige —la primera ancla candidata libre; si ninguna, la de menor solape—. INSTANCIA (dato): si se aplica, en
+// qué anclas se prueba y con qué margen (`layout.avoid_faces`). Las cajas de las caras las mide un modelo de
+// visión fuera de este bloque; acá entran como dato (0..1 sobre el ancho y el alto).
+export interface FaceBox { x0: number; y0: number; x1: number; y1: number }
+
+/** Candidatas por defecto: la declarada y luego las otras dos filas de SU MISMA columna (la marca eligió un lado
+ *  de la imagen; se respeta). Abajo ⇒ arriba, medio. Arriba ⇒ abajo, medio. Medio ⇒ arriba, abajo. PURO. */
+export function faceAnchorCandidates(anchor: string): string[] {
+  const a = ANCHORS[anchor];
+  if (!a) return [];
+  const col = Object.entries(ANCHORS).filter(([, v]) => v.x === a.x).map(([k, v]) => ({ k, y: v.y }));
+  const order = a.y === 'flex-end' ? ['flex-start', 'center'] : a.y === 'flex-start' ? ['flex-end', 'center'] : ['flex-start', 'flex-end'];
+  return [anchor, ...order.map((y) => col.find((c) => c.y === y)?.k).filter((k): k is string => !!k)];
+}
+
+/** La caja (px) del bloque de texto con un ancla dada: las mismas medidas que `measureOverlayText` y los mismos
+ *  rellenos que `overlayTextBox`, colocada como la coloca el flex de `buildOverlayScene`. PURO. */
+export function overlayTextRect(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined, anchor: string,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const a = ANCHORS[anchor];
+  const box = overlayTextBox(style, width, height);
+  const m = measureOverlayText(style, width, height, metrics);
+  const innerW = width - box.left - box.right;
+  const innerH = height - box.top - box.bottom;
+  const x0 = a.x === 'flex-start' ? box.left : a.x === 'center' ? box.left + (innerW - m.width) / 2 : width - box.right - m.width;
+  const y0 = a.y === 'flex-start' ? box.top : a.y === 'center' ? box.top + (innerH - m.height) / 2 : height - box.bottom - m.height;
+  return { x0, y0, x1: x0 + m.width, y1: y0 + m.height };
+}
+
+/** Las cajas de caras que devuelve el modelo (`{ faces: [{ box_2d: [ymin, xmin, ymax, xmax] }] }`, 0..1000) a
+ *  0..1. Lo que no tiene forma de caja se descarta; nunca se inventa una. PURO. */
+export function parseFaceBoxes(text: string): FaceBox[] {
+  let data: any;
+  try { data = JSON.parse(text); } catch { return []; }
+  const list = Array.isArray(data?.faces) ? data.faces : Array.isArray(data) ? data : [];
+  const out: FaceBox[] = [];
+  for (const f of list) {
+    const b = Array.isArray(f?.box_2d) ? f.box_2d.map(Number) : null;
+    if (!b || b.length !== 4 || b.some((v: number) => !Number.isFinite(v))) continue;
+    const c = (v: number) => Math.min(1, Math.max(0, v / 1000));
+    const [y0, x0, y1, x1] = [c(b[0]), c(b[1]), c(b[2]), c(b[3])];
+    if (x1 > x0 && y1 > y0) out.push({ x0, y0, x1, y1 });
+  }
+  return out;
+}
+
+/** Los escalones para que el bloque quepa en un hueco: el titular baja por sus `fit_steps` más chicos, luego la
+ *  bajada por los suyos, y por último la bajada se quita — el mismo orden que el límite de área de 1.5.0. El
+ *  texto nunca se recorta ni se reescribe. PURO. */
+function faceFitLadder(base: ReturnType<typeof resolveOverlayStyle>): Array<{ style: ReturnType<typeof resolveOverlayStyle>; what: string[] }> {
+  const hl = base.slots.headline;
+  const sub = base.slots.subheadline;
+  if (!hl) return [];
+  type St = { h: number; s: number | null; drop: boolean };
+  const out: Array<{ style: ReturnType<typeof resolveOverlayStyle>; what: string[] }> = [];
+  let st: St = { h: hl.sizePct, s: sub ? sub.sizePct : null, drop: false };
+  const push = (x: St) => {
+    const what: string[] = [];
+    if (x.h !== hl.sizePct) what.push(`titular ${hl.sizePct}→${x.h} %`);
+    if (sub && !x.drop && x.s != null && x.s !== sub.sizePct) what.push(`bajada ${sub.sizePct}→${x.s} %`);
+    if (x.drop) what.push('sin bajada');
+    out.push({ what, style: { ...base, slots: {
+      headline: { ...hl, sizePct: x.h },
+      subheadline: !sub || x.drop ? null : { ...sub, sizePct: x.s ?? sub.sizePct },
+    } } });
+  };
+  for (const h of (hl.fitSmaller ?? []).filter((v) => v < hl.sizePct)) push(st = { ...st, h });
+  if (sub) for (const v of (sub.fitSmaller ?? []).filter((v) => v < sub.sizePct)) push(st = { ...st, s: v });
+  if (sub) push(st = { ...st, drop: true });
+  return out;
+}
+
+/** Elige el ancla del bloque de texto que no tapa ninguna cara. Sin `avoidFaces` o sin titular devuelve EL MISMO
+ *  estilo. Orden: (1) la primera candidata libre al tamaño de siempre; (2) si ninguna, la que queda libre con el
+ *  MENOR ajuste (escalones de `faceFitLadder`); (3) si ni así, la de menor solape al tamaño de siempre, y se dice.
+ *  El ancla de la capa de producto (si se pega) no es candidata: las dos capas se taparían. PURO. */
+export function chooseOverlayAnchor(args: {
+  style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
+  metrics?: Record<string, FontAdvance | null | undefined> | null; faces: FaceBox[]; productAnchor?: string | null;
+}): { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
+  faces: number; anchor_declared: string; anchor_used: string; moved: boolean; overlap_pct: number;
+  candidates: Array<{ anchor: string; overlap_pct: number }>; reduced: string[];
+} } {
+  const { style, width, height } = args;
+  const af = style.layout.avoidFaces;
+  if (!af || !style.slots.headline) return { style, report: null };
+  const declared = style.layout.anchor;
+  const pad = (af.marginPct / 100) * Math.min(width, height);
+  const boxes = args.faces.map((f) => ({ x0: f.x0 * width - pad, y0: f.y0 * height - pad, x1: f.x1 * width + pad, y1: f.y1 * height + pad }));
+  const cands = af.anchors.filter((a) => ANCHORS[a] && a !== (args.productAnchor ?? null));
+  const score = (st: ReturnType<typeof resolveOverlayStyle>) => cands.map((anchor) => {
+    const r = overlayTextRect(st, width, height, args.metrics, anchor);
+    const area = Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
+    let inter = 0;
+    for (const b of boxes) {
+      const w = Math.min(r.x1, b.x1) - Math.max(r.x0, b.x0);
+      const h = Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0);
+      if (w > 0 && h > 0) inter += w * h;
+    }
+    return { anchor, overlap_pct: Math.round((10000 * inter) / area) / 100 };
+  });
+  const scored = score(style);
+  if (!scored.length) return { style, report: null };
+  let base = style;
+  let what: string[] = [];
+  let best = scored.find((c) => c.overlap_pct === 0) ?? null;
+  if (!best) {
+    for (const step of faceFitLadder(style)) {
+      const free = score(step.style).find((c) => c.overlap_pct === 0);
+      if (free) { best = free; base = step.style; what = step.what; break; }
+    }
+  }
+  if (!best) best = scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]);
+  const declaredScore = scored.find((c) => c.anchor === declared)?.overlap_pct ?? 0;
+  const markers = [...style.markers];
+  if (best.anchor !== declared) {
+    markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${best.anchor}`);
+  }
+  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} sin tapar una cara: ${what.join(' · ')}`);
+  if (best.overlap_pct > 0) {
+    markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto libre de caras ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
+  }
+  const out = best.anchor === declared && markers.length === style.markers.length ? style : {
+    ...base,
+    layout: { ...base.layout, anchor: best.anchor, align: af.keepAlign ? base.layout.align : ANCHORS[best.anchor].align },
+    markers,
+  };
+  return { style: out, report: {
+    faces: args.faces.length, anchor_declared: declared, anchor_used: best.anchor, moved: best.anchor !== declared,
+    overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
+  } };
+}
+
+/** 1.6.0 — el `textShadow` del overlay: las mismas dos sombras que `carouselTextShadow` (halo y caída). PURO. */
+export function overlayTextShadow(te: { color: string; blurPct: number; offsetPct: number }, canvasWidth: number): string {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const blur = r2((te.blurPct / 100) * canvasWidth);
+  const off = r2((te.offsetPct / 100) * canvasWidth);
+  return `0px 0px ${blur}px ${te.color}, 0px ${off}px ${blur}px ${te.color}`;
+}
+
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -2520,6 +2718,121 @@ const CORS = {
 };
 
 export const config = { maxDuration: 60 };
+
+
+// ── 1.6.0 · DETECCIÓN DE CARAS (red) ─────────────────────────────────────────────────────────────────
+// Sólo corre si la marca o el canal declaran `layout.avoid_faces`. Usa la misma vía de Vertex que el inspector
+// (`api/inspect.ts`): las dos copias de abajo son LITERALES de las suyas, y `tests/compositor_caras_test.mjs`
+// exige que no diverjan. NUNCA tumba la composición: si falla, se compone en el ancla declarada y se dice.
+const FACES_GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
+const FACES_GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
+const FACES_MODEL = () => (process.env.IMAGELAB_FACES_MODEL ?? '').trim() || 'gemini-2.5-flash';
+const FACES_TIMEOUT_MS = 15_000;
+const FACES_PROMPT =
+  'Detect every human face visible in this image, including faces in profile, partially visible or turned away. ' +
+  'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, covering the whole head ' +
+  'from the hairline to the chin. If there are no faces, return an empty list.';
+
+// ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
+// Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
+//
+// Una región (`us-central1`) vive en `{region}-aiplatform.googleapis.com`. La ubicación `global` NO
+// sigue ese patrón: su host es `aiplatform.googleapis.com`, sin prefijo. Construir la URL con la
+// plantilla regional daría `global-aiplatform.googleapis.com`, un host que no existe.
+//
+// Por qué importa: Gemini 2.5 en Vertex usa cuota compartida dinámica y el endpoint `global` reparte
+// la carga entre regiones, en vez de depender de la capacidad de una sola. El carril midió 429
+// «Resource exhausted» en la región fija (138 en agosto, 32 en septiembre, en
+// public.ops_generation_ledger).
+//
+// La ubicación sigue siendo DATO (`GOOGLE_CLOUD_LOCATION`); este bloque no elige ninguna. Sin la
+// variable, el comportamiento es idéntico al de antes (`us-central1`).
+export function vertexBaseUrl(location: string, project: string): string {
+  const loc = String(location ?? '').trim();
+  if (!loc) throw new Error('VERTEX_LOCATION_EMPTY: GOOGLE_CLOUD_LOCATION está vacío.');
+  const host = loc === 'global' ? 'aiplatform.googleapis.com' : `${loc}-aiplatform.googleapis.com`;
+  return `https://${host}/v1/projects/${project}/locations/${loc}`;
+}
+// ── ENDPOINT-VERTEX:END ──
+
+// ── AUTH-VERTEX:BEGIN ── copia literal de la autenticación de `api/execute.ts`.
+let _auth: GoogleAuth | null = null;
+function getAuth(): GoogleAuth {
+  if (_auth) return _auth;
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY ?? '';
+  if (!raw) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY missing — paste the Service Account JSON into Vercel env vars.');
+  }
+  let credentials: any;
+  try {
+    credentials = JSON.parse(raw);
+  } catch {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not valid JSON. Paste the raw JSON of the SA key.');
+  }
+  _auth = new GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+  return _auth;
+}
+
+async function getAccessToken(): Promise<string> {
+  const client = await getAuth().getClient();
+  const tokenResponse = await client.getAccessToken();
+  if (!tokenResponse.token) throw new Error('Failed to obtain GCP access token from Service Account.');
+  return tokenResponse.token;
+}
+// ── AUTH-VERTEX:END ──
+
+type FaceCheck = {
+  faces: FaceBox[] | null; model: string; called: boolean; http_status: number | null;
+  usage: { input_tokens: number; output_tokens: number } | null; error: string | null; duration_ms: number;
+};
+
+async function detectFaces(bytes: Uint8Array, mime: string): Promise<FaceCheck> {
+  const t0 = Date.now();
+  const out: FaceCheck = { faces: null, model: FACES_MODEL(), called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), FACES_TIMEOUT_MS);
+  try {
+    if (!FACES_GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+    const token = await getAccessToken();
+    const url = `${vertexBaseUrl(FACES_GCP_LOCATION(), FACES_GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(out.model)}:generateContent`;
+    out.called = true;
+    const res = await fetch(url, {
+      method: 'POST', signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT }] }],
+        generationConfig: {
+          temperature: 0, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 },
+          responseSchema: {
+            type: 'OBJECT', required: ['faces'],
+            properties: { faces: { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'],
+              properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } } },
+          },
+        },
+      }),
+    });
+    out.http_status = res.status;
+    if (!res.ok) throw new Error(`Vertex ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const data = await res.json();
+    const um = data?.usageMetadata;
+    if (typeof um?.promptTokenCount === 'number' && typeof um?.candidatesTokenCount === 'number') {
+      out.usage = { input_tokens: um.promptTokenCount, output_tokens: um.candidatesTokenCount + (Number(um.thoughtsTokenCount) || 0) };
+    }
+    const text = (data?.candidates?.[0]?.content?.parts ?? []).map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('');
+    if (!text) throw new Error(`sin respuesta (${data?.candidates?.[0]?.finishReason ?? 'sin texto'})`);
+    out.faces = parseFaceBoxes(text);
+  } catch (err) {
+    out.error = err instanceof Error && err.name === 'AbortError' ? `el detector superó ${FACES_TIMEOUT_MS / 1000} s`
+      : (err instanceof Error ? err.message : String(err)).slice(0, 240);
+  } finally {
+    clearTimeout(tid);
+    out.duration_ms = Date.now() - t0;
+  }
+  return out;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v);
@@ -2732,7 +3045,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
     }
     const areaFit = fitOverlayTextArea({ style, width: dims.width, height: dims.height, metrics: areaMetrics });
-    const finalStyle = areaFit.style;
+    let finalStyle = areaFit.style;
+
+    // 1.6.0 — el texto no tapa una cara. Sólo si la marca o el canal lo declaran y hay titular.
+    let faceMeta: Record<string, unknown> | null = null;
+    if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
+      const fc = await detectFaces(cleanBytes, dims.mime);
+      faceMeta = { model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
+        duration_ms: fc.duration_ms, faces: fc.faces, error: fc.error };
+      if (fc.faces) {
+        const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
+          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null });
+        finalStyle = ch.style;
+        faceMeta = { ...faceMeta, ...(ch.report ?? {}) };
+      } else {
+        finalStyle = { ...finalStyle, markers: [...finalStyle.markers,
+          `OVERLAY_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; se compone en el ancla declarada (${finalStyle.layout.anchor})`] };
+      }
+    }
 
     const scene = buildOverlayScene({
       style: finalStyle, width: dims.width, height: dims.height,
@@ -2786,6 +3116,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       meta: {
         carousel_applied: false, warnings,
         ...(areaFit.report ? { text_area: areaFit.report } : {}),
+        // 1.6.0 — la detección de caras: qué vio, dónde quedó el texto y el consumo del modelo (el carril lo asienta).
+        ...(faceMeta ? { faces: faceMeta } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
