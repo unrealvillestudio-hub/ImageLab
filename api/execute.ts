@@ -1566,22 +1566,27 @@ export function subjectLetter(i: number): string { return SUBJECT_LETTERS[i] ?? 
  * orden A, B…), del lugar y del producto; devuelve cuáles viajan.
  *
  * Con 0 o 1 persona: la regla de siempre, sin presupuesto (persona 3, o 2 si hay lugar o producto;
- * lugar 1; producto 2). Con 2 o más: `MODEL_MAX_INPUT_IMAGES`, repartido en este orden y por este motivo:
+ * lugar 1; producto 2). Con 2 o más: `MODEL_MAX_INPUT_IMAGES` MENOS las imágenes reservadas (la imagen
+ * actual al editar, `reserved`), repartido en este orden y por este motivo:
  *   1. una foto por persona — sin foto, el modelo inventa la cara (medido, M1 de la ronda 1);
- *   2. una del producto, si lo hay — un envase sin foto es un envase inventado; si no cabe, se excede
- *      el presupuesto en esa una y se declara en `over_budget`;
- *   3. más fotos de las personas, de a una y empezando por A (hasta 2 por persona);
- *   4. el lugar, sólo si aún queda plaza — también va descrito en texto, así que es lo primero que cede.
+ *   2. una SEGUNDA foto de la persona A (la protagonista, primera en la lista) — con una sola foto por
+ *      persona la identidad cumplió en 3 de 6 tomas; con dos de la protagonista, 6 de 6 (2026-10-03);
+ *   3. el producto, si cabe una foto suya — si NO cabe, el producto SALE DE LA ESCENA (`product_left`):
+ *      un envase sin foto es un envase inventado, y pasarse del presupuesto hace que el modelo descarte
+ *      fotos de identidad;
+ *   4. más fotos de las demás personas, de a una (hasta 2 por persona);
+ *   5. el lugar, sólo si aún queda plaza — también va descrito en texto, así que es lo primero que cede.
  *
- * ⛔ NO OPERATIVO — orden anterior (2026-10-03, PR #39), se conserva por trazabilidad: persona →
- * producto → LUGAR → fotos extra. Medido en producción (5c05a19) el mismo día, set de podcast con dos
- * personas: con la foto del lugar, cada persona viajó con UNA foto y la identidad cumplió en 3 de 6
- * tomas (la entrevistadora perdió el largo de pelo y la edad). Con el lugar sólo en texto y la
- * entrevistadora con 2 fotos, 6 de 6 (hojas `motor_personas_A.jpg` y `motor_personas_A2.jpg`).
+ * ⛔ NO OPERATIVO — orden anterior (2026-10-03, PR #39 y siguiente), se conserva por trazabilidad: persona
+ * → producto (excediendo el presupuesto si hacía falta) → fotos extra → lugar, y sin contar la imagen
+ * actual al editar. Medido en producción el 2026-10-15 (Sam: «el regenerador de imagen no está respetando
+ * los blueprints de avatars»): con dos personas y el kit, cada persona viajó con UNA foto (18ff54c6,
+ * 9c684715: `reference_images = 3`), y al editar viajaron 4 imágenes a un modelo que admite 3 (c0a849f8).
  */
-export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[] }): {
+export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[]; reserved?: number }): {
   persona: string[][]; location: string[]; product: string[];
-  budget: number | null; over_budget: boolean; dropped: { persona: number; location: number; product: number };
+  budget: number | null; over_budget: boolean; product_left: boolean;
+  dropped: { persona: number; location: number; product: number };
 } {
   const pr = args.personaRefs ?? [];
   const lr = args.locationRefs ?? [];
@@ -1591,28 +1596,37 @@ export function allocateReferences(args: { personaRefs: string[][]; locationRefs
     const product = xr.slice(0, MAX_PRODUCT_REFS);
     const cap = location.length || product.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
     const persona = pr.map((r) => (r ?? []).slice(0, cap));
-    return { persona, location, product, budget: null, over_budget: false,
+    return { persona, location, product, budget: null, over_budget: false, product_left: false,
       dropped: { persona: (pr[0]?.length ?? 0) - (persona[0]?.length ?? 0), location: lr.length - location.length, product: xr.length - product.length } };
   }
-  const budget = MODEL_MAX_INPUT_IMAGES;
-  const counts = pr.map((r) => ((r ?? []).length ? 1 : 0));
-  let used = counts.reduce((a, b) => a + b, 0);
-  const product = xr.length ? xr.slice(0, 1) : [];
+  const reserved = Math.max(0, Math.floor(Number(args.reserved ?? 0)) || 0);
+  const budget = Math.max(0, MODEL_MAX_INPUT_IMAGES - reserved);
+  const counts = pr.map(() => 0);
+  let used = 0;
+  // 1 · una foto por persona, en orden, mientras quepa.
+  for (let i = 0; i < pr.length && used < budget; i++) if ((pr[i] ?? []).length) { counts[i] = 1; used++; }
+  // 2 · la segunda foto de la protagonista (A).
+  if (used < budget && counts[0] >= 1 && (pr[0] ?? []).length >= 2) { counts[0] = 2; used++; }
+  // 3 · el producto, sólo si cabe; si no, sale de la escena.
+  const product = xr.length && used < budget ? xr.slice(0, 1) : [];
   used += product.length;
+  const productLeft = xr.length > 0 && product.length === 0;
+  // 4 · más fotos de las demás, de a una.
   let grew = true;
   while (used < budget && grew) {
     grew = false;
-    for (let i = 0; i < pr.length && used < budget; i++) {
+    for (let i = 1; i < pr.length && used < budget; i++) {
       const cap = Math.min((pr[i] ?? []).length, MAX_PERSONA_REFS_WITH_OTHERS);
-      if (counts[i] < cap) { counts[i]++; used++; grew = true; }
+      if (counts[i] >= 1 && counts[i] < cap) { counts[i]++; used++; grew = true; }
     }
   }
+  // 5 · el lugar, si queda plaza.
   const location = lr.length && used < budget ? lr.slice(0, 1) : [];
   used += location.length;
   const persona = pr.map((r, i) => (r ?? []).slice(0, counts[i]));
   const totalPersona = pr.reduce((a, r) => a + (r ?? []).length, 0);
   return {
-    persona, location, product, budget, over_budget: used > budget,
+    persona, location, product, budget, over_budget: false, product_left: productLeft,
     dropped: { persona: totalPersona - persona.reduce((a, r) => a + r.length, 0), location: lr.length - location.length, product: xr.length - product.length },
   };
 }
@@ -2645,8 +2659,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       console.log(`[ImageLab][CANAL] brand=${request.brandId} fila de canal ${overlay.canal} sobre la de marca (declara: ${overlay.declared.join(', ') || 'nada del generador'}): encuadre=${framingR.framing} franja=${textZone ? 'sí' : 'no'}`);
     }
     const productComposited = params.product_composited === true || productMode === 'composite';
-    const productInScene = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
+    const productWanted = productIn && productMode !== 'composite' && productIn.items.length ? productIn : null;
     const personaUsed = usedPersonas.length > 0;
+
+    // 2026-10-03 — el reparto se decide ANTES de sintetizar: con 2+ personas el lugar puede ceder su
+    // plaza, y entonces el constructor no debe hablar de «la foto del lugar adjunta» (no viaja).
+    // 2026-10-15 — la imagen actual (editar) cuenta dentro del presupuesto, y con 2+ personas el producto
+    // sólo entra si cabe su foto después de la identidad; si no cabe, SALE DE LA ESCENA (no se pinta
+    // inventado ni desplaza fotos de identidad).
+    const alloc = allocateReferences({
+      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
+      locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
+      productRefs: productWanted ? productWanted.items.map((i) => i.image_url) : [],
+      reserved: mode === 'edit_from_current' ? 1 : 0,
+    });
+    const productInScene = alloc.product_left ? null : productWanted;
+    if (alloc.product_left) {
+      console.warn(`[ImageLab][PERSONAS] PRODUCT_LEFT_SCENE_FOR_IDENTITY: ${usedPersonas.length} personas y ${alloc.budget} plazas; el producto (${productWanted!.items.map((i) => i.name).join(', ')}) sale de la escena para que viajen las fotos de identidad`);
+    }
     // 2026-10-08 — la puesta en escena del producto se decide UNA vez y la reciben las tres piezas que
     // hablan de ella: la cláusula de colocación, la de la franja de texto y el constructor. Sin persona, el
     // producto va sobre una superficie (nadie puede sostenerlo).
@@ -2655,13 +2685,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       ? (personaUsed ? productStagingFor(productInScene.kind ?? null, productInScene.items.length, stagingSeed) : 'on_surface')
       : null;
 
-    // 2026-10-03 — el reparto se decide ANTES de sintetizar: con 2+ personas el lugar puede ceder su
-    // plaza, y entonces el constructor no debe hablar de «la foto del lugar adjunta» (no viaja).
-    const alloc = allocateReferences({
-      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
-      locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
-      productRefs: productInScene ? productInScene.items.map((i) => i.image_url) : [],
-    });
     const builderLocation: PromptLocation | null = location && usedPersonas.length >= 2
       ? { ...location, reference_image_urls: alloc.location } : location;
 
@@ -2759,7 +2782,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     for (const u of locationRefs) images.push(await fetchImageInline(u));
     for (const u of productRefs) images.push(await fetchImageInline(u));
     if (alloc.over_budget) {
-      console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada: el producto no cabía en el presupuesto de ${alloc.budget} y viaja igual (sin su foto sería inventado)`);
+      console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada sobre un presupuesto de ${alloc.budget}`);
     }
 
     // `correction` sólo en el segundo intento por placa: va delante del prompt final, que no cambia.
@@ -2851,6 +2874,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       location_refs:          locationRefs.length,
       product_composited:     productComposited && !productInScene,
       product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+      // 2026-10-15 — si el producto salió de la escena para dejar sitio a la identidad, cuál y por qué.
+      ...(alloc.product_left ? { product_left_scene: { products: productWanted!.items.map((i) => i.name), reason: 'identity_budget', budget: alloc.budget } } : {}),
       // Sólo con producto en escena: sin él, la respuesta es la de siempre, byte a byte.
       ...(productStaging ? { product_staging: productStaging } : {}),
       product_refs:           productRefs.length,

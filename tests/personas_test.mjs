@@ -123,7 +123,7 @@ await ok('presupuesto: con una persona, la regla de siempre; con dos, el límite
   assert.equal(M.MODEL_MAX_INPUT_IMAGES, 3);
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: [], productRefs: [] });
   assert.deepEqual(r.persona.map((x) => x.length), [2, 1]); assert.equal(r.budget, 3); assert.equal(r.over_budget, false);
-  // Dos personas y lugar (orden medido el 2026-10-03: personas > producto > fotos extra > lugar): A 2,
+  // Dos personas y lugar (orden: una por persona > 2ª de A > producto si cabe > fotos extra > lugar): A 2,
   // B 1 y el lugar cede (va descrito en texto). Con la foto del lugar, 3 de 6; sin ella, 6 de 6.
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: L, productRefs: [] });
   assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[2, 1], 0]);
@@ -131,13 +131,24 @@ await ok('presupuesto: con una persona, la regla de siempre; con dos, el límite
   // El lugar entra sólo si las personas no tienen más fotos que ocupen la plaza.
   r = M.allocateReferences({ personaRefs: [[A[0]], [B[0]]], locationRefs: L, productRefs: [] });
   assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[1, 1], 1]);
-  // Dos personas, lugar y producto: el lugar cede (se describe en texto); el producto no.
+  // 2026-10-15 — Dos personas, lugar y producto: la identidad primero (A 2, B 1) y el producto, que ya no
+  // cabe, SALE DE LA ESCENA (antes viajaba a costa de la segunda foto de A: 18ff54c6, 9c684715).
   r = M.allocateReferences({ personaRefs: [A, B], locationRefs: L, productRefs: X });
-  assert.deepEqual([r.persona.map((x) => x.length), r.location.length, r.product.length], [[1, 1], 0, 1]);
-  assert.deepEqual(r.dropped, { persona: 4, location: 2, product: 1 });
-  // Tres personas y producto: el producto viaja igual y se declara el exceso.
+  assert.deepEqual([r.persona.map((x) => x.length), r.location.length, r.product.length, r.product_left], [[2, 1], 0, 0, true]);
+  assert.deepEqual(r.dropped, { persona: 3, location: 2, product: X.length });
+  // Tres personas y producto: una foto cada una y el producto sale; nunca se excede el presupuesto.
   r = M.allocateReferences({ personaRefs: [A, B, C], locationRefs: [], productRefs: X });
-  assert.deepEqual([r.persona.map((x) => x.length), r.product.length, r.over_budget], [[1, 1, 1], 1, true]);
+  assert.deepEqual([r.persona.map((x) => x.length), r.product.length, r.over_budget, r.product_left], [[1, 1, 1], 0, false, true]);
+  // Dos personas con fotos de UNA sola cada una y producto: cabe el producto (1 + 1 + 1).
+  r = M.allocateReferences({ personaRefs: [[A[0]], [B[0]]], locationRefs: [], productRefs: X });
+  assert.deepEqual([r.persona.map((x) => x.length), r.product.length, r.product_left], [[1, 1], 1, false]);
+  // Al editar, la imagen actual cuenta: con dos personas quedan 2 plazas, una por persona, y el producto sale
+  // (c0a849f8 viajó con 4 imágenes a un modelo que admite 3).
+  r = M.allocateReferences({ personaRefs: [A, B], locationRefs: L, productRefs: X, reserved: 1 });
+  assert.deepEqual([r.persona.map((x) => x.length), r.product.length, r.location.length, r.budget, r.product_left], [[1, 1], 0, 0, 2, true]);
+  // Una persona: sin presupuesto, el producto nunca sale (la regla de siempre).
+  r = M.allocateReferences({ personaRefs: [A], locationRefs: [], productRefs: X });
+  assert.equal(r.product_left, false); assert.equal(r.product.length, Math.min(X.length, 2));
   // Una persona sin fotos no gasta presupuesto: A sube a 2 y la plaza que queda va al lugar.
   r = M.allocateReferences({ personaRefs: [A, []], locationRefs: L, productRefs: [] });
   assert.deepEqual([r.persona.map((x) => x.length), r.location.length], [[2, 0], 1], 'la plaza de B vuelve a A');
@@ -248,7 +259,7 @@ await ok('errores declarados: más de 3 personas, persona mal formada, mirada aj
   } finally { restore(); }
 });
 
-await ok('dos personas y producto en escena: el producto viaja con su foto y el lugar cede', async () => {
+await ok('2026-10-15 · dos personas y producto: la identidad primero; el producto sale de la escena y se dice', async () => {
   const restore = silence();
   let r;
   try {
@@ -256,9 +267,12 @@ await ok('dos personas y producto en escena: el producto viaja con su foto y el 
       personas: [PERSONA_A, PERSONA_B], location: LOCATION, product: PRODUCT }), { db: DB });
   } finally { restore(); }
   const d = vertexDigest(r);
-  assert.deepEqual(d.image_parts.map((p) => p.split('IMG:')[1]), [PERSONA_A.reference_image_urls[0], PERSONA_B.reference_image_urls[0], PRODUCT.items[0].image_url]);
-  assert.ok(d.image_text.join(' ').includes('Image 3: PRODUCT, the real packaging (Llave inglesa 10")'));
-  assert.deepEqual(r.json.references_dropped, { persona: 4, location: 2, product: 1 });
+  assert.deepEqual(d.image_parts.map((p) => p.split('IMG:')[1]),
+    [PERSONA_A.reference_image_urls[0], PERSONA_A.reference_image_urls[1], PERSONA_B.reference_image_urls[0]], 'A con 2 fotos, B con 1, sin producto');
+  assert.ok(!d.image_text.join(' ').includes('PRODUCT, the real packaging'), 'el producto no se rotula: no viaja');
+  assert.deepEqual(r.json.product_in_scene, null, 'el producto no se pide en la escena');
+  assert.deepEqual(r.json.product_left_scene, { products: PRODUCT.items.map((i) => i.name), reason: 'identity_budget', budget: 3 });
+  assert.equal(d.image_parts.length <= M.MODEL_MAX_INPUT_IMAGES, true, 'nunca más imágenes de las que admite el modelo');
 });
 
 // ── 3-bis · la UI sync: los espacios viajan rotulados con el mismo constructor ─────────────────────
