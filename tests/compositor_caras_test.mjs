@@ -11,6 +11,9 @@
 //   6. compose.ts usa la misma autenticación y el mismo endpoint de Vertex que inspect.ts, literal.
 //   8. 1.6.2 — `text_effect.when: 'low_contrast'` es dato validado; la sombra se aplica sólo cuando el peor 10 % del
 //      fondo bajo el texto contrasta menos que `min_contrast` y la sombra ayuda; el cableado mide el fondo YA ubicado.
+//   9. 1.6.3 — letreros: las caras deciden el tamaño; entre anclas que tapan lo mismo de caras gana la que menos tapa
+//      un letrero; el que queda bajo el texto se informa para desenfocarlo. El énfasis cambia de color sólo si no se
+//      lee y la alternativa contrasta más. Sin los tokens, el estilo y la elección son los de 1.6.2.
 //
 // Ejecutar:  node tests/compositor_caras_test.mjs     (Node ≥ 22.18)
 
@@ -141,7 +144,7 @@ test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape ent
 test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
   assert.match(SRC, /tightly around the FACE ONLY/);
   assert.match(SRC, /boxes: fc\.faces/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.[12]'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.[123]'/);
 });
 
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {
@@ -236,6 +239,78 @@ test('8e · 1.6.2 · el fondo sin texto conserva velo y franja y no dibuja ningu
   const scene = JSON.stringify(M.buildOverlayScene({ style: bg, width: W, height: H, backgroundSrc: 'data:,' }));
   assert.ok(scene.includes('linear-gradient'), 'el velo se dibuja');
   assert.equal(scene.includes(TEXT.headline), false, 'sin titular');
+});
+
+test('9a · 1.6.3 · avoid_scene_text y emphasis_contrast son dato validado; ausentes no existen', () => {
+  const base = style({ avoid_faces: { enabled: true } });
+  assert.equal('avoidSceneText' in base.layout, false);
+  assert.equal('emphasisContrast' in base.layout, false);
+  const on = style({ avoid_faces: { enabled: true }, avoid_scene_text: { enabled: true, blur_pct: 0.6 }, emphasis_contrast: { min_contrast: 3, fallbacks: ['oscuro'] } });
+  assert.deepEqual(on.layout.avoidSceneText, { marginPct: 1, blurPct: 0.6 });
+  assert.deepEqual(on.layout.emphasisContrast, { minContrast: 3, fallbacks: [{ role: 'oscuro', hex: '#000000' }] });
+  assert.throws(() => style({ avoid_scene_text: { enabled: true } }), /pide layout\.avoid_faces/);
+  assert.throws(() => style({ avoid_faces: { enabled: true }, avoid_scene_text: { enabled: true, blur_pct: 9 } }), /blur_pct/);
+  assert.throws(() => style({ emphasis_contrast: { min_contrast: 3, fallbacks: ['no_existe'] } }), /no_existe/);
+  assert.throws(() => style({ emphasis_contrast: { min_contrast: 3 } }), /emphasis_contrast/);
+  assert.equal('avoidSceneText' in style({ avoid_faces: { enabled: true }, avoid_scene_text: { enabled: false } }).layout, false);
+});
+
+test('9b · 1.6.3 · las caras deciden; entre anclas igual de libres gana la que no tapa el letrero', () => {
+  const st = style({ avoid_faces: { enabled: true, margin_pct: 0 }, avoid_scene_text: { enabled: true, margin_pct: 0, blur_pct: 0.5 } });
+  const rect = (a) => M.overlayTextRect(st, W, H, null, a);
+  const r = rect('bottom_left');
+  const sign = { x0: r.x0 / W, y0: r.y0 / H, x1: (r.x0 + 40) / W, y1: (r.y0 + 40) / H };   // letrero bajo el ancla declarada
+  const out = M.chooseOverlayAnchor({ style: st, width: W, height: H, faces: [], signs: [sign] });
+  assert.notEqual(out.style.layout.anchor, 'bottom_left', 'se movió por el letrero');
+  assert.equal(out.report.sign_overlap_pct, 0);
+  assert.ok(out.style.markers.some((m) => m.startsWith('OVERLAY_ANCHOR_MOVED_FOR_SIGN')));
+  // Una cara manda: si la única ancla sin cara es la del letrero, se queda ahí y el letrero se informa para desenfocar.
+  const faceTop = M.overlayTextRect(st, W, H, null, 'top_left'), faceMid = M.overlayTextRect(st, W, H, null, 'middle_left');
+  const faces = [faceTop, faceMid].map((q) => ({ x0: q.x0 / W, y0: q.y0 / H, x1: q.x1 / W, y1: q.y1 / H }));
+  const out2 = M.chooseOverlayAnchor({ style: st, width: W, height: H, faces, signs: [sign] });
+  assert.equal(out2.style.layout.anchor, 'bottom_left');
+  assert.ok(out2.report.sign_overlap_pct > 0);
+  assert.equal(out2.report.signs_under_text.length, 1);
+  // Sin el token, los letreros no cuentan: la elección es la de 1.6.2.
+  const st0 = style({ avoid_faces: { enabled: true, margin_pct: 0 } });
+  const out3 = M.chooseOverlayAnchor({ style: st0, width: W, height: H, faces: [], signs: [sign] });
+  assert.equal(out3.style, st0, 'mismo objeto');
+  assert.equal('signs' in out3.report, false);
+});
+
+test('9c · 1.6.3 · el énfasis cambia sólo si no se lee y la alternativa contrasta más', () => {
+  const L = (v) => M.relLuminanceRgb(v, v + 20, Math.min(255, v + 60));
+  const cielo = Array(100).fill(L(170));                       // cielo claro
+  const azul = 'rgb(0, 149, 212)';                              // un azul medio de marca
+  const fb = [{ role: 'marino', hex: '#003A70' }, { role: 'claro', hex: '#FAFAFA' }];
+  const a = M.decideEmphasisColor({ currentColor: azul, fallbacks: fb, bgLuminances: cielo, minContrast: 3 });
+  assert.equal(a.changed, true, a.reason); assert.equal(a.role, 'marino'); assert.ok(a.contrast_after > a.contrast_before);
+  const noche = Array(100).fill(L(10));
+  const b = M.decideEmphasisColor({ currentColor: azul, fallbacks: fb, bgLuminances: noche, minContrast: 3 });
+  assert.equal(b.changed, false, 'sobre fondo oscuro el azul se lee');
+  const c = M.decideEmphasisColor({ currentColor: azul, fallbacks: [{ role: 'igual', hex: '#0095D4' }], bgLuminances: cielo, minContrast: 3 });
+  assert.equal(c.changed, false, 'una alternativa que no contrasta más no se usa');
+  assert.equal(M.decideEmphasisColor({ currentColor: azul, fallbacks: fb, bgLuminances: [], minContrast: 3 }).changed, false);
+  // La mediana decide, no el peor 10 %: mitad cielo claro, un 15 % de pelo oscuro. El marino gana aunque el pelo
+  // lo castigue en su peor 10 %.
+  const mezcla = Array(70).fill(L(170)).concat(Array(15).fill(L(120)), Array(15).fill(L(8)));
+  const d = M.decideEmphasisColor({ currentColor: azul, fallbacks: fb, bgLuminances: mezcla, minContrast: 3 });
+  assert.equal(d.changed, true, d.reason); assert.equal(d.role, 'marino');
+  const st = style({ emphasis_contrast: { min_contrast: 3, fallbacks: ['oscuro'] } });
+  const st2 = M.withEmphasisColor(st, 'rgb(0, 0, 0)');
+  assert.equal(st2.slots.headline.emphasis.color, 'rgb(0, 0, 0)');
+  assert.notEqual(st.slots.headline.emphasis.color, 'rgb(0, 0, 0)', 'no muta el original');
+});
+
+test('9d · 1.6.3 · cableado: una detección para caras y letreros, desenfoque antes de medir, énfasis antes que la sombra', () => {
+  assert.match(SRC, /detectFaces\(cleanBytes, dims\.mime, \{ signs: wantSigns \}\)/);
+  assert.match(SRC, /FACES_PROMPT \+ \(opts\.signs \? SIGNS_PROMPT : ''\)/, 'sin el token, la petición es la de 1.6.2');
+  const iBlur = SRC.indexOf('await blurRegions(cleanBytes, signsUnder');
+  const iUnder = SRC.indexOf('backgroundSrc: bgSrc, products: productImgs');
+  const iEm = SRC.indexOf('decideEmphasisColor({ currentColor');
+  const iTe = SRC.indexOf('decideTextEffect({ textHexes');
+  assert.ok(iBlur > 0 && iBlur < iUnder && iUnder < iEm && iEm < iTe, 'orden: desenfoque → fondo sin texto → énfasis → sombra');
+  assert.match(SRC, /\.\.\.\(emphasisContrastMeta \? \{ emphasis_contrast: emphasisContrastMeta \} : \{\}\)/);
 });
 
 console.log(`\n${fails.length ? '✗' : '✓'} ${pass} passed, ${fails.length} failed`);
