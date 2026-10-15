@@ -102,7 +102,13 @@ declare const process: { env: Record<string, string | undefined> };
 //         libre, la de menor solape, y se dice. Si la detección falla, se compone en el ancla declarada y se dice.
 //         `layout.text_effect` { kind:'shadow', color: <rol de brand_palette>, alpha, blur_pct, offset_pct } — la
 //         sombra por glifo de 1.3.4, ahora también en el overlay. Sin los tokens, la escena sale idéntica a 1.5.0.
-export const COMPOSITOR_VERSION = '1.6.0';
+//   1.6.1 (2026-10-15) — medido en producción con c3762333: la caja de «cabeza entera» que pedía 1.6.0 tomaba pelo
+//         y cuello, y no dejaba ninguna ancla libre (82,5 % / 32,65 % de solape). Ahora se pide el ROSTRO (cejas a
+//         mentón, oreja a oreja); el margen de `avoid_faces.margin_pct` sigue dando aire. Si ninguna ancla queda
+//         libre ni con los escalones, se elige el MENOR solape entre todas las combinaciones (ancla × escalón), y a
+//         igual solape, el menor ajuste. `meta.faces.boxes` devuelve las cajas medidas (antes el informe pisaba la
+//         lista con el número de caras).
+export const COMPOSITOR_VERSION = '1.6.1';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -2549,18 +2555,24 @@ export function chooseOverlayAnchor(args: {
   let what: string[] = [];
   let best = scored.find((c) => c.overlap_pct === 0) ?? null;
   if (!best) {
+    // 1.6.1 — sin ancla libre al tamaño de siempre: el menor ajuste que la libera; si ninguno la libera, el MENOR
+    // solape entre todas las combinaciones (ancla × escalón) y, a igual solape, el menor ajuste.
+    let low = { c: scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]), st: style, what: [] as string[] };
     for (const step of faceFitLadder(style)) {
-      const free = score(step.style).find((c) => c.overlap_pct === 0);
+      const sc = score(step.style);
+      const free = sc.find((c) => c.overlap_pct === 0);
       if (free) { best = free; base = step.style; what = step.what; break; }
+      const m = sc.reduce((a, c) => (c.overlap_pct < a.overlap_pct ? c : a), sc[0]);
+      if (m && m.overlap_pct < low.c.overlap_pct) low = { c: m, st: step.style, what: step.what };
     }
+    if (!best) { best = low.c; base = low.st; what = low.what; }
   }
-  if (!best) best = scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]);
   const declaredScore = scored.find((c) => c.anchor === declared)?.overlap_pct ?? 0;
   const markers = [...style.markers];
   if (best.anchor !== declared) {
     markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${best.anchor}`);
   }
-  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} sin tapar una cara: ${what.join(' · ')}`);
+  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : 'sin tapar una cara'}: ${what.join(' · ')}`);
   if (best.overlap_pct > 0) {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto libre de caras ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
@@ -2730,8 +2742,8 @@ const FACES_MODEL = () => (process.env.IMAGELAB_FACES_MODEL ?? '').trim() || 'ge
 const FACES_TIMEOUT_MS = 15_000;
 const FACES_PROMPT =
   'Detect every human face visible in this image, including faces in profile, partially visible or turned away. ' +
-  'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, covering the whole head ' +
-  'from the hairline to the chin. If there are no faces, return an empty list.';
+  'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, tightly around the FACE ONLY: ' +
+  'from the eyebrows to the chin and from ear to ear. Do not include hair, neck or shoulders. If there are no faces, return an empty list.';
 
 // ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
 // Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
@@ -3052,7 +3064,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
       const fc = await detectFaces(cleanBytes, dims.mime);
       faceMeta = { model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
-        duration_ms: fc.duration_ms, faces: fc.faces, error: fc.error };
+        duration_ms: fc.duration_ms, boxes: fc.faces, error: fc.error };
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
           faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null });

@@ -118,6 +118,30 @@ test('3d · ninguna libre al tamaño de siempre ⇒ el menor ajuste que la liber
   assert.equal(s.slots.subheadline !== null, true, 'el estilo de entrada no se muta');
 });
 
+test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape entre ancla × escalón', () => {
+  const s = style({ avoid_faces: { enabled: true, anchors: ['top_left'] } });
+  const top = M.overlayTextRect(s, W, H, null, 'top_left');
+  const soloTitular = { ...s, slots: { ...s.slots, subheadline: null } };
+  const tit = M.overlayTextRect(soloTitular, W, H, null, 'top_left');
+  // Una cara que cubre la bajada entera y roza la última línea del titular: con bajada tapa mucho; sin bajada, poco
+  // pero no cero. Nada queda libre: debe elegirse «sin bajada», el menor solape.
+  const cara = { x0: 0, y0: (tit.y1 - 8) / H, x1: 1, y1: (top.y1 + 5) / H };
+  const abajo = { x0: 0, y0: (top.y1 + 80) / H, x1: 1, y1: 1 };   // la declarada (abajo) tampoco queda libre
+  const r = M.chooseOverlayAnchor({ style: s, width: W, height: H, faces: [cara, abajo] });
+  const base = r.report.candidates.find((c) => c.anchor === 'top_left').overlap_pct;
+  assert.ok(r.report.overlap_pct > 0, 'no queda libre');
+  assert.ok(r.report.overlap_pct < base, `el escalón baja el solape (${r.report.overlap_pct} < ${base})`);
+  assert.deepEqual(r.report.reduced, ['sin bajada']);
+  assert.equal(r.style.slots.subheadline, null);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')));
+});
+
+test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
+  assert.match(SRC, /tightly around the FACE ONLY/);
+  assert.match(SRC, /boxes: fc\.faces/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.1'/);
+});
+
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {
   const te = style({ text_effect: { kind: 'shadow', color: 'oscuro', alpha: 0.35, blur_pct: 0.6, offset_pct: 0.15 } });
   const scene = JSON.stringify(M.buildOverlayScene({ style: te, width: W, height: H, backgroundSrc: 'data:,' }));
