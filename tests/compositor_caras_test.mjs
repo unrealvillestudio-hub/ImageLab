@@ -9,6 +9,8 @@
 //   4. La sombra llega al titular, a la bajada y a los tramos con énfasis; sin el token no hay sombra.
 //   5. Las cajas del modelo se normalizan; lo que no es caja se descarta.
 //   6. compose.ts usa la misma autenticación y el mismo endpoint de Vertex que inspect.ts, literal.
+//   8. 1.6.2 — `text_effect.when: 'low_contrast'` es dato validado; la sombra se aplica sólo cuando el peor 10 % del
+//      fondo bajo el texto contrasta menos que `min_contrast` y la sombra ayuda; el cableado mide el fondo YA ubicado.
 //
 // Ejecutar:  node tests/compositor_caras_test.mjs     (Node ≥ 22.18)
 
@@ -118,6 +120,30 @@ test('3d · ninguna libre al tamaño de siempre ⇒ el menor ajuste que la liber
   assert.equal(s.slots.subheadline !== null, true, 'el estilo de entrada no se muta');
 });
 
+test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape entre ancla × escalón', () => {
+  const s = style({ avoid_faces: { enabled: true, anchors: ['top_left'] } });
+  const top = M.overlayTextRect(s, W, H, null, 'top_left');
+  const soloTitular = { ...s, slots: { ...s.slots, subheadline: null } };
+  const tit = M.overlayTextRect(soloTitular, W, H, null, 'top_left');
+  // Una cara que cubre la bajada entera y roza la última línea del titular: con bajada tapa mucho; sin bajada, poco
+  // pero no cero. Nada queda libre: debe elegirse «sin bajada», el menor solape.
+  const cara = { x0: 0, y0: (tit.y1 - 8) / H, x1: 1, y1: (top.y1 + 5) / H };
+  const abajo = { x0: 0, y0: (top.y1 + 80) / H, x1: 1, y1: 1 };   // la declarada (abajo) tampoco queda libre
+  const r = M.chooseOverlayAnchor({ style: s, width: W, height: H, faces: [cara, abajo] });
+  const base = r.report.candidates.find((c) => c.anchor === 'top_left').overlap_pct;
+  assert.ok(r.report.overlap_pct > 0, 'no queda libre');
+  assert.ok(r.report.overlap_pct < base, `el escalón baja el solape (${r.report.overlap_pct} < ${base})`);
+  assert.deepEqual(r.report.reduced, ['sin bajada']);
+  assert.equal(r.style.slots.subheadline, null);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')));
+});
+
+test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
+  assert.match(SRC, /tightly around the FACE ONLY/);
+  assert.match(SRC, /boxes: fc\.faces/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.[12]'/);
+});
+
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {
   const te = style({ text_effect: { kind: 'shadow', color: 'oscuro', alpha: 0.35, blur_pct: 0.6, offset_pct: 0.15 } });
   const scene = JSON.stringify(M.buildOverlayScene({ style: te, width: W, height: H, backgroundSrc: 'data:,' }));
@@ -144,6 +170,72 @@ test('6 · compose.ts usa la misma autenticación y el mismo endpoint de Vertex 
   assert.match(SRC, /if \(finalStyle\.layout\.avoidFaces && finalStyle\.slots\.headline\)/, 'la detección sólo corre con el token y titular');
   assert.match(SRC, /OVERLAY_FACE_CHECK_UNAVAILABLE/, 'un fallo de la detección no tumba la composición');
   assert.match(SRC, /\.\.\.\(faceMeta \? \{ faces: faceMeta \} : \{\}\)/, 'el consumo viaja en meta.faces');
+});
+
+test('8a · 1.6.2 · when/min_contrast son dato validado; sin `when` la sombra es la de siempre', () => {
+  const fx = { kind: 'shadow', color: 'oscuro', alpha: 0.35, blur_pct: 0.6, offset_pct: 0.15 };
+  assert.equal(style({ text_effect: fx }).textEffect.when, undefined, 'sin when ⇒ idéntico a 1.6.1');
+  const low = style({ text_effect: { ...fx, when: 'low_contrast', min_contrast: 3 } }).textEffect;
+  assert.equal(low.when, 'low_contrast'); assert.equal(low.minContrast, 3); assert.equal(low.shadowHex, '#000000');
+  assert.throws(() => style({ text_effect: { ...fx, when: 'low_contrast' } }), /min_contrast/);
+  assert.throws(() => style({ text_effect: { ...fx, when: 'low_contrast', min_contrast: 40 } }), /min_contrast/);
+  assert.throws(() => style({ text_effect: { ...fx, when: 'a veces' } }), /text_effect\.when/);
+  // La capa global no puede nombrar un rol que la marca N+1 quizá no tenga: admite un hex literal.
+  const hx = style({ text_effect: { ...fx, color: '#1A1A1A', when: 'low_contrast', min_contrast: 3 } }).textEffect;
+  assert.equal(hx.shadowHex, '#1A1A1A'); assert.equal(hx.color, 'rgba(26, 26, 26, 0.35)');
+  assert.throws(() => style({ text_effect: { ...fx, color: 'rol_que_no_existe' } }), /rol_que_no_existe/);
+});
+
+test('8b · 1.6.2 · texto claro: fondo claro ⇒ sombra; fondo oscuro ⇒ sin sombra; texto oscuro ⇒ la sombra oscura no ayuda', () => {
+  const L = (rgb) => M.relLuminanceRgb(rgb, rgb, rgb);
+  const claro = Array(90).fill(L(40)).concat(Array(10).fill(L(235)));   // 10 % del área muy clara
+  const oscuro = Array(100).fill(L(40));
+  const base = { textHexes: ['#FAFAFA'], minContrast: 3, shadowHex: '#000000' };
+  const a = M.decideTextEffect({ ...base, bgLuminances: claro });
+  assert.equal(a.apply, true, a.reason); assert.ok(a.contrast < 3);
+  const b = M.decideTextEffect({ ...base, bgLuminances: oscuro });
+  assert.equal(b.apply, false, b.reason); assert.ok(b.contrast >= 3);
+  const c = M.decideTextEffect({ ...base, textHexes: ['#101010'], bgLuminances: oscuro });
+  assert.equal(c.apply, false, 'texto oscuro sobre fondo oscuro: una sombra oscura no ayuda');
+  const d = M.decideTextEffect({ ...base, bgLuminances: [] });
+  assert.equal(d.apply, true, 'sin muestras no se decide a ciegas: se aplica la sombra declarada');
+  // La media no decide: con 90 % oscuro, la media daría contraste alto; el peor 10 % lo baja.
+  const media = claro.reduce((x, y) => x + y, 0) / claro.length;
+  assert.ok(M.contrastRatio(M.relLuminanceHex('#FAFAFA'), media) >= 3, 'la media habría dicho «se lee»');
+  assert.equal(M.contrastRatio(1, 0), 21);
+});
+
+test('8d · 1.6.2 · la decisión lee los colores TAL COMO quedan en las ranuras (rgb(), no hex)', () => {
+  const st = style({ text_effect: { kind: 'shadow', color: 'oscuro', alpha: 0.35, blur_pct: 0.6, offset_pct: 0.15, when: 'low_contrast', min_contrast: 3 } });
+  const hexes = ['headline', 'subheadline'].flatMap((s) => st.slots[s] ? [st.slots[s].color, ...(st.slots[s].emphasis?.color ? [st.slots[s].emphasis.color] : [])] : []);
+  assert.ok(hexes.length >= 2 && hexes.some((c) => /^rgb/.test(c)), 'las ranuras traen rgb()');
+  const r = M.decideTextEffect({ textHexes: hexes, bgLuminances: Array(50).fill(M.relLuminanceRgb(235, 235, 235)), minContrast: 3, shadowHex: st.textEffect.shadowHex });
+  assert.equal(r.apply, true, r.reason);
+  assert.equal(M.relLuminanceHex('rgba(250, 250, 250, 0.5)'), M.relLuminanceHex('#FAFAFA'));
+  assert.doesNotMatch(SRC, /filter\(\(c\) => \/\^#\?\[0-9a-fA-F\]/, 'el cableado no descarta los rgb()');
+});
+
+test('8c · 1.6.2 · cableado: se mide el bloque YA ubicado y la decisión viaja en meta.text_effect', () => {
+  const i = SRC.indexOf("finalStyle.textEffect?.when === 'low_contrast'");
+  assert.ok(i > SRC.indexOf('chooseOverlayAnchor({ style: finalStyle'), 'después de elegir el ancla');
+  assert.ok(i < SRC.indexOf('const scene = buildOverlayScene({\n      style: finalStyle'), 'antes de dibujar');
+  assert.match(SRC, /overlayTextRect\(finalStyle, dims\.width, dims\.height, areaMetrics, finalStyle\.layout\.anchor\)/);
+  assert.match(SRC, /\.\.\.\(textEffectMeta \? \{ text_effect: textEffectMeta \} : \{\}\)/);
+  assert.match(SRC, /OVERLAY_CONTRAST_UNMEASURED/);
+  // Se mide lo que el texto tendrá DETRÁS (foto + velo), no la foto limpia: el velo ya cambia el contraste.
+  assert.match(SRC, /buildOverlayScene\(\{ style: backgroundOnlyStyle\(finalStyle\)/);
+  assert.match(SRC, /sampleRegionLuminance\(underBytes, rect/);
+});
+
+test('8e · 1.6.2 · el fondo sin texto conserva velo y franja y no dibuja ninguna ranura', () => {
+  const st = style({ scrim: { mode: 'gradient_bottom', opacity: 0.8, palette: 'oscuro', coverage_pct: 60 } });
+  const bg = M.backgroundOnlyStyle(st);
+  assert.deepEqual(Object.values(bg.slots), Object.values(bg.slots).map(() => null));
+  assert.equal(bg.scrim, st.scrim, 'el velo queda');
+  assert.ok(st.slots.headline, 'el estilo original no se toca');
+  const scene = JSON.stringify(M.buildOverlayScene({ style: bg, width: W, height: H, backgroundSrc: 'data:,' }));
+  assert.ok(scene.includes('linear-gradient'), 'el velo se dibuja');
+  assert.equal(scene.includes(TEXT.headline), false, 'sin titular');
 });
 
 console.log(`\n${fails.length ? '✗' : '✓'} ${pass} passed, ${fails.length} failed`);

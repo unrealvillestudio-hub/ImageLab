@@ -55,6 +55,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import { GoogleAuth } from 'google-auth-library';
+import sharp from 'sharp';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -102,7 +103,23 @@ declare const process: { env: Record<string, string | undefined> };
 //         libre, la de menor solape, y se dice. Si la detección falla, se compone en el ancla declarada y se dice.
 //         `layout.text_effect` { kind:'shadow', color: <rol de brand_palette>, alpha, blur_pct, offset_pct } — la
 //         sombra por glifo de 1.3.4, ahora también en el overlay. Sin los tokens, la escena sale idéntica a 1.5.0.
-export const COMPOSITOR_VERSION = '1.6.0';
+//   1.6.1 (2026-10-15) — medido en producción con c3762333: la caja de «cabeza entera» que pedía 1.6.0 tomaba pelo
+//         y cuello, y no dejaba ninguna ancla libre (82,5 % / 32,65 % de solape). Ahora se pide el ROSTRO (cejas a
+//         mentón, oreja a oreja); el margen de `avoid_faces.margin_pct` sigue dando aire. Si ninguna ancla queda
+//         libre ni con los escalones, se elige el MENOR solape entre todas las combinaciones (ancla × escalón), y a
+//         igual solape, el menor ajuste. `meta.faces.boxes` devuelve las cajas medidas (antes el informe pisaba la
+//         lista con el número de caras).
+//   1.6.2 (2026-10-15) — LA SOMBRA SE DECIDE MIDIENDO (Sam, 2026-10-15, pieza c51e180a: «el texto claro queda sobre
+//         fondo claro… crear esa regla»). `layout.text_effect.when` { 'always' (por defecto, 1.6.0) | 'low_contrast' }
+//         y `min_contrast` (razón WCAG, 1..21, obligatoria con 'low_contrast'). Con 'low_contrast' el compositor mide
+//         la luminancia del fondo DEBAJO del bloque de texto ya ubicado —sobre la escena compuesta SIN texto: foto,
+//         velo y franja, porque el velo de la marca ya cambia el contraste— (el 10 % del área que menos contrasta con el
+//         color del texto) y aplica la sombra sólo si ese contraste queda por debajo de `min_contrast` Y la sombra
+//         contrasta con el texto más que el fondo. Texto claro sobre fondo oscuro sale sin sombra; texto claro sobre
+//         fondo claro, con ella. `meta.text_effect` dice qué midió y qué decidió. Sin `when`, idéntico a 1.6.1.
+//         `layout.text_effect.color` admite además un hex literal, para que la regla viva en la capa GLOBAL sin
+//         nombrar un rol de paleta que una marca nueva quizá no tenga.
+export const COMPOSITOR_VERSION = '1.6.2';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -391,7 +408,8 @@ export function resolveOverlayStyle(args: {
     avoidFaces?: { anchors: string[]; marginPct: number; keepAlign: boolean };
   };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
-  textEffect?: { color: string; blurPct: number; offsetPct: number };
+  // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
+  textEffect?: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string };
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -613,13 +631,28 @@ export function resolveOverlayStyle(args: {
   }
   // 1.6.0 — sombra por glifo del overlay: la MISMA forma que `carousel.text_effect` (1.3.4), con el color como
   // ROL de `brand_palette` (como el velo y el filete del overlay), no como función del cromo de carrusel.
-  let textEffect: { color: string; blurPct: number; offsetPct: number } | null = null;
+  let textEffect: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string } | null = null;
   if (layoutTok.text_effect != null) {
     try {
       const te = parseCarouselTextEffect(layoutTok.text_effect);
-      const pal = palBy.get(te.fn);
-      if (!pal) missing.push(`brand_palette.role='${te.fn}' (pedido por layout.text_effect.color)`);
-      else textEffect = { color: hexToRgba(String(pal.hex), te.alpha), blurPct: te.blurPct, offsetPct: te.offsetPct };
+      // 1.6.2 — el color es un ROL de `brand_palette` (capa de marca) o un hex literal (capa global: una regla del
+      // sistema no puede nombrar un rol que la marca N+1 quizá no tenga). Ambos son dato; el código no trae color.
+      const pal = HEX_COLOR.test(te.fn) ? { role: te.fn, hex: te.fn } : palBy.get(te.fn);
+      // 1.6.2 — cuándo se aplica. Ausente ⇒ siempre (1.6.0). 'low_contrast' exige su umbral: sin él no hay regla.
+      const rawTe = layoutTok.text_effect as Record<string, unknown>;
+      const when = rawTe.when == null ? 'always' : String(rawTe.when);
+      const minContrast = Number(rawTe.min_contrast);
+      let whenOk = true;
+      if (!TEXT_EFFECT_WHEN.has(when)) { whenOk = false; missing.push(`layout.text_effect.when='${when}' (válidos: ${[...TEXT_EFFECT_WHEN].join(', ')})`); }
+      else if (when === 'low_contrast' && !(Number.isFinite(minContrast) && minContrast >= 1 && minContrast <= 21)) {
+        whenOk = false;
+        missing.push(`layout.text_effect.min_contrast=${JSON.stringify(rawTe.min_contrast)} (razón de contraste, 1 ≤ x ≤ 21; obligatoria con when='low_contrast')`);
+      }
+      if (!pal) missing.push(`brand_palette.role='${te.fn}' (pedido por layout.text_effect.color; también admite un hex #RRGGBB)`);
+      else if (whenOk) {
+        textEffect = { color: hexToRgba(String(pal.hex), te.alpha), blurPct: te.blurPct, offsetPct: te.offsetPct };
+        if (when === 'low_contrast') textEffect = { ...textEffect, when: 'low_contrast', minContrast, shadowHex: String(pal.hex) };
+      }
     } catch (e) {
       missing.push(`layout.text_effect: ${e instanceof Error ? e.message.replace(/carousel\.text_effect/g, 'layout.text_effect').replace('función de tokens.palette', 'rol de brand_palette') : String(e)}`);
     }
@@ -2549,18 +2582,24 @@ export function chooseOverlayAnchor(args: {
   let what: string[] = [];
   let best = scored.find((c) => c.overlap_pct === 0) ?? null;
   if (!best) {
+    // 1.6.1 — sin ancla libre al tamaño de siempre: el menor ajuste que la libera; si ninguno la libera, el MENOR
+    // solape entre todas las combinaciones (ancla × escalón) y, a igual solape, el menor ajuste.
+    let low = { c: scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]), st: style, what: [] as string[] };
     for (const step of faceFitLadder(style)) {
-      const free = score(step.style).find((c) => c.overlap_pct === 0);
+      const sc = score(step.style);
+      const free = sc.find((c) => c.overlap_pct === 0);
       if (free) { best = free; base = step.style; what = step.what; break; }
+      const m = sc.reduce((a, c) => (c.overlap_pct < a.overlap_pct ? c : a), sc[0]);
+      if (m && m.overlap_pct < low.c.overlap_pct) low = { c: m, st: step.style, what: step.what };
     }
+    if (!best) { best = low.c; base = low.st; what = low.what; }
   }
-  if (!best) best = scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]);
   const declaredScore = scored.find((c) => c.anchor === declared)?.overlap_pct ?? 0;
   const markers = [...style.markers];
   if (best.anchor !== declared) {
     markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${best.anchor}`);
   }
-  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} sin tapar una cara: ${what.join(' · ')}`);
+  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : 'sin tapar una cara'}: ${what.join(' · ')}`);
   if (best.overlap_pct > 0) {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto libre de caras ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
@@ -2575,6 +2614,89 @@ export function chooseOverlayAnchor(args: {
   } };
 }
 
+// ── 1.6.2 — CUÁNDO SE APLICA LA SOMBRA: MEDIDO, NO DECLARADO POR PIEZA ──
+// EJE (código): el contraste se mide como razón WCAG entre el color del texto y la luminancia del fondo que
+// queda DEBAJO del bloque; se mira el 10 % del área que peor contrasta (no la media: un cielo claro detrás de
+// media frase no se compensa con una pared oscura detrás de la otra mitad). INSTANCIA (dato): el umbral
+// `min_contrast` y el color de la sombra. Cero marcas, cero colores en el código.
+const TEXT_EFFECT_WHEN = new Set(['always', 'low_contrast']);
+/** Un color literal en un token (sólo `layout.text_effect.color`): #RGB o #RRGGBB. */
+const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+/** Fracción del área que decide el contraste: el peor 10 %. */
+export const TEXT_EFFECT_WORST_SHARE = 0.1;
+
+/** Luminancia relativa WCAG de un canal sRGB 0..255. PURO. */
+const linear = (c: number) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+/** Luminancia relativa WCAG de un color r,g,b 0..255. PURO. */
+export function relLuminanceRgb(r: number, g: number, b: number): number {
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+}
+/** Luminancia relativa WCAG de un color resuelto: el hex de `brand_palette` o el `rgb()`/`rgba()` que deja
+ *  `hexToRgba` en las ranuras (el alfa no cuenta: se mide el color). PURO. */
+export function relLuminanceHex(color: string): number {
+  const c = String(color ?? '').trim();
+  const m = c.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+\s*)?\)$/i);
+  if (m) return relLuminanceRgb(Number(m[1]), Number(m[2]), Number(m[3]));
+  const h = c.replace(/^#/, '');
+  const full = h.length === 3 ? h.split('').map((x) => x + x).join('') : h;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) throw new CompositorError('COMPOSITOR_COLOR_INVALID', `color inválido: '${color}'`);
+  const n = parseInt(full, 16);
+  return relLuminanceRgb((n >> 16) & 255, (n >> 8) & 255, n & 255);
+}
+/** Razón de contraste WCAG entre dos luminancias (1..21). PURO. */
+export function contrastRatio(a: number, b: number): number {
+  const [hi, lo] = a >= b ? [a, b] : [b, a];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * ¿Lleva sombra el texto? PURO. `bgLuminances` son las luminancias del fondo debajo del bloque (una por píxel
+ * muestreado); `textHexes`, los colores de las ranuras dibujadas. Decide el PEOR texto contra el peor 10 % del
+ * fondo. Se aplica si ese contraste queda bajo `minContrast` y la sombra contrasta con el texto más que el fondo
+ * (una sombra oscura no ayuda a un texto oscuro). Sin muestras no se decide a ciegas: se aplica y se dice.
+ */
+export function decideTextEffect(args: {
+  textHexes: string[]; bgLuminances: number[]; minContrast: number; shadowHex: string;
+}): { apply: boolean; contrast: number | null; min_contrast: number; text_luminance: number | null;
+  background_luminance: number | null; shadow_contrast: number | null; reason: string } {
+  const r3 = (n: number) => Math.round(n * 1000) / 1000;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const base = { min_contrast: args.minContrast };
+  if (!args.bgLuminances.length || !args.textHexes.length) {
+    return { apply: true, contrast: null, text_luminance: null, background_luminance: null, shadow_contrast: null, ...base,
+      reason: 'sin muestras del fondo: se aplica la sombra declarada' };
+  }
+  const shadowL = relLuminanceHex(args.shadowHex);
+  let worst: { contrast: number; textL: number; bgL: number } | null = null;
+  for (const hex of args.textHexes) {
+    const textL = relLuminanceHex(hex);
+    const cs = args.bgLuminances.map((bgL) => ({ c: contrastRatio(textL, bgL), bgL })).sort((x, y) => x.c - y.c);
+    const k = Math.max(1, Math.ceil(cs.length * TEXT_EFFECT_WORST_SHARE));
+    const tail = cs.slice(0, k);
+    const contrast = tail.reduce((a, x) => a + x.c, 0) / tail.length;
+    const bgL = tail.reduce((a, x) => a + x.bgL, 0) / tail.length;
+    if (!worst || contrast < worst.contrast) worst = { contrast, textL, bgL };
+  }
+  const w = worst!;
+  const shadowContrast = contrastRatio(w.textL, shadowL);
+  const low = w.contrast < args.minContrast;
+  const helps = shadowContrast > w.contrast;
+  return {
+    apply: low && helps, contrast: r2(w.contrast), text_luminance: r3(w.textL), background_luminance: r3(w.bgL),
+    shadow_contrast: r2(shadowContrast), ...base,
+    reason: !low ? `contraste ${r2(w.contrast)} ≥ ${args.minContrast}: el texto se lee sin sombra`
+      : !helps ? `contraste ${r2(w.contrast)} < ${args.minContrast}, pero la sombra (${r2(shadowContrast)}) no contrasta más que el fondo`
+      : `contraste ${r2(w.contrast)} < ${args.minContrast}: se aplica la sombra (${r2(shadowContrast)} contra el texto)`,
+  };
+}
+
+/** 1.6.2 — el estilo de la escena SIN texto: la foto con el velo, la franja y el producto tal como quedan debajo
+ *  del bloque. El contraste se mide sobre ESO, no sobre la foto limpia: el velo de la marca ya oscurece (o no) lo
+ *  que el texto tiene detrás, y medir sin él pondría sombra donde no hace falta. PURO. */
+export function backgroundOnlyStyle<S extends { slots: Record<string, unknown> }>(style: S): S {
+  return { ...style, slots: Object.fromEntries(Object.keys(style.slots).map((k) => [k, null])) } as S;
+}
+
 /** 1.6.0 — el `textShadow` del overlay: las mismas dos sombras que `carouselTextShadow` (halo y caída). PURO. */
 export function overlayTextShadow(te: { color: string; blurPct: number; offsetPct: number }, canvasWidth: number): string {
   const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -2586,6 +2708,27 @@ export function overlayTextShadow(te: { color: string; blurPct: number; offsetPc
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
+
+/** 1.6.2 — luminancias WCAG del fondo debajo del bloque de texto. Se reduce la región a ≤ 64 px de ancho (la
+ *  decisión es de área, no de detalle). Nunca lanza: sin muestras, `decideTextEffect` aplica la sombra y se dice. */
+async function sampleRegionLuminance(bytes: Uint8Array, rect: { x0: number; y0: number; x1: number; y1: number },
+  width: number, height: number): Promise<{ luminances: number[]; error: string | null }> {
+  try {
+    const left = Math.max(0, Math.min(width - 1, Math.floor(rect.x0)));
+    const top = Math.max(0, Math.min(height - 1, Math.floor(rect.y0)));
+    const w = Math.max(1, Math.min(width - left, Math.ceil(rect.x1) - left));
+    const h = Math.max(1, Math.min(height - top, Math.ceil(rect.y1) - top));
+    const { data, info } = await sharp(Buffer.from(bytes)).removeAlpha().toColourspace('srgb')
+      .extract({ left, top, width: w, height: h })
+      .resize({ width: Math.min(64, w), fit: 'fill', kernel: 'nearest' })
+      .raw().toBuffer({ resolveWithObject: true });
+    const out: number[] = [];
+    for (let i = 0; i + 2 < data.length; i += info.channels) out.push(relLuminanceRgb(data[i], data[i + 1], data[i + 2]));
+    return { luminances: out, error: null };
+  } catch (e) {
+    return { luminances: [], error: `muestreo del fondo falló: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200) };
+  }
+}
 
 function normalizeSupabaseUrl(raw: string): string {
   let v = raw.trim().replace(/\/+$/, '');
@@ -2730,8 +2873,8 @@ const FACES_MODEL = () => (process.env.IMAGELAB_FACES_MODEL ?? '').trim() || 'ge
 const FACES_TIMEOUT_MS = 15_000;
 const FACES_PROMPT =
   'Detect every human face visible in this image, including faces in profile, partially visible or turned away. ' +
-  'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, covering the whole head ' +
-  'from the hairline to the chin. If there are no faces, return an empty list.';
+  'Return each one as box_2d = [ymin, xmin, ymax, xmax], integers normalized to 0-1000, tightly around the FACE ONLY: ' +
+  'from the eyebrows to the chin and from ear to ear. Do not include hair, neck or shoulders. If there are no faces, return an empty list.';
 
 // ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
 // Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
@@ -3052,7 +3195,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
       const fc = await detectFaces(cleanBytes, dims.mime);
       faceMeta = { model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
-        duration_ms: fc.duration_ms, faces: fc.faces, error: fc.error };
+        duration_ms: fc.duration_ms, boxes: fc.faces, error: fc.error };
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
           faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null });
@@ -3062,6 +3205,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         finalStyle = { ...finalStyle, markers: [...finalStyle.markers,
           `OVERLAY_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; se compone en el ancla declarada (${finalStyle.layout.anchor})`] };
       }
+    }
+
+    // 1.6.2 — la sombra con `when: 'low_contrast'` se decide midiendo el fondo debajo del bloque YA ubicado.
+    let textEffectMeta: Record<string, unknown> | null = null;
+    const teLow = finalStyle.textEffect?.when === 'low_contrast' ? finalStyle.textEffect : null;
+    if (teLow && finalStyle.slots.headline) {
+      const rect = overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor);
+      // Lo que el texto tendrá detrás: la escena entera sin texto (foto + velo + franja + producto).
+      let underBytes: Uint8Array = cleanBytes;
+      try {
+        const under = buildOverlayScene({ style: backgroundOnlyStyle(finalStyle), width: dims.width, height: dims.height,
+          backgroundSrc: `data:${dims.mime};base64,${b64(cleanBytes)}`, products: productImgs, productLayer: prodPick.layer });
+        const underSvg = await satori(under as any, { width: dims.width, height: dims.height,
+          fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })) });
+        underBytes = new Uint8Array(new Resvg(underSvg, { fitTo: { mode: 'original' } }).render().asPng());
+      } catch (e) {
+        finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_CONTRAST_ON_CLEAN_IMAGE: no se pudo componer el fondo sin texto (${e instanceof Error ? e.message.slice(0, 120) : String(e)}); se mide sobre la foto limpia`] };
+      }
+      const bg = await sampleRegionLuminance(underBytes, rect, dims.width, dims.height);
+      const textHexes = (['headline', 'subheadline'] as const).flatMap((s) => {
+        const sl = finalStyle.slots[s];
+        return sl ? [sl.color, ...(sl.emphasis?.color ? [sl.emphasis.color] : [])] : [];
+      });
+      const d = decideTextEffect({ textHexes, bgLuminances: bg.luminances, minContrast: teLow.minContrast!, shadowHex: teLow.shadowHex! });
+      textEffectMeta = { when: 'low_contrast', applied: d.apply, ...d, samples: bg.luminances.length,
+        rect: { x0: Math.round(rect.x0), y0: Math.round(rect.y0), x1: Math.round(rect.x1), y1: Math.round(rect.y1) },
+        ...(bg.error ? { sample_error: bg.error } : {}) };
+      if (!d.apply) {
+        const { textEffect: _omit, ...rest } = finalStyle;
+        finalStyle = rest as typeof finalStyle;
+      }
+      if (bg.error) finalStyle = { ...finalStyle, markers: [...finalStyle.markers, `OVERLAY_CONTRAST_UNMEASURED: ${bg.error}; se aplica la sombra declarada`] };
     }
 
     const scene = buildOverlayScene({
@@ -3118,6 +3293,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(areaFit.report ? { text_area: areaFit.report } : {}),
         // 1.6.0 — la detección de caras: qué vio, dónde quedó el texto y el consumo del modelo (el carril lo asienta).
         ...(faceMeta ? { faces: faceMeta } : {}),
+        // 1.6.2 — qué contraste se midió debajo del texto y si la sombra se aplicó.
+        ...(textEffectMeta ? { text_effect: textEffectMeta } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
