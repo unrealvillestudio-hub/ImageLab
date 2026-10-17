@@ -144,6 +144,8 @@ export interface InspectRequest {
 export interface InspectReference { name: string; image_urls: string[] }
 // Tope de fotos de referencia por inspección, entre todas las personas: cada una es otra imagen inline.
 export const MAX_REFERENCE_IMAGES = 3;
+// Una referencia es una URL http(s) o una imagen en línea (png, jpeg o webp en base64).
+export const REFERENCE_URL = /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/;
 export interface Violation { code: string; evidence: string }
 export interface InspectUsage { input_tokens: number; output_tokens: number }
 
@@ -236,8 +238,10 @@ export function validateReferences(raw: unknown): InspectReference[] {
   const refs = raw.map((r: unknown, i: number) => {
     const o = (r && typeof r === 'object' && !Array.isArray(r)) ? r as Record<string, unknown> : null;
     const name = typeof o?.name === 'string' ? o.name.trim().slice(0, 80) : '';
-    const urls = Array.isArray(o?.image_urls) ? (o!.image_urls as unknown[]).filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u.trim())).map((u) => u.trim()) : [];
-    if (!name || !urls.length) throw new InspectError('INSPECT_BAD_REQUEST', `references[${i}] necesita name y al menos una image_url http(s)`, 400);
+    // 2026-10-17 — también en línea (`data:image/...;base64,`): una referencia que NO debe publicarse (fotos
+    // reales de una persona, Sam 2026-10-17) viaja en el cuerpo de la petición y no vive en ninguna URL.
+    const urls = Array.isArray(o?.image_urls) ? (o!.image_urls as unknown[]).filter((u): u is string => typeof u === 'string' && REFERENCE_URL.test(u.trim())).map((u) => u.trim()) : [];
+    if (!name || !urls.length) throw new InspectError('INSPECT_BAD_REQUEST', `references[${i}] necesita name y al menos una image_url http(s) o data:image`, 400);
     return { name, image_urls: urls };
   });
   const take = refs.map(() => 0);

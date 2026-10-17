@@ -347,4 +347,10 @@ ok('IDENTIDAD: el cable — las fotos se bajan, una caída no tumba la inspecci�
   assert.match(inspect, /parts: judgeParts\(image, references, prompt\.user\)/);
 });
 
+ok('IDENTIDAD: una referencia puede viajar en línea (data:image) y no vivir en ninguna URL', () => {
+  const v = M.validateInspectRequest({ ...VALID, references: [{ name: 'A', image_urls: ['data:image/jpeg;base64,/9j/4AAQ', 'data:text/html;base64,PGI+'] }] });
+  assert.deepEqual(v.references, [{ name: 'A', image_urls: ['data:image/jpeg;base64,/9j/4AAQ'] }], 'sólo imágenes png, jpeg o webp');
+  assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, references: [{ name: 'A', image_urls: ['data:text/html;base64,PGI+'] }] })), { label: 'INSPECT_BAD_REQUEST', status: 400 });
+});
+
 console.log(`\ninspeccion_visual: ${n} pruebas OK`);
