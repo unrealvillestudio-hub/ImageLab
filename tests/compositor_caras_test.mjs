@@ -144,7 +144,7 @@ test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape ent
 test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
   assert.match(SRC, /tightly around the FACE ONLY/);
   assert.match(SRC, /boxes: fc\.faces/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.[123]'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.6\.[1234]'/);
 });
 
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {
@@ -300,6 +300,26 @@ test('9c · 1.6.3 · el énfasis cambia sólo si no se lee y la alternativa cont
   const st2 = M.withEmphasisColor(st, 'rgb(0, 0, 0)');
   assert.equal(st2.slots.headline.emphasis.color, 'rgb(0, 0, 0)');
   assert.notEqual(st.slots.headline.emphasis.color, 'rgb(0, 0, 0)', 'no muta el original');
+});
+
+test('9e · 1.6.4 · con min_contrast_vs_text, la alternativa tiene que separarse del titular', () => {
+  // El caso medido en 5b842958: titular crema, énfasis terracota sobre fondo oscuro (2,83 < 3).
+  const oscuro = Array(100).fill(0.04);
+  const crema = 'rgba(250, 250, 247, 1)', terracota = 'rgba(196, 98, 45, 1)';
+  const fb = [{ role: 'terracota_claro', hex: '#F5E0D4' }, { role: 'lavanda', hex: '#EAD9F5' }, { role: 'violeta', hex: '#5C3472' }, { role: 'jade', hex: '#5FB49C' }];
+  const sin = M.decideEmphasisColor({ currentColor: terracota, fallbacks: fb, bgLuminances: oscuro, minContrast: 3 });
+  assert.equal(sin.role, 'terracota_claro', 'sin el token, idéntico a 1.6.3: gana el más claro');
+  const con = M.decideEmphasisColor({ currentColor: terracota, fallbacks: fb, bgLuminances: oscuro, minContrast: 3, textColor: crema, minContrastVsText: 2 });
+  assert.equal(con.changed, true, con.reason); assert.equal(con.role, 'jade');
+  assert.ok(con.contrast_after >= 3);
+  // Ninguna se separa: no cambia, y lo dice.
+  const nada = M.decideEmphasisColor({ currentColor: terracota, fallbacks: fb.slice(0, 2), bgLuminances: oscuro, minContrast: 3, textColor: crema, minContrastVsText: 2 });
+  assert.equal(nada.changed, false); assert.match(nada.reason, /se separe del titular/);
+  // Token validado: fuera de rango es fail-loud; presente, viaja en el estilo.
+  assert.throws(() => style({ emphasis_contrast: { min_contrast: 3, fallbacks: ['oscuro'], min_contrast_vs_text: 0 } }), /min_contrast_vs_text/);
+  assert.equal(style({ emphasis_contrast: { min_contrast: 3, fallbacks: ['oscuro'], min_contrast_vs_text: 2 } }).layout.emphasisContrast.minContrastVsText, 2);
+  assert.equal('minContrastVsText' in style({ emphasis_contrast: { min_contrast: 3, fallbacks: ['oscuro'] } }).layout.emphasisContrast, false);
+  assert.match(SRC, /textColor: finalStyle\.slots\.headline!\.color, minContrastVsText: ec\.minContrastVsText/);
 });
 
 test('9d · 1.6.3 · cableado: una detección para caras y letreros, desenfoque antes de medir, énfasis antes que la sombra', () => {
