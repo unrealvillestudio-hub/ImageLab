@@ -426,6 +426,8 @@ ok('IDENTIDAD ESTRUCTURADA: el cable — el juez razona sólo con identidad y la
   assert.match(inspect, /responseSchema: buildResponseSchema\(codes, identityNames\)/);
   assert.match(inspect, /identity = parseIdentity\(text, identityNames\)/);
   assert.match(inspect, /identity: identity\.map\(/);
+  assert.match(inspect, /if \(identityNames\.length\) model = INSPECT_IDENTITY_MODEL\(\);/);
+  assert.match(inspect, /IMAGELAB_INSPECT_IDENTITY_MODEL/);
 });
 
 console.log(`\ninspeccion_visual: ${n} pruebas OK`);

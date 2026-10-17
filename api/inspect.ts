@@ -48,6 +48,11 @@ const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
 // responderá 4xx y el endpoint fallará en voz alta con `INSPECT_MODEL_ERROR`.
 const DEFAULT_INSPECT_MODEL = 'gemini-2.5-flash';
 const INSPECT_MODEL = () => (process.env.IMAGELAB_INSPECT_MODEL ?? '').trim() || DEFAULT_INSPECT_MODEL;
+// IDENTIDAD ESTRUCTURADA (2026-10-17) — comparar caras pide otro modelo. Medido en la calibración del 17-oct con
+// gemini-2.5-flash y el mismo bloque de rasgos: puntuó 95 a una escena de OTRA persona con la cara frontal y
+// visible, y 60 a la escena más parecida. Sólo las inspecciones con identidad usan este modelo.
+const DEFAULT_INSPECT_IDENTITY_MODEL = 'gemini-2.5-pro';
+const INSPECT_IDENTITY_MODEL = () => (process.env.IMAGELAB_INSPECT_IDENTITY_MODEL ?? '').trim() || DEFAULT_INSPECT_IDENTITY_MODEL;
 
 // maxDuration es 60 s (ver `config`). Presupuesto: descarga de la imagen + llamada al modelo, con
 // ~5 s de margen para el token y el JSON, igual que el margen de `api/execute.ts`.
@@ -794,7 +799,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed', error_label: 'METHOD_NOT_ALLOWED', status: 'error' }); return; }
 
-  const model = INSPECT_MODEL();
+  let model = INSPECT_MODEL();
   const trace: ProviderTrace = { called: false, httpStatus: null, usage: null };
   const t0 = Date.now();
   let input: InspectRequest | null = null;
@@ -836,6 +841,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let verdict: { violated: Violation[]; unmatched: string[] } = { violated: [], unmatched: [] };
     let identity: IdentityJudgment[] = [];
     // Sólo reglas de identidad y ninguna referencia cargada: no aplican y no hay nada que preguntar al modelo.
+    if (identityNames.length) model = INSPECT_IDENTITY_MODEL();
     if (judgedCodes.length || identityNames.length) {
       const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, judgedCodes, trace,
         refImages, identityNames);
