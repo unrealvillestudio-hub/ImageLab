@@ -308,4 +308,43 @@ ok('CABLEADO: el handler mide ANTES del modelo, nunca lanza por la medida, y só
   }
 });
 
+ok('IDENTIDAD 2026-10-17: sin referencias, el prompt y las partes son los de siempre', () => {
+  const sin = M.buildInspectPrompt({ rules: RULES, copy: null }).user;
+  assert.equal(M.buildInspectPrompt({ rules: RULES, copy: null, references: [] }).user, sin);
+  assert.ok(!sin.includes('REFERENCE PHOTOS'));
+  const img = { mimeType: 'image/png', data: 'AAA' };
+  assert.deepEqual(M.judgeParts(img, [], 'u'), [{ inlineData: img }, { text: 'u' }]);
+  assert.equal('references' in M.validateInspectRequest(VALID), false);
+});
+
+ok('IDENTIDAD: con referencias, la escena va primero y cada foto con su rótulo; el prompt lo explica', () => {
+  const refs = [{ name: 'Persona A', image_urls: ['https://x.test/a1.jpg'] }];
+  const u = M.buildInspectPrompt({ rules: RULES, copy: null, references: refs }).user;
+  assert.match(u, /REFERENCE PHOTOS — the FIRST image is the scene/);
+  assert.match(u, /Persona A \(1\)/);
+  assert.match(u, /never judge any rule on them/);
+  const img = { mimeType: 'image/png', data: 'SCENE' };
+  const parts = M.judgeParts(img, [{ name: 'Persona A', mimeType: 'image/jpeg', data: 'REF' }], 'u');
+  assert.deepEqual(parts, [{ inlineData: img }, { text: 'REFERENCE PHOTO — Persona A' }, { inlineData: { mimeType: 'image/jpeg', data: 'REF' } }, { text: 'u' }]);
+});
+
+ok('IDENTIDAD: validación y tope de 3 fotos repartido (la primera de cada persona primero)', () => {
+  const v = M.validateInspectRequest({ ...VALID, references: [
+    { name: 'A', image_urls: ['https://x.test/a1.jpg', 'https://x.test/a2.jpg', 'https://x.test/a3.jpg'] },
+    { name: 'B', image_urls: ['https://x.test/b1.jpg', 'https://x.test/b2.jpg'] }] });
+  assert.deepEqual(v.references, [
+    { name: 'A', image_urls: ['https://x.test/a1.jpg', 'https://x.test/a2.jpg'] },
+    { name: 'B', image_urls: ['https://x.test/b1.jpg'] }]);
+  assert.equal(M.MAX_REFERENCE_IMAGES, 3);
+  assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, references: 'x' })), { label: 'INSPECT_BAD_REQUEST', status: 400 });
+  assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, references: [{ name: 'A', image_urls: ['ftp://x'] }] })), { label: 'INSPECT_BAD_REQUEST', status: 400 });
+  assert.equal('references' in M.validateInspectRequest({ ...VALID, references: null }), false);
+});
+
+ok('IDENTIDAD: el cable — las fotos se bajan, una caída no tumba la inspección y la medida lo dice', () => {
+  assert.match(inspect, /callJudge\(model, buildInspectPrompt\(\{ \.\.\.input, references: loaded \}\), image, codes, trace, refImages\)/);
+  assert.match(inspect, /INSPECT_REFERENCE_UNAVAILABLE/);
+  assert.match(inspect, /parts: judgeParts\(image, references, prompt\.user\)/);
+});
+
 console.log(`\ninspeccion_visual: ${n} pruebas OK`);
