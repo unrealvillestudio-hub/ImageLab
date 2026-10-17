@@ -12,7 +12,8 @@
  * si una marca nueva necesita otra regla, se siembra una fila, no se despliega código.
  *
  * Contrato:
- *   POST { brand_id, image_url, rules: [{ code, statement }], copy?: { title?, body_excerpt? }, piece_id? }
+ *   POST { brand_id, image_url, rules: [{ code, statement }], copy?: { title?, body_excerpt? }, piece_id?,
+ *          references?: [{ name, image_urls[] }] }   (2026-10-17: fotos de identidad, hasta MAX_REFERENCE_IMAGES)
  *   200  { ok: true, violated: [{ code, evidence }], unmatched: string[], evaluated_codes: string[],
  *          model, usage: { input_tokens, output_tokens } | null, usage_missing?: true,
  *          meta: { edge_bands: EdgeBands | null, edge_bands_error?: string } }
@@ -136,7 +137,13 @@ export interface InspectRequest {
   rules: InspectRule[];
   copy: { title: string | null; body_excerpt: string | null } | null;
   piece_id: string | null;
+  // IDENTIDAD (2026-10-17) — las fotos de referencia de las personas que la escena debía mostrar. Sólo
+  // sirven a las reglas de identidad: sin ellas, la petición y el prompt son los de siempre.
+  references?: InspectReference[];
 }
+export interface InspectReference { name: string; image_urls: string[] }
+// Tope de fotos de referencia por inspección, entre todas las personas: cada una es otra imagen inline.
+export const MAX_REFERENCE_IMAGES = 3;
 export interface Violation { code: string; evidence: string }
 export interface InspectUsage { input_tokens: number; output_tokens: number }
 
@@ -146,6 +153,16 @@ export const CLEAN_SCENE_CLAUSE =
   'This image is the CLEAN scene, before any overlay: the headline, captions, logos and any other text of the ' +
   'piece are composed LATER by code and are NOT present in this image. Therefore any text, letters, numbers or ' +
   'glyph-like marks visible in the scene were painted by the image generator and belong to the scene itself.';
+
+/** IDENTIDAD — qué son las fotos que siguen a la escena y para qué sirven. Sólo existe con referencias. */
+export function referencesClause(refs: InspectReference[]): string {
+  const names = refs.map((r) => `${r.name} (${r.image_urls.length})`).join(', ');
+  return 'REFERENCE PHOTOS — the FIRST image is the scene to judge. After it come labeled reference photos of the ' +
+    `people the scene was meant to show: ${names}. They are NOT the scene: never judge any rule on them. Use them ` +
+    'ONLY for rules about whether a person in the scene is that same individual: compare facial structure, face ' +
+    'shape and fullness, jaw, nose, eyes, eyebrows, apparent age, skin tone and distinctive marks such as moles. ' +
+    'Ignore clothing, hairstyle, makeup, lighting, angle and expression.';
+}
 
 export const JUDGE_SYSTEM =
   'You are a strict visual compliance judge. You look at one image and decide, rule by rule, whether the image ' +
@@ -205,17 +222,48 @@ export function validateInspectRequest(body: unknown): InspectRequest {
     copy = title || bodyExcerpt ? { title, body_excerpt: bodyExcerpt } : null;
   }
 
-  return { brand_id: brandId, image_url: parsed.href, rules, copy, piece_id: optionalText(b.piece_id, 'piece_id') };
+  const references = validateReferences(b.references);
+  return { brand_id: brandId, image_url: parsed.href, rules, copy, piece_id: optionalText(b.piece_id, 'piece_id'),
+    ...(references.length ? { references } : {}) };
+}
+
+/** `references` es opcional. Mal formada falla en voz alta (400); bien formada se recorta, en orden, a
+ *  `MAX_REFERENCE_IMAGES` fotos entre todas las personas — la primera foto de cada una primero, para que
+ *  ninguna persona se quede sin referencia por culpa de las fotos de otra. */
+export function validateReferences(raw: unknown): InspectReference[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new InspectError('INSPECT_BAD_REQUEST', 'references debe ser una lista [{ name, image_urls }]', 400);
+  const refs = raw.map((r: unknown, i: number) => {
+    const o = (r && typeof r === 'object' && !Array.isArray(r)) ? r as Record<string, unknown> : null;
+    const name = typeof o?.name === 'string' ? o.name.trim().slice(0, 80) : '';
+    const urls = Array.isArray(o?.image_urls) ? (o!.image_urls as unknown[]).filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u.trim())).map((u) => u.trim()) : [];
+    if (!name || !urls.length) throw new InspectError('INSPECT_BAD_REQUEST', `references[${i}] necesita name y al menos una image_url http(s)`, 400);
+    return { name, image_urls: urls };
+  });
+  const take = refs.map(() => 0);
+  let used = 0;
+  for (let round = 0; used < MAX_REFERENCE_IMAGES; round++) {
+    let grew = false;
+    for (let i = 0; i < refs.length && used < MAX_REFERENCE_IMAGES; i++) {
+      if (refs[i].image_urls.length > round) { take[i]++; used++; grew = true; }
+    }
+    if (!grew) break;
+  }
+  return refs.map((r, i) => ({ name: r.name, image_urls: r.image_urls.slice(0, take[i]) })).filter((r) => r.image_urls.length);
 }
 
 /** El texto que recibe el juez. Las reglas van numeradas con su código; el copy, si viene, sólo como
  *  contexto para las reglas de coherencia (no está dibujado en la imagen). */
-export function buildInspectPrompt(req: Pick<InspectRequest, 'rules' | 'copy'>): { system: string; user: string } {
+export function buildInspectPrompt(req: Pick<InspectRequest, 'rules' | 'copy' | 'references'>): { system: string; user: string } {
   const lines: string[] = [];
   lines.push('Inspect the attached image against the numbered rules below.');
   lines.push('');
   lines.push(CLEAN_SCENE_CLAUSE);
   lines.push('');
+  if (req.references?.length) {
+    lines.push(referencesClause(req.references));
+    lines.push('');
+  }
   lines.push('RULES — each line is: number. [CODE] statement');
   req.rules.forEach((r, i) => lines.push(`${i + 1}. [${r.code}] ${r.statement}`));
   lines.push('');
@@ -467,6 +515,19 @@ export function edgeBandsOrNull(decode: () => DecodedRaster): { edge_bands: Edge
     return { edge_bands: null, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) };
   }
 }
+/** Las partes de la petición: la escena primero; cada foto de referencia precedida de su rótulo; el prompt al
+ *  final. Sin referencias, exactamente las dos partes de siempre. */
+export function judgeParts(image: { mimeType: string; data: string },
+  references: Array<{ name: string; mimeType: string; data: string }>, user: string): Array<Record<string, unknown>> {
+  const parts: Array<Record<string, unknown>> = [{ inlineData: { mimeType: image.mimeType, data: image.data } }];
+  for (const r of references) {
+    parts.push({ text: `REFERENCE PHOTO — ${r.name}` });
+    parts.push({ inlineData: { mimeType: r.mimeType, data: r.data } });
+  }
+  parts.push({ text: user });
+  return parts;
+}
+
 // ── INSPECCION:END ──
 
 // --- I/O --------------------------------------------------------------------
@@ -508,6 +569,7 @@ async function callJudge(
   image: { mimeType: string; data: string },
   codes: string[],
   trace: ProviderTrace,
+  references: Array<{ name: string; mimeType: string; data: string }> = [],
 ): Promise<string> {
   if (!GCP_PROJECT()) throw new InspectError('INSPECT_CONFIG_MISSING', 'GOOGLE_CLOUD_PROJECT missing in env.', 500);
   let token: string;
@@ -527,7 +589,7 @@ async function callJudge(
         systemInstruction: { parts: [{ text: prompt.system }] },
         contents: [{
           role: 'user',
-          parts: [{ inlineData: { mimeType: image.mimeType, data: image.data } }, { text: prompt.user }],
+          parts: judgeParts(image, references, prompt.user),
         }],
         generationConfig: {
           temperature: 0,
@@ -601,7 +663,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (bands.error) {
       console.warn(`[ImageLab][inspect] INSPECT_EDGE_BANDS_UNAVAILABLE brand=${input.brand_id} piece=${input.piece_id ?? '∅'}: ${bands.error}`);
     }
-    const text = await callJudge(model, buildInspectPrompt(input), image, codes, trace);
+    // IDENTIDAD — una foto de referencia que no se puede bajar no tumba la inspección: se omite, se dice en
+    // `meta.references` y el juez trabaja con las que llegaron (con ninguna, la regla de identidad no aplica).
+    const refImages: Array<{ name: string; mimeType: string; data: string }> = [];
+    const refErrors: string[] = [];
+    for (const r of input.references ?? []) {
+      for (const u of r.image_urls) {
+        try { const im = await fetchImage(u); refImages.push({ name: r.name, mimeType: im.mimeType, data: im.data }); }
+        catch (e) { refErrors.push(`${r.name}: ${e instanceof Error ? e.message.slice(0, 160) : String(e)}`); }
+      }
+    }
+    if (refErrors.length) console.warn(`[ImageLab][inspect] INSPECT_REFERENCE_UNAVAILABLE brand=${input.brand_id} piece=${input.piece_id ?? '∅'}: ${refErrors.join(' | ')}`);
+    const loaded = (input.references ?? []).map((r) => ({ ...r, image_urls: r.image_urls.slice(0, refImages.filter((x) => x.name === r.name).length) }))
+      .filter((r) => r.image_urls.length);
+    const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, codes, trace, refImages);
     const verdict = parseVerdict(text, codes);
 
     console.log(`[ImageLab][inspect] brand=${input.brand_id} piece=${input.piece_id ?? '∅'} model=${model} ` +
@@ -616,7 +691,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       usage: trace.usage,
       ...(trace.usage ? {} : { usage_missing: true }),
       // Medida, no veredicto: quien consume decide con su propio umbral.
-      meta: { edge_bands: bands.edge_bands, ...(bands.error ? { edge_bands_error: bands.error } : {}) },
+      meta: { edge_bands: bands.edge_bands, ...(bands.error ? { edge_bands_error: bands.error } : {}),
+        ...(input.references?.length ? { references: { requested: input.references.reduce((t, r) => t + r.image_urls.length, 0),
+          loaded: refImages.length, ...(refErrors.length ? { errors: refErrors } : {}) } } : {}) },
     });
   } catch (err) {
     const e = err instanceof InspectError ? err : null;
