@@ -130,7 +130,12 @@ declare const process: { env: Record<string, string | undefined> };
 //         énfasis contra lo que tiene detrás (foto + velo, la mediana del área); si no llega al umbral, se usa el rol de
 //         la lista que más contrasta, si contrasta más. `meta.faces.signs` y `meta.emphasis_contrast` lo dicen.
 //         Sin los tokens, idéntico a 1.6.2.
-export const COMPOSITOR_VERSION = '1.6.3';
+//   1.6.4 (2026-10-17) — EL ÉNFASIS SE SEPARA DEL TITULAR (Sam, 2026-10-17, pieza 5b842958: «las palabras claves en un
+//         accent color que contrastara con el resto del texto»). 1.6.3 elegía la alternativa sólo por contraste con el
+//         fondo; sobre fondo oscuro gana siempre el tono más claro de la lista, que puede ser casi el color del titular.
+//         Token de DATO opcional `layout.emphasis_contrast.min_contrast_vs_text`: con él, sólo compiten las
+//         alternativas que contrastan al menos eso con el color del titular. Sin el token, idéntico a 1.6.3.
+export const COMPOSITOR_VERSION = '1.6.4';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -419,7 +424,7 @@ export function resolveOverlayStyle(args: {
     avoidFaces?: { anchors: string[]; marginPct: number; keepAlign: boolean };
     // 1.6.3 — sólo existen si la marca o el canal los declaran.
     avoidSceneText?: { marginPct: number; blurPct: number | null };
-    emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }> };
+    emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number };
   };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
   // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
@@ -692,7 +697,7 @@ export function resolveOverlayStyle(args: {
     }
   }
   // 1.6.3 — el énfasis se lee: umbral y colores alternativos, por rol de la marca.
-  let emphasisContrast: { minContrast: number; fallbacks: Array<{ role: string; hex: string }> } | null = null;
+  let emphasisContrast: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number } | null = null;
   if (layoutTok.emphasis_contrast != null) {
     const ec = layoutTok.emphasis_contrast as Record<string, unknown>;
     const min = Number(isPlain(ec) ? ec.min_contrast : NaN);
@@ -706,7 +711,12 @@ export function resolveOverlayStyle(args: {
         if (!pal) missing.push(`brand_palette.role='${r}' (pedido por layout.emphasis_contrast.fallbacks)`);
         else fb.push({ role: r, hex: String(pal.hex) });
       }
-      if (fb.length === roles.length) emphasisContrast = { minContrast: min, fallbacks: fb };
+      // 1.6.4 — `min_contrast_vs_text`: la alternativa también tiene que separarse del resto del titular.
+      const vsText = isPlain(ec) && ec.min_contrast_vs_text != null ? Number(ec.min_contrast_vs_text) : null;
+      if (vsText != null && !(Number.isFinite(vsText) && vsText >= 1 && vsText <= 21)) {
+        missing.push(`layout.emphasis_contrast.min_contrast_vs_text (número 1..21; llegó ${JSON.stringify(ec.min_contrast_vs_text)})`);
+      }
+      if (fb.length === roles.length) emphasisContrast = { minContrast: min, fallbacks: fb, ...(vsText != null ? { minContrastVsText: vsText } : {}) };
     }
   }
 
@@ -2723,6 +2733,7 @@ export function chooseOverlayAnchor(args: {
  */
 export function decideEmphasisColor(args: {
   currentColor: string; fallbacks: Array<{ role: string; hex: string }>; bgLuminances: number[]; minContrast: number;
+  textColor?: string; minContrastVsText?: number;
 }): { changed: boolean; role: string | null; hex: string | null; contrast_before: number | null; contrast_after: number | null;
   min_contrast: number; reason: string } {
   const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -2741,10 +2752,19 @@ export function decideEmphasisColor(args: {
     return { changed: false, role: null, hex: null, contrast_before: r2(before), contrast_after: r2(before), ...base,
       reason: `contraste ${r2(before)} ≥ ${args.minContrast}: el énfasis se lee con su color` };
   }
-  const best = args.fallbacks.map((f) => ({ ...f, c: median(f.hex) })).sort((a, b) => b.c - a.c)[0];
+  // 1.6.4 — una alternativa que contrasta con el fondo pero se confunde con el resto del titular no resalta nada
+  // (medido en 5b842958: la alternativa elegida quedó a 1,22:1 del color del titular). Con el token, sólo
+  // compiten las que se separan del texto.
+  const vsText = args.textColor && args.minContrastVsText != null ? args.minContrastVsText : null;
+  const textL = vsText != null ? relLuminanceHex(args.textColor!) : null;
+  const pool = textL == null ? args.fallbacks
+    : args.fallbacks.filter((f) => contrastRatio(relLuminanceHex(f.hex), textL) >= vsText!);
+  const best = pool.map((f) => ({ ...f, c: median(f.hex) })).sort((a, b) => b.c - a.c)[0];
   if (!best || best.c <= before) {
+    const why = textL != null && pool.length < args.fallbacks.length
+      ? ` que se separe del titular (≥ ${vsText}:1)` : '';
     return { changed: false, role: null, hex: null, contrast_before: r2(before), contrast_after: r2(before), ...base,
-      reason: `contraste ${r2(before)} < ${args.minContrast} y ningún rol alternativo contrasta más` };
+      reason: `contraste ${r2(before)} < ${args.minContrast} y ningún rol alternativo${why} contrasta más` };
   }
   return { changed: true, role: best.role, hex: best.hex, contrast_before: r2(before), contrast_after: r2(best.c), ...base,
     reason: `contraste ${r2(before)} < ${args.minContrast}: el énfasis pasa a ${best.role} (${r2(best.c)})` };
@@ -3425,7 +3445,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
       if (ec) {
         const d = decideEmphasisColor({ currentColor: finalStyle.slots.headline!.emphasis!.color, fallbacks: ec.fallbacks,
-          bgLuminances: bg.luminances, minContrast: ec.minContrast });
+          bgLuminances: bg.luminances, minContrast: ec.minContrast,
+          ...(ec.minContrastVsText != null ? { textColor: finalStyle.slots.headline!.color, minContrastVsText: ec.minContrastVsText } : {}) });
         emphasisContrastMeta = { ...d, samples: bg.luminances.length, rect: rectOut };
         if (d.changed && d.hex) {
           finalStyle = withEmphasisColor(finalStyle, hexToRgba(d.hex, 1));
