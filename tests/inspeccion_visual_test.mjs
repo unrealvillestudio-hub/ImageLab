@@ -342,7 +342,7 @@ ok('IDENTIDAD: validación y tope de 3 fotos repartido (la primera de cada perso
 });
 
 ok('IDENTIDAD: el cable — las fotos se bajan, una caída no tumba la inspección y la medida lo dice', () => {
-  assert.match(inspect, /callJudge\(model, buildInspectPrompt\(\{ \.\.\.input, references: loaded \}\), image, codes, trace, refImages\)/);
+  assert.match(inspect, /callJudge\(model, buildInspectPrompt\(\{ \.\.\.input, references: loaded \}\), image, judgedCodes, trace,\s+refImages, identityNames\)/);
   assert.match(inspect, /INSPECT_REFERENCE_UNAVAILABLE/);
   assert.match(inspect, /parts: judgeParts\(image, references, prompt\.user\)/);
 });
@@ -351,6 +351,81 @@ ok('IDENTIDAD: una referencia puede viajar en línea (data:image) y no vivir en 
   const v = M.validateInspectRequest({ ...VALID, references: [{ name: 'A', image_urls: ['data:image/jpeg;base64,/9j/4AAQ', 'data:text/html;base64,PGI+'] }] });
   assert.deepEqual(v.references, [{ name: 'A', image_urls: ['data:image/jpeg;base64,/9j/4AAQ'] }], 'sólo imágenes png, jpeg o webp');
   assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, references: [{ name: 'A', image_urls: ['data:text/html;base64,PGI+'] }] })), { label: 'INSPECT_BAD_REQUEST', status: 400 });
+});
+
+// ── IDENTIDAD ESTRUCTURADA (2026-10-17): el juez compara y puntúa; el código decide ──
+const RID = { code: 'R_ID', statement: 'The person must be the same individual as the reference.', identity: { min_score: 70, max_mismatches: 2 } };
+const REFS = [{ name: 'Persona A', image_urls: ['https://x.test/a1.jpg'] }];
+const feats = (over = {}) => Object.fromEntries(M.IDENTITY_FEATURES.map((f) => [f, over[f] ?? 'match']));
+const respuesta = (id) => JSON.stringify({ violated: [], identity: id });
+
+ok('IDENTIDAD ESTRUCTURADA: sin regla de identidad, el prompt y el esquema son byte a byte los de antes', () => {
+  const antes = M.buildInspectPrompt({ rules: RULES, copy: null, references: REFS }).user;
+  assert.ok(!antes.includes('IDENTITY CHECK'));
+  assert.ok(!('identity' in M.buildResponseSchema(CODES).properties));
+  assert.deepEqual(M.buildResponseSchema(CODES).required, ['violated']);
+});
+
+ok('IDENTIDAD ESTRUCTURADA: validación — true usa los umbrales por defecto; un umbral fuera de rango es 400', () => {
+  const v = M.validateInspectRequest({ ...VALID, rules: [...RULES, { code: 'R_ID', statement: 's', identity: true }] });
+  assert.deepEqual(v.rules.at(-1).identity, M.IDENTITY_DEFAULTS);
+  assert.equal('identity' in v.rules[0], false);
+  for (const mal of [{ min_score: 0 }, { min_score: 101 }, { max_mismatches: 0 }, { min_score: 70.5 }, 'x']) {
+    assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, rules: [{ code: 'R_ID', statement: 's', identity: mal }] })),
+      { label: 'INSPECT_RULES_INVALID', status: 400 }, JSON.stringify(mal));
+  }
+});
+
+ok('IDENTIDAD ESTRUCTURADA: con referencias, la regla sale de la lista y entra el IDENTITY CHECK con sus rasgos', () => {
+  const u = M.buildInspectPrompt({ rules: [...RULES, RID], copy: null, references: REFS }).user;
+  assert.match(u, /IDENTITY CHECK — for EACH reference person \(Persona A\)/);
+  assert.ok(!u.includes('[R_ID]'), 'la regla de identidad no va al sí/no del juez');
+  for (const f of M.IDENTITY_FEATURES) assert.ok(u.includes(f), f);
+  assert.match(u, /hair_color is the color and tone of the hair, NOT the hairstyle/);
+  assert.match(u, /NOT the same individual/);
+  const sch = M.buildResponseSchema(CODES, ['Persona A']);
+  assert.deepEqual(sch.required, ['violated', 'identity']);
+  assert.deepEqual(sch.properties.identity.items.properties.name.enum, ['Persona A']);
+});
+
+ok('IDENTIDAD ESTRUCTURADA: sin referencias, la regla de identidad no aplica y no va al juez', () => {
+  const u = M.buildInspectPrompt({ rules: [...RULES, RID], copy: null }).user;
+  assert.ok(!u.includes('IDENTITY CHECK') && !u.includes('[R_ID]'));
+  assert.equal(M.identityActive([RID], []), false);
+  assert.equal(M.identityActive([RID], REFS), true);
+  assert.equal(M.identityActive(RULES, REFS), false);
+  const solo = M.buildInspectPrompt({ rules: [RID], copy: null, references: REFS }).user;
+  assert.match(solo, /\(none: answer "violated" as an empty list\)/);
+  assert.deepEqual(M.buildResponseSchema([], ['Persona A']).properties.violated.items.properties.code, { type: 'STRING' });
+});
+
+ok('IDENTIDAD ESTRUCTURADA: el código decide — puntaje bajo, rasgos distintos o ausencia incumplen', () => {
+  const j = (o) => M.parseIdentity(respuesta([{ name: 'Persona A', found: true, score: 85, evidence: 'e', features: feats(), ...o }]), ['Persona A']);
+  assert.equal(M.identityVerdict(RID, j({})), null, 'misma persona: cumple');
+  assert.match(M.identityVerdict(RID, j({ score: 55 })).evidence, /puntaje 55 \(mínimo 70\)/);
+  const dos = M.identityVerdict(RID, j({ features: feats({ hair_color: 'mismatch', face_fullness: 'mismatch' }) }));
+  assert.match(dos.evidence, /rasgos distintos 2 \(máximo 1\): face_fullness, hair_color/);
+  assert.equal(M.identityVerdict(RID, j({ features: feats({ hair_color: 'mismatch' }) })), null, 'un rasgo distinto con puntaje alto: cumple');
+  assert.match(M.identityVerdict(RID, j({ found: false })).evidence, /no aparece en la escena/);
+  assert.equal(M.identityVerdict(RID, j({ features: feats({ nose: 'unclear', eyes: 'unclear' }) })), null, 'unclear no cuenta como distinto');
+});
+
+ok('IDENTIDAD ESTRUCTURADA: una identidad ilegible o incompleta FALLA (nunca un aprobado)', () => {
+  const lab = (t) => labelOf(() => M.parseIdentity(t, ['Persona A']));
+  const E = { label: 'INSPECT_UNPARSEABLE', status: 502 };
+  assert.deepEqual(lab('no json'), E);
+  assert.deepEqual(lab(JSON.stringify({ violated: [] })), E);
+  assert.deepEqual(lab(respuesta([])), E, 'falta la persona');
+  assert.deepEqual(lab(respuesta([{ name: 'Persona A', found: true, score: 120, evidence: '', features: feats() }])), E);
+  assert.deepEqual(lab(respuesta([{ name: 'Persona A', found: true, score: 80, evidence: '', features: feats({ nose: 'maybe' }) }])), E);
+  assert.deepEqual(lab(respuesta([{ name: 'Persona A', found: 'yes', score: 80, evidence: '', features: feats() }])), E);
+});
+
+ok('IDENTIDAD ESTRUCTURADA: el cable — el juez razona sólo con identidad y la medida viaja en meta.identity', () => {
+  assert.match(inspect, /thinkingBudget: identityNames\.length \? IDENTITY_THINKING_BUDGET : 0/);
+  assert.match(inspect, /responseSchema: buildResponseSchema\(codes, identityNames\)/);
+  assert.match(inspect, /identity = parseIdentity\(text, identityNames\)/);
+  assert.match(inspect, /identity: identity\.map\(/);
 });
 
 console.log(`\ninspeccion_visual: ${n} pruebas OK`);
