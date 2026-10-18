@@ -51,7 +51,11 @@ const INSPECT_MODEL = () => (process.env.IMAGELAB_INSPECT_MODEL ?? '').trim() ||
 // IDENTIDAD ESTRUCTURADA (2026-10-17) — comparar caras pide otro modelo. Medido en la calibración del 17-oct con
 // gemini-2.5-flash y el mismo bloque de rasgos: puntuó 95 a una escena de OTRA persona con la cara frontal y
 // visible, y 60 a la escena más parecida. Sólo las inspecciones con identidad usan este modelo.
-const DEFAULT_INSPECT_IDENTITY_MODEL = 'gemini-2.5-pro';
+// 2026-10-18 — calibración de 15 casos con cuatro modelos (gemini-2.5-pro, gemini-3.1-pro-preview, gemini-3.8-flash,
+// gemini-3.5-flash-lite): todos rechazan a OTRA persona (10-35); ninguno distingue de forma estable entre dos caras de
+// IA del mismo tipo. La regla es una barrera gruesa, y para eso basta el más barato que no se retira el 2026-10-20
+// (los gemini-2.5 de Vertex sí, reportado): 15 de 15 casos con otra persona/misma persona bien separados.
+const DEFAULT_INSPECT_IDENTITY_MODEL = 'gemini-3.5-flash-lite';
 const INSPECT_IDENTITY_MODEL = () => (process.env.IMAGELAB_INSPECT_IDENTITY_MODEL ?? '').trim() || DEFAULT_INSPECT_IDENTITY_MODEL;
 
 // maxDuration es 60 s (ver `config`). Presupuesto: descarga de la imagen + llamada al modelo, con
