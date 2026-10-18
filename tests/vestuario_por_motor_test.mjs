@@ -87,6 +87,26 @@ await ok('opciones basura se ignoran; una lista vacía cae en `outfit`', () => {
   assert.equal(M.wardrobeOptionFor({ outfit: ' x ', options: [] }, 's'), 'x');
   assert.equal(M.wardrobeOptionFor({ outfit: 'x', options: 'no' }, 's'), 'x');
 });
+await ok('la semilla reparte: títulos reales distintos no caen todos en la misma opción, y dos entradas no se mueven juntas (2026-10-18)', () => {
+  // Medido el 2026-10-18 con el hash anterior (h * 31 + c): 8 de estos 10 títulos daban el mismo índice de 6.
+  const titulos = ['Irja presenta el presupuesto anual en el salón de asambleas', 'Irja revisa el cuarto de bombas',
+    'Irja con sus administradoras', 'Irja en el lobby del edificio', 'Detrás de cámaras del podcast',
+    'Cómo se prepara una asamblea', 'Fondo de reserva: lo que debes saber', 'Mantenimiento preventivo de elevadores',
+    'Cuotas de mantenimiento 2027', 'La seguridad del acceso', 'Qué revisa una inspección técnica', 'El agua nunca falta',
+    'Una junta que decide con datos', 'Proveedores bajo contrato', 'Piscina abierta todo el año', 'Gimnasio renovado',
+    'Elevadores sin sorpresas', 'Bitácora al día', 'Morosidad: cómo se gestiona', 'Seguro del edificio explicado'];
+  const idx = (t, k, n) => M.seedIndex(`${t}|Ada Nwosu|${k}`, n);
+  for (const n of [2, 3, 4, 6]) {
+    const cuenta = new Map();
+    for (const t of titulos) cuenta.set(idx(t, 0, n), (cuenta.get(idx(t, 0, n)) ?? 0) + 1);
+    assert.equal(cuenta.size, n, `con ${n} opciones salen todas en 20 títulos`);
+    assert.ok(Math.max(...cuenta.values()) <= Math.ceil(20 / n) + 5, `con ${n} opciones ninguna acapara: ${[...cuenta.values()]}`);
+  }
+  const juntas = titulos.filter((t) => idx(t, 8, 6) === idx(t, 9, 6)).length;
+  assert.ok(juntas <= 8, `peinado y accesorios coinciden en ${juntas} de 20 títulos`);
+  assert.equal(M.seedIndex('misma', 6), M.seedIndex('misma', 6), 'determinista');
+  assert.equal(M.seedIndex('x', 0), 0); assert.equal(M.seedIndex('x', 1), 0);
+});
 await ok('al editar no se dicta ropa', () => {
   assert.equal(M.personaWardrobeBlock(P, 'edit_from_current', 's'), 'Keep the clothing of the current image unless a directive asks to change it.');
 });

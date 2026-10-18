@@ -1011,6 +1011,30 @@ export function personaWardrobeBlock(persona: PromptPersona | null | undefined, 
 // la pieza (la misma familia de hash que `productStagingFor`), y el constructor la recibe ya elegida. Si
 // la persona declara `reference_outfit`, el motor repone que no la lleve. EJE: las prendas son dato.
 
+// ── LA SEMILLA REPARTE (2026-10-18) ──────────────────────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-10-18, catálogo de vestuario con 6 peinados y 6 juegos de accesorios):
+// tres escenas con títulos distintos salieron con el MISMO peinado y los MISMOS accesorios. El hash era
+// `h = h * 31 + c`, y 31 deja resto 1 al dividir por 2, 3, 5 y 6: el índice `h % n` dependía casi sólo de la
+// SUMA de los caracteres, así que muchos títulos distintos caían en la misma opción, y dos entradas de la
+// misma pieza (que sólo difieren en el último carácter de la semilla) se movían juntas. Con 10 títulos
+// reales, 8 dieron el mismo peinado.
+//
+// LA REGLA: FNV-1a de 32 bits y el finalizador de MurmurHash3 (fmix32) antes del módulo. Determinista
+// igual (misma semilla, misma opción); cada carácter cambia todos los bits del resultado. EJE: no sabe de
+// prendas ni de marcas, sólo reparte una semilla entre n opciones.
+
+/** Índice estable en [0, n) para una semilla. PURO. */
+export function seedIndex(seed: string, n: number): number {
+  if (!Number.isInteger(n) || n <= 0) return 0;
+  let h = 0x811c9dc5;
+  for (const ch of String(seed ?? '')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return (h >>> 0) % n;
+}
+
 /** Las opciones válidas de una entrada del catálogo: cadenas no vacías, en su orden. */
 export function wardrobeOptionsOf(entry: { options?: unknown } | null | undefined): string[] {
   return Array.isArray(entry?.options) ? (entry!.options as unknown[]).filter((o): o is string => typeof o === 'string' && !!o.trim()).map((o) => o.trim()) : [];
@@ -1020,9 +1044,7 @@ export function wardrobeOptionsOf(entry: { options?: unknown } | null | undefine
 export function wardrobeOptionFor(entry: { outfit: string; options?: unknown }, seed: string): string {
   const opts = wardrobeOptionsOf(entry);
   if (!opts.length) return entry.outfit.trim();
-  let h = 0;
-  for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return opts[h % opts.length];
+  return opts[seedIndex(seed, opts.length)];
 }
 
 /** La cláusula del motor: la persona no lleva la ropa de sus fotos. En inglés, como el resto. */
@@ -1145,9 +1167,7 @@ export function productStagingFor(kind: ProductKind | null | undefined, items: n
   // «en la mano» como «en uso» lo pondrían en sus manos.
   if (kind !== 'product') return 'on_surface';
   const options: ProductStaging[] = ['held', 'in_use', 'on_surface'];
-  let h = 0;
-  for (const ch of String(seed ?? '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return options[h % options.length];
+  return options[seedIndex(seed, options.length)];
 }
 
 /** Lo que el constructor tiene que escribir sobre DÓNDE está el producto, según la puesta en escena que
