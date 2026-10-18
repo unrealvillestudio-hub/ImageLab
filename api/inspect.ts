@@ -800,6 +800,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed', error_label: 'METHOD_NOT_ALLOWED', status: 'error' }); return; }
 
   let model = INSPECT_MODEL();
+  // CALIBRACIÓN (2026-10-18) — fuera de producción, la cabecera `x-inspect-model` elige el modelo del juez, para
+  // medir un modelo candidato contra casos conocidos sin tocar el entorno. En producción se ignora siempre.
+  const calibrationModel = process.env.VERCEL_ENV !== 'production'
+    ? String(req.headers['x-inspect-model'] ?? '').trim().replace(/[^a-z0-9.\-]/gi, '').slice(0, 60) : '';
+  if (calibrationModel) model = calibrationModel;
   const trace: ProviderTrace = { called: false, httpStatus: null, usage: null };
   const t0 = Date.now();
   let input: InspectRequest | null = null;
@@ -841,7 +846,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let verdict: { violated: Violation[]; unmatched: string[] } = { violated: [], unmatched: [] };
     let identity: IdentityJudgment[] = [];
     // Sólo reglas de identidad y ninguna referencia cargada: no aplican y no hay nada que preguntar al modelo.
-    if (identityNames.length) model = INSPECT_IDENTITY_MODEL();
+    if (identityNames.length) model = calibrationModel || INSPECT_IDENTITY_MODEL();
     if (judgedCodes.length || identityNames.length) {
       const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, judgedCodes, trace,
         refImages, identityNames);

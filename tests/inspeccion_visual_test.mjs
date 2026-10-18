@@ -426,7 +426,8 @@ ok('IDENTIDAD ESTRUCTURADA: el cable — el juez razona sólo con identidad y la
   assert.match(inspect, /responseSchema: buildResponseSchema\(codes, identityNames\)/);
   assert.match(inspect, /identity = parseIdentity\(text, identityNames\)/);
   assert.match(inspect, /identity: identity\.map\(/);
-  assert.match(inspect, /if \(identityNames\.length\) model = INSPECT_IDENTITY_MODEL\(\);/);
+  assert.match(inspect, /if \(identityNames\.length\) model = calibrationModel \|\| INSPECT_IDENTITY_MODEL\(\);/);
+  assert.match(inspect, /process\.env\.VERCEL_ENV !== 'production'\s*\? String\(req\.headers\['x-inspect-model'\]/, 'la cabecera de calibración sólo fuera de producción');
   assert.match(inspect, /IMAGELAB_INSPECT_IDENTITY_MODEL/);
 });
 
