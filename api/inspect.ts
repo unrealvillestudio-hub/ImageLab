@@ -43,11 +43,12 @@ declare const process: { env: Record<string, string | undefined> };
 const GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
 const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
 
-// Modelo multimodal de TEXTO que actúa de juez. Sobrescribible por entorno sin desplegar código.
-// Debe aceptar `thinkingBudget: 0` (familia flash): un modelo que no permita apagar el razonamiento
-// responderá 4xx y el endpoint fallará en voz alta con `INSPECT_MODEL_ERROR`.
-const DEFAULT_INSPECT_MODEL = 'gemini-2.5-flash';
-const INSPECT_MODEL = () => (process.env.IMAGELAB_INSPECT_MODEL ?? '').trim() || DEFAULT_INSPECT_MODEL;
+// Modelo multimodal de TEXTO que actúa de juez: es DATO, el rol `visual_inspection` de `public.ops_lab_models`
+// (bloque MODELO-POR-ROL, MULTIBRAND_RULE.md §11). Sus parámetros (p. ej. `thinkingConfig`) vienen con la fila:
+// un modelo que rechace los del rol responderá 4xx y el endpoint fallará en voz alta con `INSPECT_MODEL_ERROR`.
+// ALIAS LEGACY: el modelo que había escrito aquí antes de la tabla. Sólo se usa si la tabla no se puede consultar.
+const INSPECT_ROLE = 'visual_inspection';
+const LEGACY_INSPECT_MODEL = { model: 'gemini-2.5-flash', generationParams: { thinkingConfig: { thinkingBudget: 0 } } };
 
 // maxDuration es 60 s (ver `config`). Presupuesto: descarga de la imagen + llamada al modelo, con
 // ~5 s de margen para el token y el JSON, igual que el margen de `api/execute.ts`.
@@ -112,8 +113,153 @@ async function getAccessToken(): Promise<string> {
 }
 // ── AUTH-VERTEX:END ──
 
-const INSPECT_MODEL_URL = (model: string) =>
-  `${vertexBaseUrl(GCP_LOCATION(), GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+// ── MODELO-POR-ROL:BEGIN ── (2026-10-19) MULTIBRAND_RULE.md §11: el modelo de cada rol es DATO.
+// Copia LITERAL en `api/inspect.ts` y `api/compose.ts`: cada función de Vercel se empaqueta por separado.
+// `tests/modelo_por_rol_test.mjs` la extrae por estos sentinelas y exige que las dos copias no diverjan.
+//
+// Qué modelo usa un rol, en este orden:
+//   1. Fuera de producción, la cabecera `x-lab-model` (y opcionalmente `x-lab-model-params`, JSON): calibrar un
+//      modelo candidato con piezas reales sin tocar la tabla. En producción se ignora siempre.
+//   2. La fila activa de `public.ops_lab_models` para (lab, role), leída con service_role.
+//   3. El ALIAS LEGACY —el literal que había antes de la tabla— SÓLO si la consulta no se pudo hacer (entorno sin
+//      Supabase, red o 5xx), con `MODEL_ROLE_LEGACY_ALIAS` en el log. Se retira cuando el log lleve una semana
+//      sin esa línea.
+// Si la consulta responde y NO hay fila, falla: `MODEL_ROLE_UNSEEDED`. Nunca un modelo inventado.
+// La respuesta se guarda 60 s por instancia caliente: un UPDATE de la fila manda en un minuto, sin despliegue.
+export interface LabModel {
+  model: string;
+  location: string | null;
+  generationParams: Record<string, unknown>;
+  source: 'ops_lab_models' | 'calibration_header' | 'legacy_alias';
+}
+
+export class ModelRoleError extends Error {
+  readonly label: string;
+  constructor(label: string, message: string) {
+    super(`${label}: ${message}`);
+    this.label = label;
+  }
+}
+
+export const LAB_MODEL_TTL_MS = 60_000;
+const LAB_MODEL_TIMEOUT_MS = 5_000;
+const _labModelCache = new Map<string, { at: number; value: LabModel }>();
+export function resetLabModelCache(): void { _labModelCache.clear(); }
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** De las filas que devolvió PostgREST a un modelo. Puro. */
+export function labModelFromRows(rows: unknown, lab: string, role: string): LabModel {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new ModelRoleError('MODEL_ROLE_UNSEEDED', `no hay fila activa en ops_lab_models para (${lab}, ${role})`);
+  }
+  if (rows.length > 1) {
+    throw new ModelRoleError('MODEL_ROLE_AMBIGUOUS', `${rows.length} filas activas en ops_lab_models para (${lab}, ${role})`);
+  }
+  const r = rows[0] as Record<string, unknown>;
+  const model = typeof r?.model_id === 'string' ? r.model_id.trim() : '';
+  if (!model) throw new ModelRoleError('MODEL_ROLE_INVALID', `la fila de (${lab}, ${role}) no trae model_id`);
+  const location = typeof r.location === 'string' && r.location.trim() ? r.location.trim() : null;
+  const generationParams = isPlainObject(r.generation_params) ? r.generation_params : {};
+  return { model, location, generationParams, source: 'ops_lab_models' };
+}
+
+/** La calibración sólo existe fuera de producción. Devuelve null si no aplica. Puro. */
+export function calibrationFromHeaders(
+  headers: Record<string, unknown>, vercelEnv: string | undefined,
+): { model: string; params: Record<string, unknown> | null } | null {
+  if (vercelEnv === 'production') return null;
+  const model = String(headers?.['x-lab-model'] ?? '').trim().replace(/[^a-z0-9.\-]/gi, '').slice(0, 60);
+  if (!model) return null;
+  let params: Record<string, unknown> | null = null;
+  const raw = headers?.['x-lab-model-params'];
+  if (typeof raw === 'string' && raw.trim()) {
+    try { const p = JSON.parse(raw); if (isPlainObject(p)) params = p; } catch { /* sin params: se usan los de la fila */ }
+  }
+  return { model, params };
+}
+
+/** Los parámetros del modelo se fusionan sobre los del rol. Puro. */
+export function mergeGenerationConfig(
+  base: Record<string, unknown>, params: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...base, ...params };
+}
+
+function labModelsBaseUrl(raw: string): string {
+  let v = String(raw ?? '').trim().replace(/\/+$/, '');
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) {
+    if (!v.includes('.')) v = `${v}.supabase.co`;
+    v = `https://${v}`;
+  }
+  return v;
+}
+
+/** El modelo de un rol. Lanza `ModelRoleError` si la tabla responde sin fila para el rol. */
+export async function resolveLabModel(
+  lab: string,
+  role: string,
+  legacy: { model: string; generationParams: Record<string, unknown> },
+  calibration: { model: string; params: Record<string, unknown> | null } | null = null,
+  now: number = Date.now(),
+): Promise<LabModel> {
+  let resolved: LabModel;
+  const key = `${lab}/${role}`;
+  const hit = _labModelCache.get(key);
+  if (hit && now - hit.at < LAB_MODEL_TTL_MS) {
+    resolved = hit.value;
+  } else {
+    const base = labModelsBaseUrl(process.env.SUPABASE_URL ?? '');
+    const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+    const alias = (why: string): LabModel => {
+      console.warn(`[ImageLab][modelo] MODEL_ROLE_LEGACY_ALIAS lab=${lab} role=${role} model=${legacy.model}: ${why}`);
+      return { model: legacy.model, location: null, generationParams: legacy.generationParams, source: 'legacy_alias' };
+    };
+    let rows: unknown = null;
+    let failure: string | null = null;
+    if (!base || !sbKey) {
+      failure = 'faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY';
+    } else {
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), LAB_MODEL_TIMEOUT_MS);
+      try {
+        const q = `lab=eq.${encodeURIComponent(lab)}&role=eq.${encodeURIComponent(role)}&active=eq.true` +
+          '&select=model_id,location,generation_params&limit=2';
+        const res = await fetch(`${base}/rest/v1/ops_lab_models?${q}`, {
+          headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}`, Accept: 'application/json' },
+          signal: controller.signal,
+        });
+        if (res.ok) rows = await res.json();
+        else failure = `ops_lab_models respondió ${res.status}: ${(await res.text()).slice(0, 160)}`;
+      } catch (err) {
+        failure = err instanceof Error && err.name === 'AbortError'
+          ? `ops_lab_models superó ${LAB_MODEL_TIMEOUT_MS / 1000} s`
+          : `ops_lab_models no respondió: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200);
+      } finally {
+        clearTimeout(tid);
+      }
+    }
+    if (failure) {
+      resolved = alias(failure);   // no se guarda: la próxima llamada vuelve a intentar la tabla
+    } else {
+      resolved = labModelFromRows(rows, lab, role);
+      _labModelCache.set(key, { at: now, value: resolved });
+    }
+  }
+  if (!calibration) return resolved;
+  return {
+    model: calibration.model,
+    location: resolved.location,
+    generationParams: calibration.params ?? resolved.generationParams,
+    source: 'calibration_header',
+  };
+}
+// ── MODELO-POR-ROL:END ──
+
+const INSPECT_MODEL_URL = (m: LabModel) =>
+  `${vertexBaseUrl(m.location ?? GCP_LOCATION(), GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(m.model)}:generateContent`;
 
 // ── INSPECCION:BEGIN ── bloque PURO (sin red ni entorno): lo extrae `tests/inspeccion_visual_test.mjs`.
 
@@ -568,7 +714,7 @@ async function fetchImage(url: string): Promise<{ mimeType: string; data: string
 interface ProviderTrace { called: boolean; httpStatus: number | null; usage: InspectUsage | null }
 
 async function callJudge(
-  model: string,
+  model: LabModel,
   prompt: { system: string; user: string },
   image: { mimeType: string; data: string },
   codes: string[],
@@ -595,12 +741,11 @@ async function callJudge(
           role: 'user',
           parts: judgeParts(image, references, prompt.user),
         }],
-        generationConfig: {
+        generationConfig: mergeGenerationConfig({
           temperature: 0,
           responseMimeType: 'application/json',
           responseSchema: buildResponseSchema(codes),
-          thinkingConfig: { thinkingBudget: 0 },
-        },
+        }, model.generationParams),
       }),
       signal: controller.signal,
     });
@@ -645,11 +790,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed', error_label: 'METHOD_NOT_ALLOWED', status: 'error' }); return; }
 
-  const model = INSPECT_MODEL();
+  // El modelo del juez se conoce al resolver su rol; si la resolución falla, la respuesta dice UNKNOWN.
+  let model = 'UNKNOWN';
+  let modelSource: LabModel['source'] | null = null;
   const trace: ProviderTrace = { called: false, httpStatus: null, usage: null };
   const t0 = Date.now();
   let input: InspectRequest | null = null;
   try {
+    let judge: LabModel;
+    try {
+      judge = await resolveLabModel('imagelab', INSPECT_ROLE, LEGACY_INSPECT_MODEL,
+        calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV));
+    } catch (err) {
+      if (err instanceof ModelRoleError) throw new InspectError(err.label, err.message, 500);
+      throw err;
+    }
+    model = judge.model;
+    modelSource = judge.source;
     let body: unknown;
     try {
       body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body ?? null);
@@ -680,10 +837,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (refErrors.length) console.warn(`[ImageLab][inspect] INSPECT_REFERENCE_UNAVAILABLE brand=${input.brand_id} piece=${input.piece_id ?? '∅'}: ${refErrors.join(' | ')}`);
     const loaded = (input.references ?? []).map((r) => ({ ...r, image_urls: r.image_urls.slice(0, refImages.filter((x) => x.name === r.name).length) }))
       .filter((r) => r.image_urls.length);
-    const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, codes, trace, refImages);
+    const text = await callJudge(judge, buildInspectPrompt({ ...input, references: loaded }), image, codes, trace, refImages);
     const verdict = parseVerdict(text, codes);
 
-    console.log(`[ImageLab][inspect] brand=${input.brand_id} piece=${input.piece_id ?? '∅'} model=${model} ` +
+    console.log(`[ImageLab][inspect] brand=${input.brand_id} piece=${input.piece_id ?? '∅'} model=${model} fuente=${modelSource} ` +
       `evaluated=${codes.length} violated=${verdict.violated.length} unmatched=${verdict.unmatched.length} ` +
       `bandas=${bands.edge_bands ? `${bands.edge_bands.top_px}/${bands.edge_bands.bottom_px}/${bands.edge_bands.left_px}/${bands.edge_bands.right_px}` : 'ninguna medida'} ${Date.now() - t0}ms`);
     res.status(200).json({
@@ -692,6 +849,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       unmatched: verdict.unmatched,
       evaluated_codes: codes,
       model,
+      model_source: modelSource,
       usage: trace.usage,
       ...(trace.usage ? {} : { usage_missing: true }),
       // Medida, no veredicto: quien consume decide con su propio umbral.
@@ -710,6 +868,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       error_label: label,
       status: 'error',
       model,
+      model_source: modelSource,
       provider_called: trace.called,
       provider_http_status: trace.httpStatus,
       usage: trace.usage,

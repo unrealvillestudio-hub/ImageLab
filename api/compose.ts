@@ -3208,7 +3208,10 @@ export const config = { maxDuration: 60 };
 // exige que no diverjan. NUNCA tumba la composición: si falla, se compone en el ancla declarada y se dice.
 const FACES_GCP_PROJECT  = () => process.env.GOOGLE_CLOUD_PROJECT ?? '';
 const FACES_GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
-const FACES_MODEL = () => (process.env.IMAGELAB_FACES_MODEL ?? '').trim() || 'gemini-2.5-flash';
+// El modelo del detector es DATO: el rol `face_detection` de `public.ops_lab_models` (bloque MODELO-POR-ROL,
+// MULTIBRAND_RULE.md §11). ALIAS LEGACY: el que había escrito aquí antes de la tabla; sólo si no se puede consultar.
+const FACES_ROLE = 'face_detection';
+const LEGACY_FACES_MODEL = { model: 'gemini-2.5-flash', generationParams: { thinkingConfig: { thinkingBudget: 0 } } };
 const FACES_TIMEOUT_MS = 15_000;
 const FACES_PROMPT =
   'Detect every human face visible in this image, including faces in profile, partially visible or turned away. ' +
@@ -3271,33 +3274,184 @@ async function getAccessToken(): Promise<string> {
 }
 // ── AUTH-VERTEX:END ──
 
+// ── MODELO-POR-ROL:BEGIN ── (2026-10-19) MULTIBRAND_RULE.md §11: el modelo de cada rol es DATO.
+// Copia LITERAL en `api/inspect.ts` y `api/compose.ts`: cada función de Vercel se empaqueta por separado.
+// `tests/modelo_por_rol_test.mjs` la extrae por estos sentinelas y exige que las dos copias no diverjan.
+//
+// Qué modelo usa un rol, en este orden:
+//   1. Fuera de producción, la cabecera `x-lab-model` (y opcionalmente `x-lab-model-params`, JSON): calibrar un
+//      modelo candidato con piezas reales sin tocar la tabla. En producción se ignora siempre.
+//   2. La fila activa de `public.ops_lab_models` para (lab, role), leída con service_role.
+//   3. El ALIAS LEGACY —el literal que había antes de la tabla— SÓLO si la consulta no se pudo hacer (entorno sin
+//      Supabase, red o 5xx), con `MODEL_ROLE_LEGACY_ALIAS` en el log. Se retira cuando el log lleve una semana
+//      sin esa línea.
+// Si la consulta responde y NO hay fila, falla: `MODEL_ROLE_UNSEEDED`. Nunca un modelo inventado.
+// La respuesta se guarda 60 s por instancia caliente: un UPDATE de la fila manda en un minuto, sin despliegue.
+export interface LabModel {
+  model: string;
+  location: string | null;
+  generationParams: Record<string, unknown>;
+  source: 'ops_lab_models' | 'calibration_header' | 'legacy_alias';
+}
+
+export class ModelRoleError extends Error {
+  readonly label: string;
+  constructor(label: string, message: string) {
+    super(`${label}: ${message}`);
+    this.label = label;
+  }
+}
+
+export const LAB_MODEL_TTL_MS = 60_000;
+const LAB_MODEL_TIMEOUT_MS = 5_000;
+const _labModelCache = new Map<string, { at: number; value: LabModel }>();
+export function resetLabModelCache(): void { _labModelCache.clear(); }
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** De las filas que devolvió PostgREST a un modelo. Puro. */
+export function labModelFromRows(rows: unknown, lab: string, role: string): LabModel {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new ModelRoleError('MODEL_ROLE_UNSEEDED', `no hay fila activa en ops_lab_models para (${lab}, ${role})`);
+  }
+  if (rows.length > 1) {
+    throw new ModelRoleError('MODEL_ROLE_AMBIGUOUS', `${rows.length} filas activas en ops_lab_models para (${lab}, ${role})`);
+  }
+  const r = rows[0] as Record<string, unknown>;
+  const model = typeof r?.model_id === 'string' ? r.model_id.trim() : '';
+  if (!model) throw new ModelRoleError('MODEL_ROLE_INVALID', `la fila de (${lab}, ${role}) no trae model_id`);
+  const location = typeof r.location === 'string' && r.location.trim() ? r.location.trim() : null;
+  const generationParams = isPlainObject(r.generation_params) ? r.generation_params : {};
+  return { model, location, generationParams, source: 'ops_lab_models' };
+}
+
+/** La calibración sólo existe fuera de producción. Devuelve null si no aplica. Puro. */
+export function calibrationFromHeaders(
+  headers: Record<string, unknown>, vercelEnv: string | undefined,
+): { model: string; params: Record<string, unknown> | null } | null {
+  if (vercelEnv === 'production') return null;
+  const model = String(headers?.['x-lab-model'] ?? '').trim().replace(/[^a-z0-9.\-]/gi, '').slice(0, 60);
+  if (!model) return null;
+  let params: Record<string, unknown> | null = null;
+  const raw = headers?.['x-lab-model-params'];
+  if (typeof raw === 'string' && raw.trim()) {
+    try { const p = JSON.parse(raw); if (isPlainObject(p)) params = p; } catch { /* sin params: se usan los de la fila */ }
+  }
+  return { model, params };
+}
+
+/** Los parámetros del modelo se fusionan sobre los del rol. Puro. */
+export function mergeGenerationConfig(
+  base: Record<string, unknown>, params: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...base, ...params };
+}
+
+function labModelsBaseUrl(raw: string): string {
+  let v = String(raw ?? '').trim().replace(/\/+$/, '');
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) {
+    if (!v.includes('.')) v = `${v}.supabase.co`;
+    v = `https://${v}`;
+  }
+  return v;
+}
+
+/** El modelo de un rol. Lanza `ModelRoleError` si la tabla responde sin fila para el rol. */
+export async function resolveLabModel(
+  lab: string,
+  role: string,
+  legacy: { model: string; generationParams: Record<string, unknown> },
+  calibration: { model: string; params: Record<string, unknown> | null } | null = null,
+  now: number = Date.now(),
+): Promise<LabModel> {
+  let resolved: LabModel;
+  const key = `${lab}/${role}`;
+  const hit = _labModelCache.get(key);
+  if (hit && now - hit.at < LAB_MODEL_TTL_MS) {
+    resolved = hit.value;
+  } else {
+    const base = labModelsBaseUrl(process.env.SUPABASE_URL ?? '');
+    const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+    const alias = (why: string): LabModel => {
+      console.warn(`[ImageLab][modelo] MODEL_ROLE_LEGACY_ALIAS lab=${lab} role=${role} model=${legacy.model}: ${why}`);
+      return { model: legacy.model, location: null, generationParams: legacy.generationParams, source: 'legacy_alias' };
+    };
+    let rows: unknown = null;
+    let failure: string | null = null;
+    if (!base || !sbKey) {
+      failure = 'faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY';
+    } else {
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), LAB_MODEL_TIMEOUT_MS);
+      try {
+        const q = `lab=eq.${encodeURIComponent(lab)}&role=eq.${encodeURIComponent(role)}&active=eq.true` +
+          '&select=model_id,location,generation_params&limit=2';
+        const res = await fetch(`${base}/rest/v1/ops_lab_models?${q}`, {
+          headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}`, Accept: 'application/json' },
+          signal: controller.signal,
+        });
+        if (res.ok) rows = await res.json();
+        else failure = `ops_lab_models respondió ${res.status}: ${(await res.text()).slice(0, 160)}`;
+      } catch (err) {
+        failure = err instanceof Error && err.name === 'AbortError'
+          ? `ops_lab_models superó ${LAB_MODEL_TIMEOUT_MS / 1000} s`
+          : `ops_lab_models no respondió: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200);
+      } finally {
+        clearTimeout(tid);
+      }
+    }
+    if (failure) {
+      resolved = alias(failure);   // no se guarda: la próxima llamada vuelve a intentar la tabla
+    } else {
+      resolved = labModelFromRows(rows, lab, role);
+      _labModelCache.set(key, { at: now, value: resolved });
+    }
+  }
+  if (!calibration) return resolved;
+  return {
+    model: calibration.model,
+    location: resolved.location,
+    generationParams: calibration.params ?? resolved.generationParams,
+    source: 'calibration_header',
+  };
+}
+// ── MODELO-POR-ROL:END ──
+
 type FaceCheck = {
-  faces: FaceBox[] | null; signs: FaceBox[] | null; model: string; called: boolean; http_status: number | null;
+  faces: FaceBox[] | null; signs: FaceBox[] | null; model: string; model_source?: LabModel['source']; called: boolean; http_status: number | null;
   usage: { input_tokens: number; output_tokens: number } | null; error: string | null; duration_ms: number;
 };
 
-async function detectFaces(bytes: Uint8Array, mime: string, opts: { signs?: boolean } = {}): Promise<FaceCheck> {
+async function detectFaces(
+  bytes: Uint8Array, mime: string,
+  opts: { signs?: boolean; calibration?: { model: string; params: Record<string, unknown> | null } | null } = {},
+): Promise<FaceCheck> {
   const t0 = Date.now();
-  const out: FaceCheck = { faces: null, signs: null, model: FACES_MODEL(), called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const out: FaceCheck = { faces: null, signs: null, model: 'UNKNOWN', called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
   const boxList = { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'], properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } };
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), FACES_TIMEOUT_MS);
   try {
     if (!FACES_GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
+    const lm = await resolveLabModel('imagelab', FACES_ROLE, LEGACY_FACES_MODEL, opts.calibration ?? null);
+    out.model = lm.model;
+    out.model_source = lm.source;
     const token = await getAccessToken();
-    const url = `${vertexBaseUrl(FACES_GCP_LOCATION(), FACES_GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(out.model)}:generateContent`;
+    const url = `${vertexBaseUrl(lm.location ?? FACES_GCP_LOCATION(), FACES_GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(out.model)}:generateContent`;
     out.called = true;
     const res = await fetch(url, {
       method: 'POST', signal: controller.signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') }] }],
-        generationConfig: {
-          temperature: 0, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 },
+        generationConfig: mergeGenerationConfig({
+          temperature: 0, responseMimeType: 'application/json',
           responseSchema: opts.signs
             ? { type: 'OBJECT', required: ['faces', 'signs'], properties: { faces: boxList, signs: boxList } }
             : { type: 'OBJECT', required: ['faces'], properties: { faces: boxList } },
-        },
+        }, lm.generationParams),
       }),
     });
     out.http_status = res.status;
@@ -3540,8 +3694,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let signsUnder: FaceBox[] = [];
     if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
       const wantSigns = !!finalStyle.layout.avoidSceneText;
-      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns });
-      faceMeta = { model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
+      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns,
+        calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
+      faceMeta = { model: fc.model, model_source: fc.model_source ?? null, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
         duration_ms: fc.duration_ms, boxes: fc.faces, ...(wantSigns ? { sign_boxes: fc.signs } : {}), error: fc.error };
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
