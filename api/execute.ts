@@ -321,6 +321,25 @@ async function loadActivePromptBuilderVersion(): Promise<PromptBuilderVersion | 
   );
 }
 
+/**
+ * 2026-10-20 — MITAD Y MITAD (Sam, 2026-10-19: «propongo que tú mismo implementes una medición de la versión activa vs
+ * de la versión nueva… Mitad y mitad, de acuerdo»). Una versión CANDIDATA (`candidate_share` en (0,1), inactiva) recibe
+ * esa fracción de las piezas de su marca (`candidate_brand_id`; null = todas); el resto sigue con la activa. Qué pieza va
+ * a qué brazo lo decide `builderArm` con una semilla estable de la pieza: regenerarla no la cambia de brazo. Sin
+ * candidata —o si las columnas todavía no existen—, la activa de siempre.
+ */
+async function loadPromptBuilderVersionFor(brandId: string | null, seed: string): Promise<PromptBuilderVersion | null> {
+  const active = await loadActivePromptBuilderVersion();
+  if (!brandId) return active;
+  const b = encodeURIComponent(brandId);
+  const candidate = await sb<PromptBuilderVersion & { candidate_share: number | null }>(
+    `imagelab_prompt_builder_versions?active=eq.false&candidate_share=not.is.null&or=(candidate_brand_id.eq.${b},candidate_brand_id.is.null)` +
+    '&order=candidate_brand_id.nullslast&select=version,model_id,instructions,max_output_tokens,candidate_share&limit=1',
+  );
+  if (!candidate || builderArm(candidate.candidate_share, `${brandId}|${seed}`) !== 'candidate') return active;
+  return candidate;
+}
+
 const TEXT_MODEL_URL = (model: string) =>
   `${vertexBaseUrl(GCP_LOCATION(), GCP_PROJECT())}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
 
@@ -885,6 +904,22 @@ export function composeVisualPrompt(
 // versionado (`public.imagelab_prompt_builder_versions`). Este bloque no sabe cómo se llama nadie.
 
 export type GenerationMode = 'edit_from_current' | 'regenerate_full';
+
+/** 2026-10-20 — el brazo de la comparación mitad y mitad. PURA y estable: la misma semilla, el mismo brazo. Una fracción
+ *  fuera de (0,1) no reparte nada: todo a la activa. FNV-1a de 32 bits sobre la semilla, llevado a [0,1). */
+export function builderArm(share: unknown, seed: string): 'active' | 'candidate' {
+  const f = Number(share);
+  if (!Number.isFinite(f) || f <= 0 || f >= 1) return 'active';
+  let h = 0x811c9dc5;
+  for (const ch of String(seed ?? '')) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 0x01000193) >>> 0; }
+  return h / 0x100000000 < f ? 'candidate' : 'active';
+}
+
+/** La semilla de la pieza para el brazo: su título, o el arranque de su cuerpo. Estable entre regeneraciones. */
+export function builderArmSeed(params: { title?: unknown; copy_full?: unknown } | null | undefined): string {
+  const t = typeof params?.title === 'string' ? params.title.trim() : '';
+  return t || String(params?.copy_full ?? '').trim().slice(0, 200);
+}
 
 export interface PromptPersona {
   name: string;
@@ -2710,7 +2745,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     let finalPrompt = built.prompt;
     if (shouldSynthesize(params)) {
-      const v = await loadActivePromptBuilderVersion();
+      const v = await loadPromptBuilderVersionFor(request.brandId ?? null, builderArmSeed(params));
       // FAIL-LOUD: quien manda el copy entero pidió síntesis. Degradar al prompt de 180 caracteres sin
       // decirlo sería volver al defecto que esto cierra, con la apariencia de haberlo cerrado.
       if (!v) {

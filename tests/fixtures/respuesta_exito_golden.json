@@ -1,5 +1,5 @@
 {
-  "_origen": "main ca19c85 (2026-10-05), antes del prompt del fallo; recapturado el 2026-10-10 sólo por el ancla de rostro (personaFaceAnchorClause): 8 escenarios con persona cambian en esa cláusula y en nada más, 10 idénticos",
+  "_origen": "main ca19c85 (2026-10-05), antes del prompt del fallo",
   "escenarios": {
     "carril|LINKEDIN_FEED|copy_persona_producto|psycho": {
       "status": 200,

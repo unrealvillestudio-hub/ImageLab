@@ -302,4 +302,26 @@ ok('el bloque PB no contiene literales de marca', () => {
   }
 });
 
+// 2026-10-20 — MITAD Y MITAD. El brazo es estable por pieza y reparte cerca de la fracción pedida.
+ok('builderArm: la misma semilla cae siempre en el mismo brazo', () => {
+  for (const s of ['a', 'Título de una pieza', 'MarcaN1|Otro título']) assert.equal(M.builderArm(0.5, s), M.builderArm(0.5, s));
+});
+ok('builderArm: con 0.5 reparte cerca de la mitad (1.000 semillas, entre 45 % y 55 %)', () => {
+  let c = 0;
+  for (let k = 0; k < 1000; k++) if (M.builderArm(0.5, `MarcaN1|pieza ${k}`) === 'candidate') c++;
+  assert.ok(c > 450 && c < 550, `candidata ${c}/1000`);
+});
+ok('builderArm: una fracción fuera de (0,1), o ausente, no reparte: todo a la activa', () => {
+  for (const f of [0, 1, -0.2, 1.5, null, undefined, 'x']) assert.equal(M.builderArm(f, 'semilla'), 'active', String(f));
+});
+ok('builderArmSeed: el título, y si no hay, el arranque del cuerpo', () => {
+  assert.equal(M.builderArmSeed({ title: ' Un título ', copy_full: 'cuerpo' }), 'Un título');
+  assert.equal(M.builderArmSeed({ copy_full: 'x'.repeat(300) }).length, 200);
+  assert.equal(M.builderArmSeed(null), '');
+});
+ok('el handler pide la versión por marca y semilla, y sin candidata (o sin columnas) usa la activa', () => {
+  assert.match(source, /const v = await loadPromptBuilderVersionFor\(request\.brandId \?\? null, builderArmSeed\(params\)\);/);
+  assert.match(source, /if \(!candidate \|\| builderArm\(candidate\.candidate_share, `\$\{brandId\}\|\$\{seed\}`\) !== 'candidate'\) return active;/);
+});
+
 console.log(`\n✅ prompt_builder_test — ${n} bloques OK`);
