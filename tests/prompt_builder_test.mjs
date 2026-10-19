@@ -302,4 +302,26 @@ ok('el bloque PB no contiene literales de marca', () => {
   }
 });
 
+// 2026-10-20 — OTRA PERSONA, MISMA ESCENA. El constructor ve la imagen actual; el generador no.
+ok("same_scene: el constructor recibe cómo leer la imagen actual y los lugares Ref1, Ref2, Host y Fondo", () => {
+  const msg = M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'cuerpo', mode: 'same_scene', directives: ['Ref1 por Nombre Persona'] });
+  assert.ok(msg.includes(M.SAME_SCENE_BUILDER_NOTE));
+  for (const w of ['"Ref1"', '"Ref2"', '"Host"', '"Fondo"', 'will NOT be given to the image model']) assert.ok(M.SAME_SCENE_BUILDER_NOTE.includes(w), w);
+  assert.ok(msg.indexOf('MODE: same_scene') < msg.indexOf(M.SAME_SCENE_BUILDER_NOTE), 'la nota va después del modo');
+});
+ok('same_scene: en los otros modos la nota no viaja (la petición es la de antes)', () => {
+  for (const mode of ['regenerate_full', 'edit_from_current', undefined]) {
+    assert.ok(!M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'cuerpo', mode }).includes(M.SAME_SCENE_BUILDER_NOTE), String(mode));
+  }
+});
+ok('same_scene: las cláusulas del motor son las de repintar (encuadre, franja, identidad), no las de editar', () => {
+  assert.deepEqual(engine({ mode: 'same_scene' }), engine({ mode: 'regenerate_full' }));
+});
+ok('same_scene: el handler exige la imagen actual y el constructor, y la imagen va sólo al constructor', () => {
+  assert.match(source, /mode === 'edit_from_current' \|\| mode === 'same_scene'\) && !params\.source_image_url/);
+  assert.match(source, /SAME_SCENE_WITHOUT_BUILDER/);
+  assert.match(source, /\.\.\.\(mode === 'same_scene' \? \{ images: \[await fetchImageInline\(String\(params\.source_image_url\)\)\] \} : \{\}\)/);
+  assert.match(source, /if \(mode === 'edit_from_current'\) images\.push\(await fetchImageInline/, 'al generador sólo la manda editar');
+});
+
 console.log(`\n✅ prompt_builder_test — ${n} bloques OK`);
