@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1426,6 +1426,49 @@ test('1.7.0 · el área se mide línea por línea: más cortes, más alto', () =
   const una = M.measureOverlayText(styleN1({ headline: 'Hola mundo' }), 1000, 1250, null);
   const dos = M.measureOverlayText(styleN1({ headline: 'Hola\nmundo' }), 1000, 1250, null);
   assert.ok(dos.height > una.height, `con un corte escrito el bloque es más alto (${dos.height} > ${una.height})`);
+});
+
+console.log('\n── 1.8.0 · EL COLOR DEL RESALTADO LO ELIGE UNA PERSONA ──');
+
+test('1.8.0 · un rol válido recolorea el resaltado y apaga la corrección automática', () => {
+  const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, { ...EM_TOK, layout: { emphasis_contrast: { min_contrast: 3, fallbacks: ['tierra'] } } });
+  const otro = N1_PAL.find((p) => p.role === 'tierra');
+  const r = M.applyEmphasisRole(base, otro.role, N1_PAL, ['trigo', 'tierra']);
+  assert.equal(r.applied, otro.role);
+  assert.notEqual(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
+  assert.equal(r.style.layout.emphasisContrast, undefined, 'lo eligió una persona: el contraste automático no lo cambia');
+});
+test('1.8.0 · un rol que la marca no tiene no rompe: sale igual y se dice', () => {
+  const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
+  const r = M.applyEmphasisRole(base, 'rol_inexistente', N1_PAL, ['trigo', 'rol_inexistente']);
+  assert.equal(r.applied, null);
+  assert.equal(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_ROLE_UNKNOWN')));
+});
+test('1.8.0 · sin rol o sin resaltado en el titular, el estilo es el mismo objeto', () => {
+  const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
+  assert.equal(M.applyEmphasisRole(base, null, N1_PAL, ['trigo']).style, base);
+  const sinEm = styleN1({ headline: H_EM }, EM_TOK);
+  assert.equal(M.applyEmphasisRole(sinEm, 'trigo', N1_PAL, ['trigo']).style, sinEm);
+});
+test('1.8.0 · sólo resaltan los colores que la marca declara: un rol de la paleta fuera de la lista no se aplica', () => {
+  const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
+  const r = M.applyEmphasisRole(base, 'hoja', N1_PAL, ['trigo', 'tierra']);
+  assert.equal(r.applied, null);
+  assert.equal(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_ROLE_NOT_ALLOWED')));
+});
+test('1.8.0 · la lista de resaltado es el color de siempre más las alternativas, sin repetir; sin dato, vacía', () => {
+  assert.deepEqual(M.emphasisAllowedRoles({ palette: { headline_emphasis: 'trigo' }, layout: { emphasis_contrast: { fallbacks: ['tierra', 'trigo', 'cielo'] } } }), ['trigo', 'tierra', 'cielo']);
+  assert.deepEqual(M.emphasisAllowedRoles({ palette: { headline_emphasis: 'trigo' } }), ['trigo']);
+  assert.deepEqual(M.emphasisAllowedRoles(null), []);
+});
+test('1.8.0 · el contrato: rol mal escrito es 400; vacío o ausente, null', () => {
+  assert.equal(M.parseEmphasisRoleRequest(undefined), null);
+  assert.equal(M.parseEmphasisRoleRequest(''), null);
+  assert.equal(M.parseEmphasisRoleRequest('accent_2'), 'accent_2');
+  assert.throws(() => M.parseEmphasisRoleRequest('Accent 2'), /COMPOSITOR_EMPHASIS_ROLE_INVALID|emphasis_role/);
+  assert.throws(() => M.parseEmphasisRoleRequest(3), /emphasis_role/);
 });
 
 console.log(`\n${'─'.repeat(72)}`);

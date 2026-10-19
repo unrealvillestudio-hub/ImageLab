@@ -327,6 +327,8 @@ const TEXT_MODEL_URL = (model: string) =>
 /** Un modelo de TEXTO de Vertex. Sin razonamiento extendido: el constructor redacta, no delibera. */
 async function vertexGenerateText(params: {
   model: string; system: string; user: string; maxOutputTokens: number;
+  // 2026-10-20 — 'same_scene': la imagen actual viaja al constructor (que la describe), nunca al generador.
+  images?: InlineImage[];
 }): Promise<{ text: string; usage: Record<string, number> | null }> {
   if (!GCP_PROJECT()) throw new Error('GOOGLE_CLOUD_PROJECT missing in env.');
   const token = await getAccessToken();
@@ -338,7 +340,7 @@ async function vertexGenerateText(params: {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: params.system }] },
-        contents: [{ role: 'user', parts: [{ text: params.user }] }],
+        contents: [{ role: 'user', parts: [{ text: params.user }, ...(params.images ?? []).map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } }))] }],
         generationConfig: {
           temperature: 0.4,
           maxOutputTokens: params.maxOutputTokens,
@@ -884,7 +886,25 @@ export function composeVisualPrompt(
 // que el carril resuelve de `public.person_blueprints`), y las instrucciones del constructor son dato
 // versionado (`public.imagelab_prompt_builder_versions`). Este bloque no sabe cómo se llama nadie.
 
-export type GenerationMode = 'edit_from_current' | 'regenerate_full';
+// 2026-10-20 — 'same_scene': OTRA PERSONA, MISMA ESCENA (Sam, 2026-10-19: «si quiero la misma escena y sólo cambiar a la
+// mujer por Irja…»). Medido en 92a24249: editar sobre la imagen actual NO cambia a una persona (el editor devolvió la misma
+// foto, 6/255 de diferencia media); repintar desde cero sí, pero inventa otra escena. Aquí el CONSTRUCTOR ve la imagen
+// actual y la describe toma por toma con el cambio pedido; el GENERADOR pinta desde esa descripción con las fotos de
+// identidad y SIN la imagen actual (con ella, copia). Medido el 2026-10-19 en 92a24249: misma escena, Irja en el lugar de
+// la mujer. Exige `source_image_url` y el constructor (`copy_full`).
+export type GenerationMode = 'edit_from_current' | 'regenerate_full' | 'same_scene';
+
+/** Lo que el constructor recibe además en 'same_scene': cómo leer la imagen adjunta y los nombres de los lugares de
+ *  la escena con los que una persona pide el cambio (Sam, 2026-10-19: «Ref1, Ref2, host y fondo»). PURA, del EJE. */
+export const SAME_SCENE_BUILDER_NOTE =
+  'CURRENT IMAGE (attached): this is the photograph as it is now. Write the prompt so that it reproduces THIS SAME SCENE shot for shot — ' +
+  'the same place and props, camera position, angle, lens and framing, light and colour, and every person in the same position, pose and ' +
+  'clothing — and change ONLY what the HUMAN DIRECTIVES ask. The current image will NOT be given to the image model: everything that must ' +
+  'stay has to be written in your prompt. Names for the places in the scene that a directive may use: "Ref1" is the most prominent ' +
+  'person in the current image, "Ref2" the second most prominent, "Host" the person presenting or hosting (for example at the microphone), ' +
+  '"Fondo" or "background" is the setting behind them. When a directive puts a named person of this brand in one of those places, that ' +
+  'person replaces whoever is there now, with their own face, hair and build from their reference photos, in the same position and pose; ' +
+  'the other people and the setting stay as they are.';
 
 export interface PromptPersona {
   name: string;
@@ -983,6 +1003,8 @@ export const PERSONA_IDENTITY_ONLY_CLAUSE =
  *  Al editar la imagen actual no se dicta: manda la ropa que ya tiene, salvo que una directriz la cambie. */
 export function personaWardrobeBlock(persona: PromptPersona | null | undefined, mode?: GenerationMode | null, seed?: string | null): string {
   if (mode === 'edit_from_current') return 'Keep the clothing of the current image unless a directive asks to change it.';
+  // En 'same_scene' quien entra lo hace con su ropa de catálogo (la del que sale no es suya); los que se quedan, con la
+  // suya: eso lo dice `SAME_SCENE_BUILDER_NOTE`.
   const entries = (persona?.wardrobe ?? []).filter((w) => w?.when?.trim() && w?.outfit?.trim());
   const ref = String(persona?.wardrobe_reference_outfit ?? '').trim();
   const never = ref ? `\nNever the outfit of the reference photos: ${ref}.` : '';
@@ -1752,6 +1774,7 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
   const withPersona = personaEntersScene(input.persona, sceneMentionTexts(input.copyFull, input.title, input.imageHook, input.domainDirective, directives));
   const parts: string[] = [];
   parts.push(`MODE: ${input.mode ?? 'regenerate_full'}`);
+  if (input.mode === 'same_scene') parts.push(SAME_SCENE_BUILDER_NOTE);
   parts.push(`BASE PROMPT (engine-composed; keep every constraint in it):\n${input.basePrompt}`);
   if (input.title?.trim()) parts.push(`PIECE — TITLE:\n${input.title.trim()}`);
   if (input.imageHook?.trim()) parts.push(`PIECE — TEXT ON IMAGE (composed later by code, never drawn):\n${input.imageHook.trim()}`);
@@ -2629,9 +2652,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // ── BRIEF-IMG-01 fase 2 · el constructor ────────────────────────────────────────────────
     // Sin `copy_full` no se sintetiza y el prompt es el de siempre: el cambio es inerte hasta que el
     // carril (fase 3) mande el copy entero. Con él, se sintetiza UN prompt con todo.
-    const mode: GenerationMode = params.generation_mode === 'edit_from_current' ? 'edit_from_current' : 'regenerate_full';
-    if (mode === 'edit_from_current' && !params.source_image_url) {
-      res.status(400).json(failurePayload(new Error("EDIT_WITHOUT_SOURCE: generation_mode 'edit_from_current' exige source_image_url"), null));
+    const mode: GenerationMode = params.generation_mode === 'edit_from_current' || params.generation_mode === 'same_scene'
+      ? params.generation_mode : 'regenerate_full';
+    if ((mode === 'edit_from_current' || mode === 'same_scene') && !params.source_image_url) {
+      res.status(400).json(failurePayload(new Error(`EDIT_WITHOUT_SOURCE: generation_mode '${mode}' exige source_image_url`), null));
+      return;
+    }
+    // 'same_scene' sin constructor no tiene quién describa la escena: pintaría otra. Fail-loud.
+    if (mode === 'same_scene' && !shouldSynthesize(params)) {
+      res.status(400).json(failurePayload(new Error("SAME_SCENE_WITHOUT_BUILDER: generation_mode 'same_scene' exige copy_full (el constructor describe la escena actual)"), null));
       return;
     }
     const directives = normalizeDirectives(params.visual_directives);
@@ -2739,6 +2768,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           wardrobeSeed: stagingSeed,
         }),
         maxOutputTokens: v.max_output_tokens ?? 700,
+        ...(mode === 'same_scene' ? { images: [await fetchImageInline(String(params.source_image_url))] } : {}),
       });
       // Identidad y lugar del producto también se reponen (medido 2026-09-28: la síntesis perdía la
       // cláusula de identidad y la persona salía con la ropa exacta de sus fotos, o el envase en la
