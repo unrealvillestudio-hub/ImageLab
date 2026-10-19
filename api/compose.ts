@@ -135,7 +135,12 @@ declare const process: { env: Record<string, string | undefined> };
 //         fondo; sobre fondo oscuro gana siempre el tono más claro de la lista, que puede ser casi el color del titular.
 //         Token de DATO opcional `layout.emphasis_contrast.min_contrast_vs_text`: con él, sólo compiten las
 //         alternativas que contrastan al menos eso con el color del titular. Sin el token, idéntico a 1.6.3.
-export const COMPOSITOR_VERSION = '1.6.4';
+//   1.7.0 (2026-10-19) — CORTES DE LÍNEA DEL TITULAR (Sam, 2026-10-19). Un salto de línea escrito en el
+//         titular se respeta (antes se leía como un espacio). Y con tramos de énfasis, el titular se corta
+//         por una regla: el tramo con énfasis abre línea si le preceden 3 palabras o más en la suya, y lo
+//         que le sigue va a la línea siguiente si son 3 palabras o más hasta el fin de la frase. Sin saltos
+//         escritos ni énfasis, idéntico a 1.6.4. Ver `headlineLineRanges`.
+export const COMPOSITOR_VERSION = '1.7.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -436,6 +441,8 @@ export function resolveOverlayStyle(args: {
     // 1.4.0 — tramos del titular con énfasis. null ⇒ la ranura se dibuja como en 1.3.4 (un solo texto).
     parts?: null | Array<{ text: string; keyword: boolean }>;
     emphasis?: null | (EmphasisType & { color: string });
+    // 1.7.0 — dónde se corta el titular, en tramos [inicio, fin). Ausente ⇒ satori envuelve solo (1.6.4).
+    lines?: Array<[number, number]>;
     // 1.5.0 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el límite de área
     // baja por ellos. Lo usa sólo `fitOverlayTextArea`; la escena no lo lee.
     fitSmaller?: number[];
@@ -513,6 +520,15 @@ export function resolveOverlayStyle(args: {
         if (split.found.length) { parts = split.parts; emphasis = { ...emType, color: emColor }; }
       }
     }
+    // 1.7.0 — dónde se corta el titular: lo escrito a mano manda; con énfasis, la regla. Sin ninguno, null
+    // y la ranura queda como en 1.6.4.
+    // `typography.headline.line_breaks` es DATO: 'emphasis_rule' (sin el token) aplica la regla; 'auto' la
+    // apaga y deja que satori envuelva solo. Un salto escrito se respeta en los dos.
+    const lbTok = slot === 'headline' ? (st.line_breaks ?? 'emphasis_rule') : 'auto';
+    if (lbTok !== 'emphasis_rule' && lbTok !== 'auto') missing.push(`typography.${slot}.line_breaks ('emphasis_rule' o 'auto'; llegó ${JSON.stringify(st.line_breaks)})`);
+    const lines = slot === 'headline'
+      ? headlineLineRanges(value, parts && emphasis && lbTok === 'emphasis_rule' ? parts : null) : null;
+    if (lines) markers.push(`OVERLAY_HEADLINE_LINES: ${lines.ranges.length} líneas (${lines.source === 'manual' ? 'escritas en el titular' : 'regla del énfasis'})`);
 
     const fit = fitFontSizePct(steps, parts && emphasis ? 'x'.repeat(emphasisEffectiveLength(parts, emphasis.sizeScale)) : value);
     if (fit.overflow) {
@@ -538,6 +554,8 @@ export function resolveOverlayStyle(args: {
       color: hexToRgba(String(pal.hex), 1),
       // Sin tramos, las dos claves no existen: la ranura es la de 1.3.4, clave por clave.
       ...(parts && emphasis ? { parts, emphasis } : {}),
+      // 1.7.0 — sin cortes impuestos la clave no existe: la ranura es la de 1.6.4.
+      ...(lines ? { lines: lines.ranges } : {}),
       fitSmaller: [...new Set(steps.map((x: any) => Number(x.size_pct)))]
         .filter((x) => Number.isFinite(x) && x > 0 && x < fit.sizePct).sort((a, b) => b - a),
     };
@@ -867,16 +885,22 @@ export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>
     const em = s.parts && s.emphasis ? s.emphasis : null;
     const esize = em ? r2(size * em.sizeScale) : size;
     const emw = em ? widthFn(em, esize) : base;
-    const atoms = s.parts && em ? headlineAtoms(s.parts) : headlineAtoms([{ text: s.text, keyword: false }]);
-    let cur = 0, lineMax = 0, h = 0;
-    for (const atom of atoms) {
-      const aw = atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0);
-      const ah = Math.max(...atom.map((p) => (p.keyword && em ? esize : size)));
-      if (cur > 0 && cur + aw > box.maxWidth + 0.01) { h += lineMax; maxLine = Math.max(maxLine, cur); cur = aw; lineMax = ah; }
-      else { cur += aw; lineMax = Math.max(lineMax, ah); }
+    const allParts = s.parts && em ? s.parts : [{ text: s.text, keyword: false }];
+    // 1.7.0 — con cortes impuestos, cada línea empieza fila: se mide línea por línea.
+    const groups = s.lines ? s.lines.map(([a, b]) => headlineAtoms(partsInRange(allParts, a, b))) : [headlineAtoms(allParts)];
+    let h = 0;
+    for (const atoms of groups) {
+      let cur = 0, lineMax = 0;
+      for (const atom of atoms) {
+        const aw = atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0);
+        const ah = Math.max(...atom.map((p) => (p.keyword && em ? esize : size)));
+        if (cur > 0 && cur + aw > box.maxWidth + 0.01) { h += lineMax; maxLine = Math.max(maxLine, cur); cur = aw; lineMax = ah; }
+        else { cur += aw; lineMax = Math.max(lineMax, ah); }
+      }
+      maxLine = Math.max(maxLine, Math.min(cur, box.maxWidth));
+      h += lineMax;
     }
-    maxLine = Math.max(maxLine, Math.min(cur, box.maxWidth));
-    return (h + lineMax) * s.lineHeight;
+    return h * s.lineHeight;
   };
   const hl = style.slots.headline;
   if (hl) total += slotBlock(hl);
@@ -970,6 +994,26 @@ function emphasisAtomsNode(
     props: {
       style: { display: 'flex', flexDirection: 'row', alignItems: 'baseline' },
       children: atom.map((p) => ({ type: 'span', props: { style: p.keyword ? emStyle : {}, children: p.text } })),
+    },
+  }));
+}
+
+/**
+ * 1.7.0 — el titular con cortes impuestos, como filas de satori. PURO. Cada línea es una fila que se envuelve
+ * sola si no cabe; con énfasis, la fila lleva los átomos de 1.4.0 de ESA línea.
+ */
+function headlineRowsNode(
+  s: { text: string; lines?: Array<[number, number]>; parts?: Array<{ text: string; keyword: boolean }>; emphasis?: any; sizePct: number },
+  width: number, textShadow: string | undefined, align: string,
+): Array<Record<string, any>> {
+  const justify = align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start';
+  return (s.lines ?? []).map(([a, b]) => ({
+    type: 'div',
+    props: {
+      style: { display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: justify },
+      children: s.parts && s.emphasis
+        ? emphasisAtomsNode(partsInRange(s.parts, a, b), s, s.emphasis, width, textShadow)
+        : s.text.slice(a, b),
     },
   }));
 }
@@ -1097,12 +1141,17 @@ export function buildOverlayScene(args: {
         ...(shadow ? { textShadow: shadow } : {}),
         // 1.4.0 — con tramos, la ranura es una fila que envuelve átomos (palabras que no se cortan),
         // alineados por la línea de base: un tramo más grande no descoloca a sus vecinos.
-        ...(s.parts && s.emphasis ? {
+        // 1.7.0 — con cortes impuestos, la ranura es una COLUMNA de filas: una por línea.
+        ...(s.lines ? {
+          flexDirection: 'column',
+          alignItems: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
+        } : s.parts && s.emphasis ? {
           flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline',
           justifyContent: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
         } : {}),
       },
-      children: s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
+      children: s.lines ? headlineRowsNode(s, width, shadow, style.layout.align)
+        : s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
     },
   });
 
@@ -1751,6 +1800,107 @@ export function resolveCarouselChrome(args: {
  * (Los huecos desiguales entre palabras de 1.3.0 no venían de aquí sino del kerning: ver
  * `neutralizeKerning`. Lo que sí aporta el átomo es redondear su caja al píxel de arriba: ≤ 1 px.)
  */
+/**
+ * 1.7.0 — DÓNDE SE CORTA EL TITULAR. PURO. Devuelve los tramos [inicio, fin) del titular, uno por línea, o
+ * `null` si no hay corte que imponer (satori envuelve solo, como en 1.6.4).
+ *
+ * EL CASO (Sam, 2026-10-19): «queda una palabra justo al lado del accent text de las palabras clave y el
+ * resto en la siguiente línea». Satori corta por ancho, palabra a palabra, y no sabe dónde empieza o termina
+ * un tramo con énfasis: «Nunca te preguntó DÓNDE» / «VIVES.»; «¿Por qué el color SE VA» / «ANTES de…».
+ *
+ *   · MANUAL — un salto de línea escrito en el titular manda: cada línea escrita es una línea. Es la vía de
+ *     quien corrige en la bandeja, y no se discute con la regla.
+ *   · REGLA (sólo con tramos de énfasis). Las palabras con énfasis forman BLOQUES; dos tramos separados por
+ *     2 palabras o menos, sin fin de frase en medio, son un mismo bloque («Tu PUNTA y tu RAÍZ»). Un bloque
+ *     abre línea si en la suya ya hay 3 palabras o más; lo que lo sigue baja de línea si son 3 palabras o más
+ *     hasta el fin de la frase o el próximo bloque. Así: «¿Por qué el color» / «SE VA ANTES» / «de la próxima
+ *     cita?», y «75 MINUTOS de blowout.» / «MENOS DE 5» / «en el estacionamiento.».
+ * Una línea larga sigue envolviéndose sola dentro de su fila: la regla dice dónde SE CORTA, no el ancho.
+ * Cero marcas, cero idiomas: la frase termina en . ? ! … y las palabras son lo que separa el espacio.
+ */
+export const HEADLINE_BREAK_MIN_WORDS = 3;
+export const HEADLINE_BLOCK_MAX_GAP = 2;
+export function headlineLineRanges(
+  headline: string, parts: Array<{ text: string; keyword: boolean }> | null,
+): { ranges: Array<[number, number]>; source: 'manual' | 'rule' } | null {
+  const h = String(headline ?? '');
+  if (/\n/.test(h)) {
+    const ranges: Array<[number, number]> = [];
+    let at = 0;
+    for (const line of h.split('\n')) {
+      const lead = line.length - line.trimStart().length;
+      const t = line.trim();
+      if (t) ranges.push([at + lead, at + lead + t.length]);
+      at += line.length + 1;
+    }
+    return ranges.length > 1 ? { ranges, source: 'manual' } : null;
+  }
+  if (!parts || !parts.some((p) => p.keyword)) return null;
+  // Las zonas con énfasis, en coordenadas del titular.
+  const kw: Array<[number, number]> = [];
+  let pos = 0;
+  for (const p of parts) { if (p.keyword) kw.push([pos, pos + p.text.length]); pos += p.text.length; }
+  const words: Array<{ a: number; b: number; key: boolean; end: boolean }> = [];
+  for (const m of h.matchAll(/\S+/g)) {
+    const a = m.index ?? 0; const b = a + m[0].length;
+    words.push({ a, b, key: kw.some(([x, y]) => a < y && b > x), end: /[.?!…]["'»”)]*$/.test(m[0]) });
+  }
+  if (words.length < 2) return null;
+  // Bloques: corridas de palabras con énfasis, unidas por huecos cortos sin fin de frase.
+  const block: number[] = words.map(() => -1);
+  let nb = -1;
+  for (let k = 0; k < words.length; k++) {
+    if (!words[k].key) continue;
+    let prev = k - 1;
+    while (prev >= 0 && !words[prev].key) prev--;
+    const gap = k - prev - 1;
+    const sentenceBetween = prev >= 0 && words.slice(prev, k).some((w) => w.end);
+    if (prev >= 0 && gap <= HEADLINE_BLOCK_MAX_GAP && !sentenceBetween) {
+      for (let g = prev + 1; g <= k; g++) block[g] = block[prev];
+    } else block[k] = ++nb;
+  }
+  const breaks = new Set<number>();   // índice de la palabra que ABRE línea
+  let lineStart = 0;
+  for (let k = 0; k < words.length; k++) {
+    const startsBlock = block[k] >= 0 && (k === 0 || block[k - 1] !== block[k]);
+    if (startsBlock && k - lineStart >= HEADLINE_BREAK_MIN_WORDS) { breaks.add(k); lineStart = k; }
+    const endsBlock = block[k] >= 0 && (k === words.length - 1 || block[k + 1] !== block[k]);
+    if (endsBlock && k + 1 < words.length) {
+      let n = 0;
+      for (let r = k + 1; r < words.length && block[r] < 0; r++) { n++; if (words[r].end) break; }
+      if (n >= HEADLINE_BREAK_MIN_WORDS) { breaks.add(k + 1); lineStart = k + 1; }
+    }
+  }
+  if (!breaks.size) return null;
+  // Una palabra corta (2 letras o menos: «a», «de», «tu», «to») no queda colgada al final de la línea: baja
+  // con lo que sigue. Nunca vacía la línea anterior.
+  const short = (w: { a: number; b: number }) => h.slice(w.a, w.b).replace(/[^\p{L}\p{N}]/gu, '').length <= 2;
+  const moved = new Set<number>();
+  for (const k of [...breaks].sort((x, y) => x - y)) {
+    let c = k;
+    const prevCut = Math.max(0, ...[...moved].filter((x) => x < k));
+    while (c - 1 > prevCut && !words[c - 1].end && short(words[c - 1]) && block[c - 1] < 0) c--;
+    moved.add(c);
+  }
+  const cuts = [0, ...[...moved].sort((x, y) => x - y)];
+  const ranges = cuts.map((c, i) => [words[c].a, words[(i + 1 < cuts.length ? cuts[i + 1] : words.length) - 1].b] as [number, number]);
+  return { ranges, source: 'rule' };
+}
+
+/** 1.7.0 — los trozos (con su marca de énfasis) que caen dentro de [a, b) del titular. PURO. */
+export function partsInRange(
+  parts: Array<{ text: string; keyword: boolean }>, a: number, b: number,
+): Array<{ text: string; keyword: boolean }> {
+  const out: Array<{ text: string; keyword: boolean }> = [];
+  let pos = 0;
+  for (const p of parts) {
+    const x = Math.max(a, pos); const y = Math.min(b, pos + p.text.length);
+    if (y > x) out.push({ text: p.text.slice(x - pos, y - pos), keyword: p.keyword });
+    pos += p.text.length;
+  }
+  return out;
+}
+
 export function headlineAtoms(parts: Array<{ text: string; keyword: boolean }>): Array<Array<{ text: string; keyword: boolean }>> {
   const atoms: Array<Array<{ text: string; keyword: boolean }>> = [[]];
   for (const p of parts) {

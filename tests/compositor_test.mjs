@@ -36,7 +36,7 @@ writeFileSync(modPath, `${source.slice(i, j + END.length)}\n`, 'utf8');
 const M = await import(pathToFileURL(modPath).href);
 for (const fn of ['pickOverlayTokens', 'resolveOverlayStyle', 'buildOverlayScene', 'fitFontSizePct',
   'imageDimensions', 'parseFontFaces', 'pickFontFace', 'hexToRgba', 'deepMergeTokens', 'resolveProductLayer',
-  'parseCarouselRequest', 'resolveCarouselChrome', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning',
+  'parseCarouselRequest', 'resolveCarouselChrome', 'headlineLineRanges', 'partsInRange', 'measureOverlayText', 'splitEmphasis', 'buildCarouselScene', 'splitKeyword', 'headlineAtoms', 'svgDimensions', 'neutralizeKerning',
   'fontAdvanceMetrics', 'fitFontKey', 'measureCarouselLayout', 'fitCarouselContent', 'parseCarouselTextEffect', 'carouselTextShadow']) {
   assert.equal(typeof M[fn], 'function', `el bloque COMPOSITOR debe exportar ${fn}`);
 }
@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1142,7 +1142,10 @@ test('1.4.0 · token declarado y pieza sin tramos: la escena es la de 1.3.4, cla
 });
 
 test('1.4.0 · con token y tramos: cada tramo con la familia, peso, estilo, tamaño, mayúsculas y color de la marca', () => {
-  const st = styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria', 'mano alzada'] }, EM_TOK);
+  // 1.7.0 — este test fija el dibujo de 1.4.0 (una sola fila que envuelve). La regla de cortes de 1.7.0 se
+  // apaga por dato para medirlo igual; la regla tiene sus propios tests abajo.
+  const st = styleN1({ headline: H_EM, emphasis: ['cuota extraordinaria', 'mano alzada'] },
+    { ...EM_TOK, typography: { headline: { ...EM_TOK.typography.headline, line_breaks: 'auto' } } });
   const h = st.slots.headline;
   assert.equal(h.text, H_EM);
   assert.equal(h.parts.map((p) => p.text).join(''), H_EM);
@@ -1351,6 +1354,78 @@ test('1.5.0 · carrusel: el límite rige SÓLO la portada', () => {
   const sinLimite = chromeN1({ index: 1, total: 5, role: 'cover' }, { headline: LARGO15.headline });
   assert.ok(!('maxTextAreaPct' in sinLimite), 'sin el token, el cromo no gana claves');
   assert.equal(M.fitCarouselCoverArea({ chrome: sinLimite, metrics: null }).chrome, sinLimite);
+});
+
+
+// ── 1.7.0 · CORTES DE LÍNEA DEL TITULAR (Sam, 2026-10-19) ────────────────────────────────────────
+// Los cuatro titulares son los de las capturas que Sam mandó ese día; las líneas esperadas son las que
+// él propuso. El énfasis es el que traían.
+const lineas = (h, terms) => {
+  const r = M.headlineLineRanges(h, terms ? M.splitEmphasis(h, terms).parts : null);
+  return r ? { source: r.source, lines: r.ranges.map(([a, b]) => h.slice(a, b)) } : null;
+};
+test('1.7.0 · ejemplo 1: la frase con énfasis al inicio se queda; el segundo énfasis abre línea y lo que sigue baja', () => {
+  assert.deepEqual(lineas('75 MINUTOS de blowout. MENOS DE 5 en el estacionamiento.', ['75 MINUTOS', 'MENOS DE 5']),
+    { source: 'rule', lines: ['75 MINUTOS de blowout.', 'MENOS DE 5', 'en el estacionamiento.'] });
+});
+test('1.7.0 · ejemplo 2: el énfasis va en su propia línea', () => {
+  assert.deepEqual(lineas('¿Por qué el color SE VA ANTES de la próxima cita?', ['SE VA ANTES']),
+    { source: 'rule', lines: ['¿Por qué el color', 'SE VA ANTES', 'de la próxima cita?'] });
+});
+test('1.7.0 · ejemplo 3: «DÓNDE VIVES» no se parte: baja junto', () => {
+  assert.deepEqual(lineas('Tu colorista te preguntó qué color querías. Nunca te preguntó DÓNDE VIVES.', ['DÓNDE VIVES']),
+    { source: 'rule', lines: ['Tu colorista te preguntó qué color querías. Nunca te preguntó', 'DÓNDE VIVES.'] });
+});
+test('1.7.0 · ejemplo 4: dos tramos cercanos son un bloque; lo que sigue baja', () => {
+  assert.deepEqual(lineas('Tu PUNTA y tu RAÍZ no tienen la misma edad.', ['PUNTA', 'RAÍZ']),
+    { source: 'rule', lines: ['Tu PUNTA y tu RAÍZ', 'no tienen la misma edad.'] });
+});
+test('1.7.0 · una palabra corta no queda colgada al final de la línea: baja con lo que sigue', () => {
+  assert.deepEqual(lineas('La cuota extraordinaria no se vota a mano alzada', ['cuota extraordinaria', 'mano alzada']),
+    { source: 'rule', lines: ['La cuota extraordinaria', 'no se vota', 'a mano alzada'] });
+});
+test('1.7.0 · un salto escrito manda, con o sin énfasis, y las líneas vacías no cuentan', () => {
+  assert.deepEqual(lineas('Tu colorista te preguntó qué color querías.\nNunca te preguntó\n\nDÓNDE VIVES.', ['DÓNDE VIVES']),
+    { source: 'manual', lines: ['Tu colorista te preguntó qué color querías.', 'Nunca te preguntó', 'DÓNDE VIVES.'] });
+  assert.deepEqual(lineas('Sin énfasis\ny en dos líneas', null), { source: 'manual', lines: ['Sin énfasis', 'y en dos líneas'] });
+});
+test('1.7.0 · sin salto escrito ni énfasis, ni corte: la ranura es la de 1.6.4', () => {
+  assert.equal(lineas('Un titular cualquiera sin énfasis', null), null);
+  const st = styleN1({ headline: 'Un titular cualquiera sin énfasis' });
+  assert.ok(!('lines' in st.slots.headline), 'la ranura no gana la clave');
+});
+test('1.7.0 · un énfasis corto con poco alrededor no fuerza cortes', () => {
+  assert.equal(lineas('Tu PELO no miente', ['PELO']), null);
+});
+test('1.7.0 · la escena: una fila por línea, y el texto visible es el mismo', () => {
+  const h = '¿Por qué el color SE VA ANTES de la próxima cita?';
+  const st = styleN1({ headline: h, emphasis: ['SE VA ANTES'] }, EM_TOK);
+  assert.deepEqual(st.slots.headline.lines.map(([a, b]) => h.slice(a, b)), ['¿Por qué el color', 'SE VA ANTES', 'de la próxima cita?']);
+  assert.ok(st.markers.some((m) => m.startsWith('OVERLAY_HEADLINE_LINES: 3 líneas (regla del énfasis)')));
+  const scene = overlayN1(st);
+  const col = findAll(scene, (n) => n.props?.style?.flexDirection === 'column' && n.props?.style?.fontFamily === 'Fuente Titular')[0];
+  assert.ok(col, 'la ranura del titular es una columna');
+  assert.equal(col.props.children.length, 3, 'tres filas');
+  const filas = col.props.children.map((row) => spanTexts(row).join('').replace(/ /g, ' ').trim());
+  assert.deepEqual(filas, ['¿Por qué el color', 'SE VA ANTES', 'de la próxima cita?']);
+});
+test('1.7.0 · un salto escrito sin énfasis también se dibuja en filas', () => {
+  const st = styleN1({ headline: 'Primera línea\nsegunda línea' });
+  const scene = overlayN1(st);
+  const col = findAll(scene, (n) => n.props?.style?.flexDirection === 'column' && n.props?.style?.fontFamily === 'Fuente Titular')[0];
+  assert.deepEqual(col.props.children.map((r) => r.props.children), ['Primera línea', 'segunda línea']);
+});
+test("1.7.0 · `line_breaks: 'auto'` apaga la regla, pero no el salto escrito; un valor desconocido es fail-loud", () => {
+  const auto = { ...EM_TOK, typography: { headline: { ...EM_TOK.typography.headline, line_breaks: 'auto' } } };
+  assert.ok(!('lines' in styleN1({ headline: '¿Por qué el color SE VA ANTES de la próxima cita?', emphasis: ['SE VA ANTES'] }, auto).slots.headline));
+  assert.equal(styleN1({ headline: 'Uno\nDos', emphasis: [] }, auto).slots.headline.lines.length, 2);
+  const mal = { typography: { headline: { line_breaks: 'siempre' } } };
+  assert.throws(() => styleN1({ headline: 'Uno' }, mal), /line_breaks/);
+});
+test('1.7.0 · el área se mide línea por línea: más cortes, más alto', () => {
+  const una = M.measureOverlayText(styleN1({ headline: 'Hola mundo' }), 1000, 1250, null);
+  const dos = M.measureOverlayText(styleN1({ headline: 'Hola\nmundo' }), 1000, 1250, null);
+  assert.ok(dos.height > una.height, `con un corte escrito el bloque es más alto (${dos.height} > ${una.height})`);
 });
 
 console.log(`\n${'─'.repeat(72)}`);
