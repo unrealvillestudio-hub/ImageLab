@@ -140,7 +140,16 @@ declare const process: { env: Record<string, string | undefined> };
 //         por una regla: el tramo con énfasis abre línea si le preceden 3 palabras o más en la suya, y lo
 //         que le sigue va a la línea siguiente si son 3 palabras o más hasta el fin de la frase. Sin saltos
 //         escritos ni énfasis, idéntico a 1.6.4. Ver `headlineLineRanges`.
-export const COMPOSITOR_VERSION = '1.7.0';
+//   1.8.0 (2026-10-19) — EL COLOR DEL RESALTADO LO ELIGE UNA PERSONA (Sam, 2026-10-19: «no he visto … cambiar de
+//         color de accent»). Campo opcional `emphasis_role`: un rol de `brand_palette` de la marca. Si existe y el
+//         titular lleva énfasis, el tramo resaltado sale en ese color y la corrección automática por contraste
+//         (`layout.emphasis_contrast`) NO lo cambia: lo eligió una persona mirando la imagen. Un rol que la marca no
+//         tiene no rompe: se compone con el de siempre y se dice. Sin el campo, idéntico a 1.7.0.
+//         Sam, 2026-10-19: «el color del resaltado debe ser dentro de los accent colors definidos para cada marca…
+//         no son de libre elección». El rol pedido tiene que ser uno de los que la marca declara para resaltar
+//         (`palette.headline_emphasis` y `layout.emphasis_contrast.fallbacks`); cualquier otro se ignora y se dice
+//         (`OVERLAY_EMPHASIS_ROLE_NOT_ALLOWED`). La lista es dato de cada marca: cero roles en el código.
+export const COMPOSITOR_VERSION = '1.8.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -193,6 +202,49 @@ const EMPHASIS_SCALE_MIN = 0.5;
 const EMPHASIS_SCALE_MAX = 2.5;
 
 /** Valida el campo `emphasis` de la petición. Ausente ⇒ []. Error del LLAMADOR ⇒ 400 con etiqueta. */
+/** 1.8.0 — el rol de paleta pedido para el resaltado. Ausente = null. Un rol mal escrito es 400 antes de leer dato. */
+export function parseEmphasisRoleRequest(raw: unknown): string | null {
+  if (raw == null || raw === '') return null;
+  if (typeof raw !== 'string' || !/^[a-z0-9_]{1,40}$/.test(raw))
+    throw new CompositorError('COMPOSITOR_EMPHASIS_ROLE_INVALID', 'emphasis_role debe ser el nombre de un rol de brand_palette (minúsculas, números y guion bajo)', 400);
+  return raw;
+}
+
+/**
+ * 1.8.0 — aplica el rol elegido al resaltado del titular. PURA. Sin rol, o sin resaltado en el titular, el estilo
+ * sale igual. Con rol que la paleta no tiene, igual y con un marcador. Con rol válido, el color cambia y la
+ * corrección automática por contraste se apaga para esta composición. Un rol fuera de los que la marca declara
+ * para resaltar (`emphasisAllowedRoles`) no se aplica: sale igual y con un marcador.
+ */
+export function applyEmphasisRole<S extends { slots: Record<string, any>; layout: Record<string, any>; markers: string[] }>(
+  style: S, role: string | null, palette: Array<{ role?: unknown; hex?: unknown }>, allowed: readonly string[],
+): { style: S; applied: string | null } {
+  if (!role || !style.slots?.headline?.emphasis) return { style, applied: null };
+  if (!allowed.includes(role)) {
+    return { style: { ...style, markers: [...style.markers, `OVERLAY_EMPHASIS_ROLE_NOT_ALLOWED: '${role}' no está entre los colores de resaltado de la marca [${allowed.join(', ')}]; el resaltado sale con el color de siempre`] }, applied: null };
+  }
+  const hit = (palette ?? []).find((p) => String(p?.role ?? '') === role && typeof p?.hex === 'string');
+  if (!hit) {
+    return { style: { ...style, markers: [...style.markers, `OVERLAY_EMPHASIS_ROLE_UNKNOWN: la marca no declara brand_palette.role='${role}'; el resaltado sale con el color de siempre`] }, applied: null };
+  }
+  const recolored = withEmphasisColor(style, hexToRgba(String(hit.hex), 1));
+  return { style: { ...recolored, layout: { ...recolored.layout, emphasisContrast: undefined } }, applied: role };
+}
+
+/**
+ * 1.8.0 — los roles con los que la marca resalta: el de siempre (`palette.headline_emphasis`) y las alternativas
+ * (`layout.emphasis_contrast.fallbacks`). PURA. Es la lista de la que una persona elige y la única que la corrección
+ * automática usa: lo que no está aquí no resalta.
+ */
+export function emphasisAllowedRoles(tokens: Record<string, any> | null | undefined): string[] {
+  const out: string[] = [];
+  const add = (r: unknown) => { if (typeof r === 'string' && r && !out.includes(r)) out.push(r); };
+  add(tokens?.palette?.headline_emphasis);
+  const fb = tokens?.layout?.emphasis_contrast?.fallbacks;
+  if (Array.isArray(fb)) fb.forEach(add);
+  return out;
+}
+
 export function parseEmphasisRequest(raw: unknown): string[] {
   if (raw == null) return [];
   const bad = (msg: string) => new CompositorError('COMPOSITOR_EMPHASIS_INVALID', msg, 400);
@@ -3501,6 +3553,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const carouselIn = parseCarouselRequest(body.carousel);
     // 1.4.0 — tramos de énfasis del titular. Se validan con el resto del contrato, antes de leer dato.
     const emphasisIn = parseEmphasisRequest(body.emphasis);
+    const emphasisRoleIn = parseEmphasisRoleRequest(body.emphasis_role);
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -3520,7 +3573,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     ]);
 
     const picked = pickOverlayTokens(tokenRows as any[], brandId, canal);
-    const style = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline, emphasis: emphasisIn } });
+    const resolved = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline, emphasis: emphasisIn } });
+    // 1.8.0 — el color del resaltado elegido por una persona, si lo hay.
+    const roleApplied = applyEmphasisRole(resolved, emphasisRoleIn, palette as any[], emphasisAllowedRoles(picked.tokens));
+    const style = roleApplied.style;
 
     // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
     // Si no, todo lo de abajo es exactamente 1.2.0.
@@ -3833,6 +3889,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(textEffectMeta ? { text_effect: textEffectMeta } : {}),
         // 1.6.3 — si el énfasis cambió de color para leerse, y por qué.
         ...(emphasisContrastMeta ? { emphasis_contrast: emphasisContrastMeta } : {}),
+        ...(emphasisRoleIn ? { emphasis_role: { requested: emphasisRoleIn, applied: roleApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
