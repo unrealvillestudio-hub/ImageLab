@@ -1432,24 +1432,36 @@ console.log('\n── 1.8.0 · EL COLOR DEL RESALTADO LO ELIGE UNA PERSONA ─�
 
 test('1.8.0 · un rol válido recolorea el resaltado y apaga la corrección automática', () => {
   const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, { ...EM_TOK, layout: { emphasis_contrast: { min_contrast: 3, fallbacks: ['tierra'] } } });
-  const otro = N1_PAL.find((p) => p.role !== 'trigo');
-  const r = M.applyEmphasisRole(base, otro.role, N1_PAL);
+  const otro = N1_PAL.find((p) => p.role === 'tierra');
+  const r = M.applyEmphasisRole(base, otro.role, N1_PAL, ['trigo', 'tierra']);
   assert.equal(r.applied, otro.role);
   assert.notEqual(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
   assert.equal(r.style.layout.emphasisContrast, undefined, 'lo eligió una persona: el contraste automático no lo cambia');
 });
 test('1.8.0 · un rol que la marca no tiene no rompe: sale igual y se dice', () => {
   const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
-  const r = M.applyEmphasisRole(base, 'rol_inexistente', N1_PAL);
+  const r = M.applyEmphasisRole(base, 'rol_inexistente', N1_PAL, ['trigo', 'rol_inexistente']);
   assert.equal(r.applied, null);
   assert.equal(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
   assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_ROLE_UNKNOWN')));
 });
 test('1.8.0 · sin rol o sin resaltado en el titular, el estilo es el mismo objeto', () => {
   const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
-  assert.equal(M.applyEmphasisRole(base, null, N1_PAL).style, base);
+  assert.equal(M.applyEmphasisRole(base, null, N1_PAL, ['trigo']).style, base);
   const sinEm = styleN1({ headline: H_EM }, EM_TOK);
-  assert.equal(M.applyEmphasisRole(sinEm, 'trigo', N1_PAL).style, sinEm);
+  assert.equal(M.applyEmphasisRole(sinEm, 'trigo', N1_PAL, ['trigo']).style, sinEm);
+});
+test('1.8.0 · sólo resaltan los colores que la marca declara: un rol de la paleta fuera de la lista no se aplica', () => {
+  const base = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, EM_TOK);
+  const r = M.applyEmphasisRole(base, 'hoja', N1_PAL, ['trigo', 'tierra']);
+  assert.equal(r.applied, null);
+  assert.equal(r.style.slots.headline.emphasis.color, base.slots.headline.emphasis.color);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_EMPHASIS_ROLE_NOT_ALLOWED')));
+});
+test('1.8.0 · la lista de resaltado es el color de siempre más las alternativas, sin repetir; sin dato, vacía', () => {
+  assert.deepEqual(M.emphasisAllowedRoles({ palette: { headline_emphasis: 'trigo' }, layout: { emphasis_contrast: { fallbacks: ['tierra', 'trigo', 'cielo'] } } }), ['trigo', 'tierra', 'cielo']);
+  assert.deepEqual(M.emphasisAllowedRoles({ palette: { headline_emphasis: 'trigo' } }), ['trigo']);
+  assert.deepEqual(M.emphasisAllowedRoles(null), []);
 });
 test('1.8.0 · el contrato: rol mal escrito es 400; vacío o ausente, null', () => {
   assert.equal(M.parseEmphasisRoleRequest(undefined), null);
