@@ -48,6 +48,15 @@ const GCP_LOCATION = () => process.env.GOOGLE_CLOUD_LOCATION ?? 'us-central1';
 // responderá 4xx y el endpoint fallará en voz alta con `INSPECT_MODEL_ERROR`.
 const DEFAULT_INSPECT_MODEL = 'gemini-2.5-flash';
 const INSPECT_MODEL = () => (process.env.IMAGELAB_INSPECT_MODEL ?? '').trim() || DEFAULT_INSPECT_MODEL;
+// IDENTIDAD ESTRUCTURADA (2026-10-17) — comparar caras pide otro modelo. Medido en la calibración del 17-oct con
+// gemini-2.5-flash y el mismo bloque de rasgos: puntuó 95 a una escena de OTRA persona con la cara frontal y
+// visible, y 60 a la escena más parecida. Sólo las inspecciones con identidad usan este modelo.
+// 2026-10-18 — calibración de 15 casos con cuatro modelos (gemini-2.5-pro, gemini-3.1-pro-preview, gemini-3.8-flash,
+// gemini-3.5-flash-lite): todos rechazan a OTRA persona (10-35); ninguno distingue de forma estable entre dos caras de
+// IA del mismo tipo. La regla es una barrera gruesa, y para eso basta el más barato que no se retira el 2026-10-20
+// (los gemini-2.5 de Vertex sí, reportado): 15 de 15 casos con otra persona/misma persona bien separados.
+const DEFAULT_INSPECT_IDENTITY_MODEL = 'gemini-3.5-flash-lite';
+const INSPECT_IDENTITY_MODEL = () => (process.env.IMAGELAB_INSPECT_IDENTITY_MODEL ?? '').trim() || DEFAULT_INSPECT_IDENTITY_MODEL;
 
 // maxDuration es 60 s (ver `config`). Presupuesto: descarga de la imagen + llamada al modelo, con
 // ~5 s de margen para el token y el JSON, igual que el margen de `api/execute.ts`.
@@ -130,7 +139,12 @@ export class InspectError extends Error {
   }
 }
 
-export interface InspectRule { code: string; statement: string }
+// IDENTIDAD ESTRUCTURADA (2026-10-17) — una regla marcada `identity` NO la decide el juez con un sí/no: el juez
+// compara rasgo por rasgo y da un puntaje, y el CÓDIGO decide con el umbral. Medido el 17-oct: con la regla de
+// identidad como una regla más («sólo si la imagen la incumple CLARAMENTE»), el juez aprobó 6 de 6 escenas y en
+// varias había otra mujer del mismo tipo (otro cabello, otra cara). Un parecido de tipo no es la misma persona.
+export interface IdentityThresholds { min_score: number; max_mismatches: number }
+export interface InspectRule { code: string; statement: string; identity?: IdentityThresholds }
 export interface InspectRequest {
   brand_id: string;
   image_url: string;
@@ -146,6 +160,20 @@ export interface InspectReference { name: string; image_urls: string[] }
 export const MAX_REFERENCE_IMAGES = 3;
 // Una referencia es una URL http(s) o una imagen en línea (png, jpeg o webp en base64).
 export const REFERENCE_URL = /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/;
+// Los rasgos que el juez compara, uno por uno. El color del cabello SÍ cuenta (el peinado no): una persona
+// recurrente de la marca se reconoce también por él, y es lo primero que delató a la impostora del 17-oct.
+export const IDENTITY_FEATURES = ['face_shape', 'face_fullness', 'jaw_chin', 'nose', 'eyes', 'eyebrows', 'lips',
+  'hair_color', 'apparent_age', 'skin_tone'] as const;
+export const IDENTITY_FEATURE_STATES = ['match', 'mismatch', 'unclear'] as const;
+// Umbrales por defecto; la regla puede traer los suyos (`identity: { min_score, max_mismatches }`). Incumple con
+// puntaje < min_score O con max_mismatches rasgos o más distintos.
+export const IDENTITY_DEFAULTS: IdentityThresholds = { min_score: 70, max_mismatches: 2 };
+// Con identidad, el juez razona antes de contestar: comparar caras sin pensar es adivinar el tipo.
+export const IDENTITY_THINKING_BUDGET = 2048;
+export interface IdentityJudgment {
+  name: string; found: boolean; score: number;
+  features: Record<string, (typeof IDENTITY_FEATURE_STATES)[number]>; evidence: string;
+}
 export interface Violation { code: string; evidence: string }
 export interface InspectUsage { input_tokens: number; output_tokens: number }
 
@@ -210,7 +238,8 @@ export function validateInspectRequest(body: unknown): InspectRequest {
     }
     if (seen.has(code)) throw new InspectError('INSPECT_RULES_INVALID', `rules[${i}] repite el code '${code}'`, 400);
     seen.add(code);
-    return { code, statement };
+    const identity = validateIdentityThresholds(o.identity, i);
+    return { code, statement, ...(identity ? { identity } : {}) };
   });
 
   let copy: InspectRequest['copy'] = null;
@@ -227,6 +256,26 @@ export function validateInspectRequest(body: unknown): InspectRequest {
   const references = validateReferences(b.references);
   return { brand_id: brandId, image_url: parsed.href, rules, copy, piece_id: optionalText(b.piece_id, 'piece_id'),
     ...(references.length ? { references } : {}) };
+}
+
+/** `identity` de una regla: ausente/false = regla común; `true` = umbrales por defecto; objeto = sus umbrales,
+ *  validados (un umbral fuera de rango falla en voz alta: un juez con umbral 0 aprueba a cualquiera). */
+export function validateIdentityThresholds(raw: unknown, i: number): IdentityThresholds | null {
+  if (raw === undefined || raw === null || raw === false) return null;
+  if (raw === true) return { ...IDENTITY_DEFAULTS };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new InspectError('INSPECT_RULES_INVALID', `rules[${i}].identity debe ser true o { min_score, max_mismatches }`, 400);
+  }
+  const o = raw as Record<string, unknown>;
+  const min = o.min_score === undefined ? IDENTITY_DEFAULTS.min_score : o.min_score;
+  const max = o.max_mismatches === undefined ? IDENTITY_DEFAULTS.max_mismatches : o.max_mismatches;
+  if (typeof min !== 'number' || !Number.isInteger(min) || min < 1 || min > 100) {
+    throw new InspectError('INSPECT_RULES_INVALID', `rules[${i}].identity.min_score debe ser un entero de 1 a 100`, 400);
+  }
+  if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > IDENTITY_FEATURES.length) {
+    throw new InspectError('INSPECT_RULES_INVALID', `rules[${i}].identity.max_mismatches debe ser un entero de 1 a ${IDENTITY_FEATURES.length}`, 400);
+  }
+  return { min_score: min, max_mismatches: max };
 }
 
 /** `references` es opcional. Mal formada falla en voz alta (400); bien formada se recorta, en orden, a
@@ -260,6 +309,10 @@ export function validateReferences(raw: unknown): InspectReference[] {
  *  contexto para las reglas de coherencia (no está dibujado en la imagen). */
 export function buildInspectPrompt(req: Pick<InspectRequest, 'rules' | 'copy' | 'references'>): { system: string; user: string } {
   const lines: string[] = [];
+  // Las reglas de identidad no van a la lista: con referencias las decide el bloque IDENTITY CHECK; sin ellas
+  // no aplican. Sin reglas de identidad, el prompt es byte a byte el de antes.
+  const judged = judgedRules(req.rules);
+  const identityNames = identityActive(req.rules, req.references) ? (req.references ?? []).map((r) => r.name) : [];
   lines.push('Inspect the attached image against the numbered rules below.');
   lines.push('');
   lines.push(CLEAN_SCENE_CLAUSE);
@@ -268,8 +321,13 @@ export function buildInspectPrompt(req: Pick<InspectRequest, 'rules' | 'copy' | 
     lines.push(referencesClause(req.references));
     lines.push('');
   }
+  if (identityNames.length) {
+    lines.push(identityClause(identityNames));
+    lines.push('');
+  }
   lines.push('RULES — each line is: number. [CODE] statement');
-  req.rules.forEach((r, i) => lines.push(`${i + 1}. [${r.code}] ${r.statement}`));
+  judged.forEach((r, i) => lines.push(`${i + 1}. [${r.code}] ${r.statement}`));
+  if (!judged.length) lines.push('(none: answer "violated" as an empty list)');
   lines.push('');
   if (req.copy && (req.copy.title || req.copy.body_excerpt)) {
     lines.push('PIECE COPY — context ONLY for rules about coherence between the image and the copy. This copy is NOT ' +
@@ -281,16 +339,47 @@ export function buildInspectPrompt(req: Pick<InspectRequest, 'rules' | 'copy' | 
   }
   lines.push('');
   lines.push('ANSWER — strict JSON only, exactly this shape:');
-  lines.push('{"violated":[{"code":"<CODE from the list>","evidence":"<short description of what in the image breaks the rule>"}]}');
+  if (identityNames.length) {
+    const feats = IDENTITY_FEATURES.map((f) => `"${f}":"match|mismatch|unclear"`).join(',');
+    lines.push('{"violated":[{"code":"<CODE from the list>","evidence":"<short description of what in the image breaks the rule>"}],' +
+      `"identity":[{"name":"<reference name>","found":true,"features":{${feats}},"score":<0-100>,"evidence":"<what matches and what does not>"}]}`);
+    lines.push(`"identity" has exactly one entry per reference person: ${identityNames.join(', ')}.`);
+  } else {
+    lines.push('{"violated":[{"code":"<CODE from the list>","evidence":"<short description of what in the image breaks the rule>"}]}');
+  }
   lines.push('List ONLY codes from the list above, and only for rules the image clearly breaks. ' +
     'If the image breaks no rule, answer {"violated":[]}.');
   return { system: JUDGE_SYSTEM, user: lines.join('\n') };
 }
 
+/** Las reglas que juzga el modelo con su sí/no: todas menos las de identidad. */
+export function judgedRules(rules: InspectRule[]): InspectRule[] {
+  return rules.filter((r) => !r.identity);
+}
+
+/** El bloque de identidad corre sólo si hay una regla de identidad Y llegaron fotos de referencia. */
+export function identityActive(rules: InspectRule[], refs: InspectReference[] | undefined): boolean {
+  return rules.some((r) => r.identity) && (refs ?? []).length > 0;
+}
+
+/** IDENTITY CHECK — el juez compara rasgo por rasgo y puntúa; el código decide (`identityVerdict`). */
+export function identityClause(names: string[]): string {
+  return `IDENTITY CHECK — for EACH reference person (${names.join(', ')}), decide whether the scene shows that SAME ` +
+    'INDIVIDUAL, the way a casting director checks a body double. Someone of the same type (similar age, similar ' +
+    'hair, same outfit, same pose) is NOT the same individual: look for what makes this face recognisable. Compare ' +
+    `the face in the scene with the reference photos, feature by feature: ${IDENTITY_FEATURES.join(', ')} ` +
+    '(hair_color is the color and tone of the hair, NOT the hairstyle). For each feature answer "match", ' +
+    '"mismatch" or "unclear" — "unclear" only when the scene does not show it (too small, hidden, turned away). ' +
+    'Then give "score", an integer 0-100: 90-100 the same individual beyond doubt; 70-89 very probably the same ' +
+    'individual; 40-69 a lookalike of the same type, could be a sibling; 0-39 a different person. "found" is false ' +
+    'if no person in the scene corresponds to that reference. Do NOT put identity in "violated": it goes only in ' +
+    '"identity". Ignore clothing, hairstyle, makeup, lighting, angle and expression.';
+}
+
 /** Esquema de respuesta para Vertex: el `code` queda restringido a los códigos recibidos. El parser
  *  sigue defendiéndose igual: el esquema reduce el riesgo, no lo elimina. */
-export function buildResponseSchema(codes: string[]): Record<string, unknown> {
-  return {
+export function buildResponseSchema(codes: string[], identityNames: string[] = []): Record<string, unknown> {
+  const schema: Record<string, any> = {
     type: 'OBJECT',
     properties: {
       violated: {
@@ -298,7 +387,8 @@ export function buildResponseSchema(codes: string[]): Record<string, unknown> {
         items: {
           type: 'OBJECT',
           properties: {
-            code: { type: 'STRING', enum: codes },
+            // Sin reglas comunes (sólo identidad), un enum vacío no es válido: la lista debe quedar vacía igual.
+            code: codes.length ? { type: 'STRING', enum: codes } : { type: 'STRING' },
             evidence: { type: 'STRING' },
           },
           required: ['code', 'evidence'],
@@ -307,6 +397,73 @@ export function buildResponseSchema(codes: string[]): Record<string, unknown> {
     },
     required: ['violated'],
   };
+  if (identityNames.length) {
+    const features = Object.fromEntries(IDENTITY_FEATURES.map((f) => [f, { type: 'STRING', enum: [...IDENTITY_FEATURE_STATES] }]));
+    schema.properties.identity = {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          name: { type: 'STRING', enum: identityNames },
+          found: { type: 'BOOLEAN' },
+          features: { type: 'OBJECT', properties: features, required: [...IDENTITY_FEATURES] },
+          score: { type: 'INTEGER' },
+          evidence: { type: 'STRING' },
+        },
+        required: ['name', 'found', 'features', 'score', 'evidence'],
+      },
+    };
+    schema.required = ['violated', 'identity'];
+  }
+  return schema;
+}
+
+/** Lectura defensiva del bloque de identidad: una entrada por persona de referencia, con sus rasgos y un
+ *  puntaje entero 0-100. Falta una persona, o viene mal formada → `INSPECT_UNPARSEABLE`: una identidad que
+ *  no se entiende no es un aprobado. */
+export function parseIdentity(text: string, names: string[]): IdentityJudgment[] {
+  const raw = String(text ?? '').trim();
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  let parsed: any;
+  try { parsed = JSON.parse(fenced ? fenced[1] : raw); } catch {
+    throw new InspectError('INSPECT_UNPARSEABLE', `la respuesta del juez no es JSON: ${raw.slice(0, 200)}`, 502);
+  }
+  if (!parsed || !Array.isArray(parsed.identity)) {
+    throw new InspectError('INSPECT_UNPARSEABLE', `la respuesta del juez no trae "identity" como lista: ${raw.slice(0, 200)}`, 502);
+  }
+  return names.map((name) => {
+    const it = parsed.identity.find((x: any) => x && typeof x.name === 'string' && x.name.trim().toLowerCase() === name.toLowerCase());
+    if (!it) throw new InspectError('INSPECT_UNPARSEABLE', `"identity" no trae a ${name}`, 502);
+    const score = Number(it.score);
+    if (typeof it.found !== 'boolean' || !Number.isFinite(score) || score < 0 || score > 100 || !it.features || typeof it.features !== 'object') {
+      throw new InspectError('INSPECT_UNPARSEABLE', `"identity" de ${name} mal formada: ${JSON.stringify(it).slice(0, 200)}`, 502);
+    }
+    const features: IdentityJudgment['features'] = {};
+    for (const f of IDENTITY_FEATURES) {
+      const v = String(it.features[f] ?? '').trim().toLowerCase();
+      if (!(IDENTITY_FEATURE_STATES as readonly string[]).includes(v)) {
+        throw new InspectError('INSPECT_UNPARSEABLE', `"identity" de ${name}: el rasgo ${f} vale '${v || '∅'}'`, 502);
+      }
+      features[f] = v as IdentityJudgment['features'][string];
+    }
+    return { name, found: it.found, score: Math.round(score), features, evidence: typeof it.evidence === 'string' ? it.evidence.trim() : '' };
+  });
+}
+
+/** La decisión, en código: una regla de identidad se incumple si alguna persona de referencia no aparece, o
+ *  aparece con puntaje < min_score, o con max_mismatches rasgos o más distintos. La evidencia lo dice todo. */
+export function identityVerdict(rule: InspectRule, judgments: IdentityJudgment[]): Violation | null {
+  const t = rule.identity ?? IDENTITY_DEFAULTS;
+  const fails: string[] = [];
+  for (const j of judgments) {
+    const distintos = IDENTITY_FEATURES.filter((f) => j.features[f] === 'mismatch');
+    if (!j.found) fails.push(`${j.name}: no aparece en la escena (${j.evidence})`);
+    else if (j.score < t.min_score || distintos.length >= t.max_mismatches) {
+      fails.push(`${j.name}: puntaje ${j.score} (mínimo ${t.min_score}), rasgos distintos ${distintos.length} ` +
+        `(máximo ${t.max_mismatches - 1})${distintos.length ? `: ${distintos.join(', ')}` : ''} — ${j.evidence}`);
+    }
+  }
+  return fails.length ? { code: rule.code, evidence: fails.join(' | ') } : null;
 }
 
 /** El texto de la respuesta de :generateContent (todas las partes de texto del primer candidato). */
@@ -574,6 +731,7 @@ async function callJudge(
   codes: string[],
   trace: ProviderTrace,
   references: Array<{ name: string; mimeType: string; data: string }> = [],
+  identityNames: string[] = [],
 ): Promise<string> {
   if (!GCP_PROJECT()) throw new InspectError('INSPECT_CONFIG_MISSING', 'GOOGLE_CLOUD_PROJECT missing in env.', 500);
   let token: string;
@@ -598,8 +756,8 @@ async function callJudge(
         generationConfig: {
           temperature: 0,
           responseMimeType: 'application/json',
-          responseSchema: buildResponseSchema(codes),
-          thinkingConfig: { thinkingBudget: 0 },
+          responseSchema: buildResponseSchema(codes, identityNames),
+          thinkingConfig: { thinkingBudget: identityNames.length ? IDENTITY_THINKING_BUDGET : 0 },
         },
       }),
       signal: controller.signal,
@@ -645,7 +803,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Method not allowed', error_label: 'METHOD_NOT_ALLOWED', status: 'error' }); return; }
 
-  const model = INSPECT_MODEL();
+  let model = INSPECT_MODEL();
+  // CALIBRACIÓN (2026-10-18) — fuera de producción, la cabecera `x-inspect-model` elige el modelo del juez, para
+  // medir un modelo candidato contra casos conocidos sin tocar el entorno. En producción se ignora siempre.
+  const calibrationModel = process.env.VERCEL_ENV !== 'production'
+    ? String(req.headers['x-inspect-model'] ?? '').trim().replace(/[^a-z0-9.\-]/gi, '').slice(0, 60) : '';
+  if (calibrationModel) model = calibrationModel;
   const trace: ProviderTrace = { called: false, httpStatus: null, usage: null };
   const t0 = Date.now();
   let input: InspectRequest | null = null;
@@ -658,6 +821,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     input = validateInspectRequest(body);
     const codes = input.rules.map((r) => r.code);
+    // Las de identidad no van al sí/no del juez (ver `buildInspectPrompt`).
+    const judgedCodes = judgedRules(input.rules).map((r) => r.code);
 
     const image = await fetchImage(input.image_url);
     // Medida de bandas de borde, ANTES del modelo. Nunca lanza: si no se puede decodificar, queda
@@ -680,11 +845,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (refErrors.length) console.warn(`[ImageLab][inspect] INSPECT_REFERENCE_UNAVAILABLE brand=${input.brand_id} piece=${input.piece_id ?? '∅'}: ${refErrors.join(' | ')}`);
     const loaded = (input.references ?? []).map((r) => ({ ...r, image_urls: r.image_urls.slice(0, refImages.filter((x) => x.name === r.name).length) }))
       .filter((r) => r.image_urls.length);
-    const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, codes, trace, refImages);
-    const verdict = parseVerdict(text, codes);
+    const identityRules = input.rules.filter((r) => r.identity);
+    const identityNames = identityActive(input.rules, loaded) ? loaded.map((r) => r.name) : [];
+    let verdict: { violated: Violation[]; unmatched: string[] } = { violated: [], unmatched: [] };
+    let identity: IdentityJudgment[] = [];
+    // Sólo reglas de identidad y ninguna referencia cargada: no aplican y no hay nada que preguntar al modelo.
+    if (identityNames.length) model = calibrationModel || INSPECT_IDENTITY_MODEL();
+    if (judgedCodes.length || identityNames.length) {
+      const text = await callJudge(model, buildInspectPrompt({ ...input, references: loaded }), image, judgedCodes, trace,
+        refImages, identityNames);
+      verdict = parseVerdict(text, judgedCodes);
+      if (identityNames.length) {
+        identity = parseIdentity(text, identityNames);
+        for (const r of identityRules) { const v = identityVerdict(r, identity); if (v) verdict.violated.push(v); }
+      }
+    }
 
     console.log(`[ImageLab][inspect] brand=${input.brand_id} piece=${input.piece_id ?? '∅'} model=${model} ` +
       `evaluated=${codes.length} violated=${verdict.violated.length} unmatched=${verdict.unmatched.length} ` +
+      `${identity.length ? `identidad=${identity.map((j) => `${j.name}:${j.found ? j.score : 'ausente'}`).join(',')} ` : ''}` +
       `bandas=${bands.edge_bands ? `${bands.edge_bands.top_px}/${bands.edge_bands.bottom_px}/${bands.edge_bands.left_px}/${bands.edge_bands.right_px}` : 'ninguna medida'} ${Date.now() - t0}ms`);
     res.status(200).json({
       ok: true,
@@ -697,7 +876,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Medida, no veredicto: quien consume decide con su propio umbral.
       meta: { edge_bands: bands.edge_bands, ...(bands.error ? { edge_bands_error: bands.error } : {}),
         ...(input.references?.length ? { references: { requested: input.references.reduce((t, r) => t + r.image_urls.length, 0),
-          loaded: refImages.length, ...(refErrors.length ? { errors: refErrors } : {}) } } : {}) },
+          loaded: refImages.length, ...(refErrors.length ? { errors: refErrors } : {}) } } : {}),
+        // La medida de identidad: lo que vio el juez, rasgo por rasgo. El veredicto ya está en `violated`.
+        ...(identity.length ? { identity: identity.map((j) => ({ name: j.name, found: j.found, score: j.score,
+          mismatch: IDENTITY_FEATURES.filter((f) => j.features[f] === 'mismatch'),
+          unclear: IDENTITY_FEATURES.filter((f) => j.features[f] === 'unclear'), evidence: j.evidence })) } : {}) },
     });
   } catch (err) {
     const e = err instanceof InspectError ? err : null;
