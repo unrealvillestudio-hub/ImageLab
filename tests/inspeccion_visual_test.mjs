@@ -168,8 +168,10 @@ ok('CABLEADO: la URL de Vertex pasa por vertexBaseUrl y ningún host se arma a m
   const ev = block(inspect, 'ENDPOINT-VERTEX', 'api/inspect.ts');
   const fuera = inspect.replace(ev, '');
   assert.ok(!/\$\{GCP_LOCATION\(\)\}-aiplatform/.test(fuera), 'hay una URL que arma el host regional a mano');
-  assert.ok(/vertexBaseUrl\(GCP_LOCATION\(\), GCP_PROJECT\(\)\)/.test(fuera), 'la URL del juez debe pasar por vertexBaseUrl');
-  assert.match(inspect, /process\.env\.IMAGELAB_INSPECT_MODEL/);
+  assert.ok(/vertexBaseUrl\(m\.location \?\? GCP_LOCATION\(\), GCP_PROJECT\(\)\)/.test(fuera), 'la URL del juez debe pasar por vertexBaseUrl, con la ubicación de su fila');
+  // 2026-10-19 — el modelo del juez es dato (ops_lab_models, MULTIBRAND §11): ya no sale de una variable de entorno.
+  assert.match(inspect, /resolveLabModel\('imagelab', INSPECT_ROLE,/);
+  assert.doesNotMatch(inspect, /process\.env\.IMAGELAB_INSPECT_MODEL/);
 });
 
 ok('CABLEADO: endpoint y autenticación son copias literales de api/execute.ts', () => {
@@ -342,7 +344,7 @@ ok('IDENTIDAD: validación y tope de 3 fotos repartido (la primera de cada perso
 });
 
 ok('IDENTIDAD: el cable — las fotos se bajan, una caída no tumba la inspección y la medida lo dice', () => {
-  assert.match(inspect, /callJudge\(model, buildInspectPrompt\(\{ \.\.\.input, references: loaded \}\), image, codes, trace, refImages\)/);
+  assert.match(inspect, /callJudge\(judge, buildInspectPrompt\(\{ \.\.\.input, references: loaded \}\), image, codes, trace, refImages\)/);
   assert.match(inspect, /INSPECT_REFERENCE_UNAVAILABLE/);
   assert.match(inspect, /parts: judgeParts\(image, references, prompt\.user\)/);
 });

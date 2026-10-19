@@ -323,7 +323,7 @@ test('9e · 1.6.4 · con min_contrast_vs_text, la alternativa tiene que separars
 });
 
 test('9d · 1.6.3 · cableado: una detección para caras y letreros, desenfoque antes de medir, énfasis antes que la sombra', () => {
-  assert.match(SRC, /detectFaces\(cleanBytes, dims\.mime, \{ signs: wantSigns \}\)/);
+  assert.match(SRC, /detectFaces\(cleanBytes, dims\.mime, \{ signs: wantSigns,/);
   assert.match(SRC, /FACES_PROMPT \+ \(opts\.signs \? SIGNS_PROMPT : ''\)/, 'sin el token, la petición es la de 1.6.2');
   const iBlur = SRC.indexOf('await blurRegions(cleanBytes, signsUnder');
   const iUnder = SRC.indexOf('backgroundSrc: bgSrc, products: productImgs');
