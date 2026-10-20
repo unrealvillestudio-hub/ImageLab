@@ -240,6 +240,254 @@ function logFailurePrompt(p: Record<string, unknown>): Record<string, unknown> {
 }
 // ── FALLO:END ──
 
+// ── LIBRO-DIRECTO:BEGIN ── (2026-10-20) bloque IDÉNTICO en api/execute.ts, api/inspect.ts y
+// api/compose.ts. Lo extrae `tests/libro_directo_test.mjs` por estos sentinelas y falla si las copias
+// divergen. Usa sólo `fetch` y `process.env`: nada de fuera del bloque.
+//
+// EL DEFECTO QUE CIERRA, medido el 2026-10-20: en octubre Google facturó ≈ 19,67 USD que
+// `public.ops_generation_ledger` no tenía, ≈ 465 imágenes con sus prompts e inspecciones generadas por
+// llamadas DIRECTAS a ImageLab (interfaz, BluePrints, scripts) el 3, 4 y 18 de octubre. ImageLab no
+// asentaba nada: el libro sólo lo escribía el carril de `unrlvl-iid-functions`, y sólo para las
+// llamadas que él mismo hacía. Toda otra llamada a Vertex era gasto invisible.
+//
+// LA REGLA: toda llamada a Vertex hecha por ImageLab queda en el libro UNA sola vez.
+//   · el cuerpo trae `ledger_by_caller: true` → la asienta quien llama (el carril); ImageLab no escribe
+//     nada y la respuesta es byte a byte la de antes;
+//   · cualquier otro cuerpo → ImageLab asienta cada llamada que HIZO (éxito, fallo y descartada) por la
+//     puerta canónica, el RPC `ops_log_generation`, con `source_app = 'imagelab-directo'`.
+// Una llamada que NO se hizo (validación, entorno, rol sin modelo) no deja fila: no hubo gasto.
+//
+// UNIDADES, las mismas que el carril: imagen y texto por tokens (`tokens_in` en el libro = fila con
+// entrada y salida). El PRECIO lo pone la base contra `ops_lab_rates`: este bloque no conoce tarifas.
+// Sin consumo reportado no se inventa un número: el asiento dice por qué (`NOT_BILLED:…` o
+// `USAGE_UNREPORTED`), con el mismo vocabulario que el bloque LLAMADA-FALLIDA del carril.
+//
+// MARCA: la que trae la petición, verificada contra `public.brands`. Sin marca válida se asienta IGUAL
+// (un gasto sin asentar es peor) con `p_brand_id = null`: la base la manda a operaciones del estudio
+// (COSTOS-03) y `error_msg` lleva `LEDGER_SIN_MARCA`.
+//
+// UN FALLO AL ASENTAR NO ROMPE LA RESPUESTA: cada asiento va en try/catch con un tope de tiempo,
+// `console.error` sin credenciales, y la respuesta sale igual.
+//
+// MULTIBRAND: cero marcas, cero canales, cero modelos. El modelo es el que la llamada usó; la marca, la
+// de la petición; el proveedor, el de Vertex (este bloque sólo asienta llamadas a Vertex).
+const LEDGER_LAB = 'imagelab';
+export const LEDGER_DIRECT_SOURCE_APP = 'imagelab-directo';
+const LEDGER_VERTEX_PROVIDER = 'google';
+export const LEDGER_SIN_MARCA = 'LEDGER_SIN_MARCA';
+const LEDGER_MARCA_NO_VERIFICADA = 'LEDGER_MARCA_NO_VERIFICADA';
+const LEDGER_USAGE_MISSING = 'LEDGER_USAGE_MISSING: Vertex respondió 2xx sin el conteo de salida — sin estimación';
+const LEDGER_NOT_BILLED = 'NOT_BILLED:';
+const LEDGER_USAGE_UNREPORTED = 'USAGE_UNREPORTED';
+export const LEDGER_RPC_TIMEOUT_MS = 4_000;
+const LEDGER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Una fila del libro, antes de la marca y del contexto de la petición. */
+export interface LedgerRow {
+  output_type: string;
+  model_id: string;
+  input_units: number;
+  output_units: number;
+  status: 'success' | 'failed' | 'discarded';
+  /** Motivo de un asiento sin precio (sin consumo reportado). `null` = lo precia la base. */
+  unpriced: string | null;
+  markers: string[];
+  billable?: 'refacturable' | 'estructura';
+  duration_ms?: number | null;
+}
+
+/** ¿Asienta quien llama? Sólo `true` estricto: cualquier otro valor deja el asiento a ImageLab. */
+export function ledgerByCaller(body: unknown): boolean {
+  return !!body && typeof body === 'object' && (body as Record<string, unknown>).ledger_by_caller === true;
+}
+
+/** La marca que trae la petición (`brand_id` o `brandId`), recortada. `null` si no trae ninguna. */
+export function ledgerBrandOf(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const b = body as Record<string, unknown>;
+  for (const v of [b.brand_id, b.brandId]) {
+    if (typeof v === 'string' && v.trim() && v.trim().toUpperCase() !== 'NULL') return v.trim();
+  }
+  return null;
+}
+
+/** El consumo de una respuesta, en cualquiera de las dos formas que viajan en ImageLab: el
+ *  `usageMetadata` crudo de Vertex (promptTokenCount / candidatesTokenCount) o `{ input_tokens,
+ *  output_tokens }`. Sin coacción: un texto no es un número. `null` = no hay consumo reportado. */
+export function ledgerTokens(usage: unknown): { input: number; output: number; outputReported: boolean } | null {
+  if (!usage || typeof usage !== 'object') return null;
+  const u = usage as Record<string, unknown>;
+  const fin = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+  const pin = fin(u.promptTokenCount) ? u.promptTokenCount : fin(u.input_tokens) ? u.input_tokens : null;
+  const pout = fin(u.candidatesTokenCount) ? u.candidatesTokenCount : fin(u.output_tokens) ? u.output_tokens : null;
+  if (pin === null && pout === null) return null;
+  return { input: (pin as number | null) ?? 0, output: (pout as number | null) ?? 0, outputReported: pout !== null };
+}
+
+/** Por qué una llamada hecha y sin consumo reportado no lleva precio. */
+export function ledgerUnpricedReason(httpStatus: unknown): string {
+  if (Number.isInteger(httpStatus) && ((httpStatus as number) < 200 || (httpStatus as number) > 299))
+    return `${LEDGER_NOT_BILLED}PROVIDER_HTTP_${httpStatus}`;
+  return LEDGER_USAGE_UNREPORTED;
+}
+
+/** Una llamada a Vertex hecha, como fila. `ok` = la llamada cumplió; `httpStatus` = el código de Vertex
+ *  (`null` sin respuesta). Con consumo → la precia la base; sin él → el motivo, nunca un número. */
+export function ledgerCallRow(p: {
+  outputType: string; model: string | null | undefined; usage: unknown; ok: boolean; httpStatus?: number | null;
+  status?: LedgerRow['status']; markers?: string[]; billable?: LedgerRow['billable']; durationMs?: number | null;
+}): LedgerRow {
+  const t = ledgerTokens(p.usage);
+  const markers = [...(p.markers ?? [])];
+  const model = typeof p.model === 'string' && p.model.trim() ? p.model.trim() : 'UNKNOWN';
+  if (model === 'UNKNOWN') markers.push('LEDGER_MODEL_MISSING: la llamada no dejó dicho su modelo');
+  let unpriced: string | null = null;
+  if (!t) unpriced = p.ok ? LEDGER_USAGE_UNREPORTED : ledgerUnpricedReason(p.httpStatus ?? null);
+  else if (p.ok && !t.outputReported) { unpriced = LEDGER_USAGE_UNREPORTED; markers.push(LEDGER_USAGE_MISSING); }
+  return {
+    output_type: p.outputType, model_id: model,
+    input_units: t?.input ?? 0, output_units: t?.output ?? 0,
+    status: p.status ?? (p.ok ? 'success' : 'failed'), unpriced, markers,
+    ...(p.billable ? { billable: p.billable } : {}),
+    ...(p.durationMs !== undefined ? { duration_ms: p.durationMs } : {}),
+  };
+}
+
+/** Las filas de una respuesta de `/api/execute` (éxito o fallo, modo directo o del orquestador): la
+ *  imagen entregada o fallida, cada intento descartado, y el constructor de prompt si se llamó. Lee el
+ *  MISMO cuerpo que el carril lee para asentar, así que las dos vías no pueden contar distinto. */
+export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const p = payload as Record<string, any>;
+  const rows: LedgerRow[] = [];
+  const delivered = typeof p.image_data_url === 'string' && p.image_data_url.length > 0;
+  if (delivered) {
+    rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: true }));
+  } else if (p.status === 'error' && p.provider_called === true) {
+    rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: false, httpStatus: p.provider_http_status }));
+  }
+  if (Array.isArray(p.discarded_attempts)) {
+    for (const d of p.discarded_attempts) {
+      if (!d || typeof d !== 'object') continue;
+      const reason = typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim() : 'UNSPECIFIED';
+      rows.push(ledgerCallRow({ outputType: 'image', model: d.model ?? p.model, usage: d.usage, ok: true,
+        status: 'discarded', markers: [`IMAGE_ATTEMPT_DISCARDED:${reason}`], durationMs: 0 }));
+    }
+  }
+  const builderModel = typeof p.prompt_builder_model === 'string' ? p.prompt_builder_model.trim() : '';
+  if (builderModel) {
+    const failed = p.prompt_builder_failed === true;
+    rows.push(ledgerCallRow({ outputType: 'image_prompt', model: builderModel, usage: p.prompt_builder_usage,
+      ok: !failed, httpStatus: failed ? p.prompt_builder_http_status : null,
+      markers: p.prompt_builder_version ? [`prompt_builder v${p.prompt_builder_version}`] : [] }));
+  }
+  return rows;
+}
+
+/** El `piece_id` de la petición si es un UUID; si no, `null` (el RPC lo castea y un texto lo rompería). */
+export function ledgerPieceId(body: unknown): string | null {
+  const v = body && typeof body === 'object' ? (body as Record<string, unknown>).piece_id : null;
+  return typeof v === 'string' && LEDGER_UUID.test(v.trim()) ? v.trim() : null;
+}
+
+/** Los argumentos de `ops_log_generation` para una fila. Sin precio declarado: la base lo resuelve. */
+export function ledgerRpcArgs(row: LedgerRow, ctx: {
+  brandId: string | null; brandNote: string | null; platform: string | null; pieceId: string | null; durationMs: number | null;
+}): Record<string, unknown> {
+  const errorMsg = [...row.markers, ctx.brandNote].filter(Boolean).join(' | ') || null;
+  const dur = row.duration_ms !== undefined ? row.duration_ms : ctx.durationMs;
+  return {
+    p_lab: LEDGER_LAB, p_brand_id: ctx.brandId, p_job_id: null, p_piece_id: ctx.pieceId,
+    p_output_type: row.output_type, p_platform: ctx.platform, p_provider: LEDGER_VERTEX_PROVIDER,
+    p_model_id: row.model_id, p_unit_type: 'tokens_in',
+    p_input_units: row.input_units, p_output_units: row.output_units,
+    // Sin consumo: costo cero con el motivo en `rate_source` (el criterio de `unpricedRate` del carril).
+    // Con consumo: ni costo ni tarifa, y la base resuelve la tarifa vigente del modelo.
+    ...(row.unpriced ? { p_cost_usd: 0, p_rate_source: row.unpriced } : {}),
+    p_status: row.status,
+    p_duration_ms: Number.isFinite(dur) ? Math.round(dur as number) : null,
+    p_error_msg: errorMsg,
+    p_source_app: LEDGER_DIRECT_SOURCE_APP,
+    ...(row.billable ? { p_billable: row.billable } : {}),
+  };
+}
+
+function ledgerBaseUrl(raw: string): string {
+  const s = raw.trim().replace(/\/+$/, '');
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.includes('.')) return `https://${s}`;
+  return `https://${s}.supabase.co`;
+}
+
+async function ledgerFetch(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), LEDGER_RPC_TIMEOUT_MS);
+  try { return await fetch(url, { ...init, signal: controller.signal }); }
+  finally { clearTimeout(tid); }
+}
+
+/** La marca del asiento: la de la petición si existe en `public.brands`. Sin marca o con una que no
+ *  existe → `null` y LEDGER_SIN_MARCA. Si la verificación misma falla, se conserva la de la petición y
+ *  se dice que no se verificó: perder la marca por un fallo de lectura sería peor que no verificarla. */
+export async function ledgerResolveBrand(raw: string | null, base: string, key: string): Promise<{ brandId: string | null; note: string | null }> {
+  if (!raw) return { brandId: null, note: `${LEDGER_SIN_MARCA}: la petición no trae brand_id` };
+  const shown = JSON.stringify(raw.slice(0, 64));
+  try {
+    const res = await ledgerFetch(`${base}/rest/v1/brands?id=eq.${encodeURIComponent(raw)}&select=id&limit=1`, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) return { brandId: raw, note: `${LEDGER_MARCA_NO_VERIFICADA}: brands respondió ${res.status}` };
+    const rows = await res.json();
+    if (Array.isArray(rows) && rows.length) return { brandId: raw, note: null };
+    return { brandId: null, note: `${LEDGER_SIN_MARCA}: la marca ${shown} de la petición no existe en public.brands` };
+  } catch (err) {
+    return { brandId: raw, note: `${LEDGER_MARCA_NO_VERIFICADA}: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}` };
+  }
+}
+
+/** Asienta las filas de una petición directa. NUNCA lanza y NUNCA cambia la respuesta: devuelve cuántas
+ *  filas escribió, para el log y los tests. Con `ledger_by_caller: true`, no hace nada (ni red). */
+export async function ledgerRecordDirect(body: unknown, rows: LedgerRow[], ctx: {
+  platform?: string | null; durationMs?: number | null; tag: string;
+}): Promise<{ skipped: boolean; written: number; failed: number }> {
+  if (ledgerByCaller(body) || !rows.length) return { skipped: true, written: 0, failed: 0 };
+  let written = 0, failed = 0;
+  try {
+    const base = ledgerBaseUrl(process.env.SUPABASE_URL ?? '');
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+    if (!base || !key) {
+      console.error(`[ImageLab][LIBRO] ${ctx.tag} LEDGER_ENV_MISSING: faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY; ${rows.length} asiento(s) sin escribir`);
+      return { skipped: false, written: 0, failed: rows.length };
+    }
+    const brand = await ledgerResolveBrand(ledgerBrandOf(body), base, key);
+    const pieceId = ledgerPieceId(body);
+    const platform = typeof ctx.platform === 'string' && ctx.platform.trim() ? ctx.platform.trim() : null;
+    await Promise.all(rows.map(async (row) => {
+      try {
+        const res = await ledgerFetch(`${base}/rest/v1/rpc/ops_log_generation`, {
+          method: 'POST',
+          headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(ledgerRpcArgs(row, { brandId: brand.brandId, brandNote: brand.note, platform, pieceId, durationMs: ctx.durationMs ?? null })),
+        });
+        if (!res.ok) {
+          failed++;
+          console.error(`[ImageLab][LIBRO] ${ctx.tag} ops_log_generation ${res.status} (${row.output_type} ${row.model_id}): ${(await res.text()).slice(0, 200)}`);
+        } else written++;
+      } catch (err) {
+        failed++;
+        console.error(`[ImageLab][LIBRO] ${ctx.tag} asiento no escrito (${row.output_type} ${row.model_id}): ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+      }
+    }));
+    console.log(`[ImageLab][LIBRO] ${ctx.tag} asientos=${written}/${rows.length} marca=${brand.brandId ?? 'operaciones'}${brand.note ? ` (${brand.note.split(':')[0]})` : ''}`);
+  } catch (err) {
+    console.error(`[ImageLab][LIBRO] ${ctx.tag} libro no disponible: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+    return { skipped: false, written, failed: rows.length - written };
+  }
+  return { skipped: false, written, failed };
+}
+// ── LIBRO-DIRECTO:END ──
+
 // --- Auth ------------------------------------------------------------------
 // Singleton GoogleAuth — reuses cached access tokens across warm invocations.
 let _auth: GoogleAuth | null = null;
@@ -2622,6 +2870,21 @@ const CORS = {
 
 export const config = { maxDuration: 60 };
 
+/** LIBRO-DIRECTO — asienta las llamadas a Vertex que dejó esta respuesta (si el llamante no las asienta)
+ *  y DESPUÉS responde. Antes de responder porque una función de Vercel puede congelarse al enviar la
+ *  respuesta y un asiento pendiente se perdería. El asiento nunca cambia ni rompe la respuesta. */
+async function respondAndRecord(
+  res: VercelResponse, status: number, body: unknown, payload: Record<string, unknown>,
+  ctx: { platform: string | null; t0: number; tag: string },
+): Promise<void> {
+  try {
+    await ledgerRecordDirect(body, ledgerRowsFromExecute(payload), { platform: ctx.platform, durationMs: Date.now() - ctx.t0, tag: ctx.tag });
+  } catch (err) {
+    console.error(`[ImageLab][LIBRO] ${ctx.tag} asiento omitido: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+  }
+  res.status(status).json(payload);
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v);
 
@@ -2642,13 +2905,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   if (body?.mode === 'direct') {
     const fallo = emptyFailurePromptContext();
+    const ledgerCtx = { platform: typeof body.canal === 'string' ? body.canal : null, t0: Date.now(), tag: 'execute/direct' };
     try {
       if (!body.prompt || typeof body.prompt !== 'string') {
         res.status(400).json(failurePayload(new Error('prompt is required for direct mode'), null));
         return;
       }
       const result = await generateImageDirect(body as DirectImageRequest, fallo);
-      res.status(200).json({
+      await respondAndRecord(res, 200, body, {
         image_data_url: result.image_data_url,
         preset_used:    result.preset_used,
         preset_id:      result.preset_id,
@@ -2658,10 +2922,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         model:          GEMINI_IMAGE_MODEL,
         usage:          result.usage,
         status:         'ok',
-      });
+      }, ledgerCtx);
       return;
     } catch (err) {
-      res.status(500).json(logFailurePrompt(failurePayload(err, null, fallo)));
+      await respondAndRecord(res, 500, body, logFailurePrompt(failurePayload(err, null, fallo)), ledgerCtx);
       return;
     }
   }
@@ -2676,6 +2940,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const fallo = emptyFailurePromptContext();
   // 2026-10-10 — el reloj del segundo intento por placa (`edgePlateRetryAllowed`).
   const t0Handler = Date.now();
+  const ledgerCtx = { platform: typeof body.params?.canal === 'string' ? body.params.canal : null, t0: t0Handler, tag: 'execute' };
   try {
     const request = body as ExecuteRequest;
     const params = request.params ?? {};
@@ -2838,7 +3103,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     // Medición en seco: el prompt y su coste, sin pagar una imagen.
     if (params.prompt_only === true) {
-      res.status(200).json({
+      await respondAndRecord(res, 200, body, {
         prompt_full: finalPrompt,
         prompt_builder_version: builder?.version ?? null,
         prompt_builder_model:   builder?.model ?? null,
@@ -2847,7 +3112,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         persona_used:    personaUsed,
         ...overlayTrace,
         status: 'ok',
-      });
+      }, ledgerCtx);
       return;
     }
 
@@ -2936,7 +3201,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
 
-    res.status(200).json({
+    await respondAndRecord(res, 200, body, {
       output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
       image_data_url: imageDataUrl,
       preset_used:    built.presetUsed,
@@ -2977,8 +3242,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       ...overlayTrace,
       ...plateTrace,
       status:         'ok',
-    });
+    }, ledgerCtx);
   } catch (err) {
-    res.status(500).json(logFailurePrompt(failurePayload(err, builder, fallo)));
+    await respondAndRecord(res, 500, body, logFailurePrompt(failurePayload(err, builder, fallo)), ledgerCtx);
   }
 }
