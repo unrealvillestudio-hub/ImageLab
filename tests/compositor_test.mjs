@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0', '1.9.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1469,6 +1469,88 @@ test('1.8.0 · el contrato: rol mal escrito es 400; vacío o ausente, null', () 
   assert.equal(M.parseEmphasisRoleRequest('accent_2'), 'accent_2');
   assert.throws(() => M.parseEmphasisRoleRequest('Accent 2'), /COMPOSITOR_EMPHASIS_ROLE_INVALID|emphasis_role/);
   assert.throws(() => M.parseEmphasisRoleRequest(3), /emphasis_role/);
+});
+
+
+console.log('\n── 1.9.0 · LA SOMBRA Y LA FRANJA LAS ELIGE UNA PERSONA ──');
+
+// Marca N+1 inventada: la sombra es de su paleta (`tierra`), el filete de la suya (`arcilla`).
+const SOMBRA = (when) => ({ layout: { text_effect: { kind: 'shadow', color: 'tierra', alpha: 0.5, blur_pct: 0.6, offset_pct: 0.2, ...(when ? { when } : {}) } } });
+const FILETE = { layout: { rule: { enabled: true, palette: 'arcilla', width_pct: 12, thickness_px: 4, gap_pct: 2 } }, palette: { headline_emphasis: 'trigo' } };
+const spansWithShadow = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => [n.props.children.replace(/ /g, ' ').trim(), !!n.props.style?.textShadow]);
+
+test("1.9.0 · `when: 'on_request'` declara la sombra pero no la pone", () => {
+  const st = styleN1({ headline: H_EM }, SOMBRA('on_request'));
+  assert.equal(st.textEffect, undefined);
+  assert.ok(st.textEffectDeclared, 'queda declarada para quien la pida');
+  const siempre = styleN1({ headline: H_EM }, SOMBRA());
+  assert.ok(siempre.textEffect && siempre.textEffectDeclared);
+});
+test("1.9.0 · text_shadow 'off' la quita; 'on' la pone siempre, aunque la marca la tenga a pedido o por contraste", () => {
+  const off = M.applyTextShadowRequest(styleN1({ headline: H_EM }, SOMBRA()), 'off', []);
+  assert.equal(off.style.textEffect, undefined); assert.equal(off.applied.mode, 'off');
+  const on = M.applyTextShadowRequest(styleN1({ headline: H_EM }, SOMBRA('on_request')), 'on', []);
+  assert.ok(on.style.textEffect); assert.equal(on.style.textEffect.when, undefined, 'sin medir contraste');
+  const lc = styleN1({ headline: H_EM }, { layout: { text_effect: { ...SOMBRA().layout.text_effect, when: 'low_contrast', min_contrast: 4.5 } } });
+  assert.equal(M.applyTextShadowRequest(lc, 'on', []).style.textEffect.when, undefined);
+});
+test('1.9.0 · sin sombra declarada no se inventa: se compone sin ella y se dice', () => {
+  const r = M.applyTextShadowRequest(styleN1({ headline: H_EM }), 'on', ['cuota']);
+  assert.equal(r.style.textEffect, undefined);
+  assert.equal(r.applied.mode, null);
+  assert.deepEqual(r.applied.spans, []);
+  assert.ok(r.style.markers.filter((m) => m.startsWith('OVERLAY_SHADOW_NOT_DECLARED')).length === 2);
+});
+test('1.9.0 · un tramo al revés: sin sombra en el tramo cuando el texto la lleva', () => {
+  const r = M.applyTextShadowRequest(styleN1({ headline: H_EM }, SOMBRA()), null, ['no se vota']);
+  assert.deepEqual(r.applied.spans, ['no se vota']);
+  const filas = spansWithShadow(overlayN1(r.style));
+  assert.deepEqual(filas.filter(([, sh]) => !sh).map(([t]) => t), ['no', 'se', 'vota']);
+  assert.ok(filas.filter(([, sh]) => sh).length > 3, 'el resto conserva la sombra');
+  assert.equal(filas.map(([t]) => t).join(' '), H_EM, 'el texto visible no cambia');
+});
+test('1.9.0 · un tramo al revés: con sombra en el tramo cuando el texto no la lleva (también con énfasis y cortes)', () => {
+  const h = 'Primera línea\nla cuota no se vota';
+  const base = styleN1({ headline: h, emphasis: ['cuota'] }, { ...EM_TOK, ...SOMBRA('on_request') });
+  const r = M.applyTextShadowRequest(base, null, ['Primera']);
+  const filas = spansWithShadow(overlayN1(r.style));
+  assert.deepEqual(filas.filter(([, sh]) => sh).map(([t]) => t), ['Primera']);
+  assert.ok(findAll(overlayN1(r.style), (n) => n.type === 'span' && n.props.children.startsWith('cuota'))[0].props.style.fontStyle === 'italic', 'el énfasis se conserva');
+});
+test('1.9.0 · un tramo que no está en el titular se dice y no se marca', () => {
+  const r = M.applyTextShadowRequest(styleN1({ headline: H_EM }, SOMBRA()), null, ['inexistente']);
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_SHADOW_SPAN_NOT_IN_HEADLINE')));
+  assert.equal(r.style.slots.headline.shadowFlip, undefined);
+});
+test('1.9.0 · withShadowFlip parte en los bordes y conserva el énfasis', () => {
+  const parts = M.withShadowFlip('ab cd ef', [{ text: 'ab ', keyword: false }, { text: 'cd', keyword: true }, { text: ' ef', keyword: false }], [[1, 4]]);
+  assert.deepEqual(parts, [{ text: 'a', keyword: false }, { text: 'b ', keyword: false, flip: true }, { text: 'c', keyword: true, flip: true }, { text: 'd', keyword: true }, { text: ' ef', keyword: false }]);
+  assert.equal(parts.map((p) => p.text).join(''), 'ab cd ef');
+});
+test('1.9.0 · el filete: sólo su color o los accent de la marca; fuera de la lista, sin filete o sin hex, sale igual y se dice', () => {
+  assert.deepEqual(M.ruleAllowedRoles({ ...FILETE, layout: { ...FILETE.layout, emphasis_contrast: { fallbacks: ['cielo', 'arcilla'] } } }), ['arcilla', 'trigo', 'cielo']);
+  const base = styleN1({ headline: H_EM }, FILETE);
+  const ok = M.applyRuleRole(base, 'trigo', N1_PAL, ['arcilla', 'trigo']);
+  assert.equal(ok.applied, 'trigo'); assert.notEqual(ok.style.rule.color, base.rule.color);
+  assert.ok(M.applyRuleRole(base, 'hoja', N1_PAL, ['arcilla', 'trigo']).style.markers.some((m) => m.startsWith('OVERLAY_RULE_ROLE_NOT_ALLOWED')));
+  assert.ok(M.applyRuleRole(base, 'nada', N1_PAL, ['nada']).style.markers.some((m) => m.startsWith('OVERLAY_RULE_ROLE_UNKNOWN')));
+  assert.ok(M.applyRuleRole(styleN1({ headline: H_EM }), 'trigo', N1_PAL, ['trigo']).style.markers.some((m) => m.startsWith('OVERLAY_RULE_NOT_DECLARED')));
+  assert.equal(M.applyRuleRole(base, null, N1_PAL, ['trigo']).style, base);
+});
+test('1.9.0 · el contrato de los tres campos', () => {
+  assert.equal(M.parseTextShadowRequest(undefined), null);
+  assert.equal(M.parseTextShadowRequest('on'), 'on');
+  assert.throws(() => M.parseTextShadowRequest('si'), /COMPOSITOR_TEXT_SHADOW_INVALID|text_shadow/);
+  assert.deepEqual(M.parseShadowSpansRequest(['a', 'a']), ['a']);
+  assert.throws(() => M.parseShadowSpansRequest(['a', 'b', 'c', 'd']), /shadow_spans/);
+  assert.equal(M.parseRuleRoleRequest('accent_2'), 'accent_2');
+  assert.throws(() => M.parseRuleRoleRequest('Accent 2'), /rule_role/);
+});
+test('1.9.0 · sin los campos, la escena es la de 1.8.0', () => {
+  const st = styleN1({ headline: H_EM, emphasis: ['no se vota'] }, { ...EM_TOK, ...SOMBRA() });
+  assert.equal(st.slots.headline.shadowFlip, undefined);
+  const col = findAll(overlayN1(st), (n) => n.props?.style?.fontFamily === 'Fuente Titular')[0];
+  assert.ok(col.props.style.textShadow, 'la ranura lleva la sombra como antes');
 });
 
 console.log(`\n${'─'.repeat(72)}`);
