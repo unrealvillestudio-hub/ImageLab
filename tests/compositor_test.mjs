@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0', '1.9.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0', '1.9.0', '1.10.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1551,6 +1551,32 @@ test('1.9.0 · sin los campos, la escena es la de 1.8.0', () => {
   assert.equal(st.slots.headline.shadowFlip, undefined);
   const col = findAll(overlayN1(st), (n) => n.props?.style?.fontFamily === 'Fuente Titular')[0];
   assert.ok(col.props.style.textShadow, 'la ranura lleva la sombra como antes');
+});
+
+
+console.log('\n── 1.10.0 · LA BARRA LATERAL ──');
+test('1.10.0 · la franja de identidad: su color o los accent de la marca; lo demás sale igual y se dice', () => {
+  const tok = { palette: { headline_emphasis: 'trigo' }, layout: { emphasis_contrast: { fallbacks: ['cielo'] } } };
+  assert.deepEqual(M.identityAllowedRoles({ ...tok, identity: { palette: 'hoja' } }), ['hoja', 'trigo', 'cielo']);
+  const base = styleN1({ headline: H_EM });
+  assert.ok(base.identity, 'N1_BASE declara franja de identidad');
+  const ok = M.applyIdentityRole(base, 'trigo', N1_PAL, ['hoja', 'trigo']);
+  assert.equal(ok.applied, 'trigo'); assert.notEqual(ok.style.identity.color, base.identity.color);
+  assert.ok(M.applyIdentityRole(base, 'tierra', N1_PAL, ['hoja', 'trigo']).style.markers.some((m) => m.startsWith('OVERLAY_IDENTITY_ROLE_NOT_ALLOWED')));
+  assert.ok(M.applyIdentityRole(base, 'nada', N1_PAL, ['nada']).style.markers.some((m) => m.startsWith('OVERLAY_IDENTITY_ROLE_UNKNOWN')));
+  const sinFranja = styleN1({ headline: H_EM }, { identity: { mode: 'none' } });
+  assert.ok(M.applyIdentityRole(sinFranja, 'trigo', N1_PAL, ['trigo']).style.markers.some((m) => m.startsWith('OVERLAY_IDENTITY_NOT_DECLARED')));
+  assert.equal(M.applyIdentityRole(base, null, N1_PAL, ['trigo']).style, base);
+});
+test('1.10.0 · la escena dibuja la franja con el color elegido', () => {
+  const r = M.applyIdentityRole(styleN1({ headline: H_EM }), 'trigo', N1_PAL, ['hoja', 'trigo']);
+  const want = M.hexToRgba('#D9A441', 1);
+  assert.ok(findAll(overlayN1(r.style), (n) => n.props?.style?.backgroundColor === want).length === 1);
+});
+test('1.10.0 · el contrato de identity_role', () => {
+  assert.equal(M.parseIdentityRoleRequest(undefined), null);
+  assert.equal(M.parseIdentityRoleRequest('accent_2'), 'accent_2');
+  assert.throws(() => M.parseIdentityRoleRequest('Accent 2'), /identity_role/);
 });
 
 console.log(`\n${'─'.repeat(72)}`);

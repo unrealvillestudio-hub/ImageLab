@@ -144,7 +144,7 @@ test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape ent
 test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
   assert.match(SRC, /tightly around the FACE ONLY/);
   assert.match(SRC, /boxes: fc\.faces/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(6\.[1234]|7\.0|8\.0|9\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(6\.[1234]|7\.0|8\.0|9\.0|10\.0)'/);
 });
 
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {

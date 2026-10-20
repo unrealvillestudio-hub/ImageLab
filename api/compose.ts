@@ -161,7 +161,11 @@ declare const process: { env: Record<string, string | undefined> };
 //         · `rule_role`: el color del filete bajo el titular. Sólo uno de los accent con los que la marca resalta
 //           (`emphasisAllowedRoles`) o el suyo de siempre (`layout.rule.palette`); cualquier otro se ignora y se dice.
 //         Sin los tres campos, idéntico a 1.8.0.
-export const COMPOSITOR_VERSION = '1.9.0';
+//   1.10.0 (2026-10-20) — LA BARRA LATERAL TAMBIÉN (Sam, 2026-10-20: «sí, también la barra lateral con los accent»).
+//         Campo opcional `identity_role`: el color de la franja de identidad (el sello a sangre del borde). Sólo su
+//         color de siempre (`identity.palette`) o los accent con los que la marca resalta; cualquier otro se ignora y
+//         se dice. Sin el campo, idéntico a 1.9.0.
+export const COMPOSITOR_VERSION = '1.10.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -304,6 +308,36 @@ export function applyRuleRole<S extends { rule: null | { color: string }; marker
   const hit = (palette ?? []).find((p) => String(p?.role ?? '') === role && typeof p?.hex === 'string');
   if (!hit) return mark(`OVERLAY_RULE_ROLE_UNKNOWN: la marca no declara brand_palette.role='${role}'; el filete sale con el de siempre`);
   return { style: { ...style, rule: { ...style.rule, color: hexToRgba(String(hit.hex), 1) } }, applied: role };
+}
+
+/** 1.10.0 — `identity_role`: un rol de `brand_palette` para la franja de identidad. Ausente = null. Mal escrito es 400. */
+export function parseIdentityRoleRequest(raw: unknown): string | null {
+  if (raw == null || raw === '') return null;
+  if (typeof raw !== 'string' || !/^[a-z0-9_]{1,40}$/.test(raw))
+    throw new CompositorError('COMPOSITOR_IDENTITY_ROLE_INVALID', 'identity_role debe ser el nombre de un rol de brand_palette (minúsculas, números y guion bajo)', 400);
+  return raw;
+}
+
+/** 1.10.0 — los colores posibles de la franja de identidad: el suyo (`identity.palette`) y los accent de resaltado. PURA. */
+export function identityAllowedRoles(tokens: Record<string, any> | null | undefined): string[] {
+  const out: string[] = [];
+  const own = tokens?.identity?.palette;
+  if (typeof own === 'string' && own) out.push(own);
+  for (const r of emphasisAllowedRoles(tokens)) if (!out.includes(r)) out.push(r);
+  return out;
+}
+
+/** 1.10.0 — el color elegido para la franja de identidad. PURA. Sin franja, fuera de la lista o sin hex: sale igual y se dice. */
+export function applyIdentityRole<S extends { identity: null | { color: string }; markers: string[] }>(
+  style: S, role: string | null, palette: Array<{ role?: unknown; hex?: unknown }>, allowed: readonly string[],
+): { style: S; applied: string | null } {
+  if (!role) return { style, applied: null };
+  const mark = (m: string) => ({ style: { ...style, markers: [...style.markers, m] }, applied: null });
+  if (!style.identity) return mark(`OVERLAY_IDENTITY_NOT_DECLARED: se pidió la franja de identidad en '${role}' y la composición no la lleva`);
+  if (!allowed.includes(role)) return mark(`OVERLAY_IDENTITY_ROLE_NOT_ALLOWED: '${role}' no está entre los colores de la marca para la franja [${allowed.join(', ')}]; sale con el de siempre`);
+  const hit = (palette ?? []).find((p) => String(p?.role ?? '') === role && typeof p?.hex === 'string');
+  if (!hit) return mark(`OVERLAY_IDENTITY_ROLE_UNKNOWN: la marca no declara brand_palette.role='${role}'; la franja sale con el de siempre`);
+  return { style: { ...style, identity: { ...style.identity, color: hexToRgba(String(hit.hex), 1) } }, applied: role };
 }
 
 /**
@@ -3719,6 +3753,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const textShadowIn = parseTextShadowRequest(body.text_shadow);
     const shadowSpansIn = parseShadowSpansRequest(body.shadow_spans);
     const ruleRoleIn = parseRuleRoleRequest(body.rule_role);
+    // 1.10.0 — el color de la franja de identidad elegido por una persona.
+    const identityRoleIn = parseIdentityRoleRequest(body.identity_role);
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -3743,9 +3779,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const roleApplied = applyEmphasisRole(resolved, emphasisRoleIn, palette as any[], emphasisAllowedRoles(picked.tokens));
     // 1.9.0 — el filete y la sombra elegidos por una persona, si los hay. Sin campos, el estilo sale igual.
     const ruleApplied = applyRuleRole(roleApplied.style, ruleRoleIn, palette as any[], ruleAllowedRoles(picked.tokens));
+    const identityApplied = applyIdentityRole(ruleApplied.style, identityRoleIn, palette as any[], identityAllowedRoles(picked.tokens));
     const shadowApplied = textShadowIn || shadowSpansIn.length
-      ? applyTextShadowRequest(ruleApplied.style, textShadowIn, shadowSpansIn) : null;
-    const style = shadowApplied ? shadowApplied.style : ruleApplied.style;
+      ? applyTextShadowRequest(identityApplied.style, textShadowIn, shadowSpansIn) : null;
+    const style = shadowApplied ? shadowApplied.style : identityApplied.style;
 
     // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
     // Si no, todo lo de abajo es exactamente 1.2.0.
@@ -4060,6 +4097,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(emphasisContrastMeta ? { emphasis_contrast: emphasisContrastMeta } : {}),
         ...(emphasisRoleIn ? { emphasis_role: { requested: emphasisRoleIn, applied: roleApplied.applied } } : {}),
         ...(ruleRoleIn ? { rule_role: { requested: ruleRoleIn, applied: ruleApplied.applied } } : {}),
+        ...(identityRoleIn ? { identity_role: { requested: identityRoleIn, applied: identityApplied.applied } } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
