@@ -149,7 +149,19 @@ declare const process: { env: Record<string, string | undefined> };
 //         no son de libre elección». El rol pedido tiene que ser uno de los que la marca declara para resaltar
 //         (`palette.headline_emphasis` y `layout.emphasis_contrast.fallbacks`); cualquier otro se ignora y se dice
 //         (`OVERLAY_EMPHASIS_ROLE_NOT_ALLOWED`). La lista es dato de cada marca: cero roles en el código.
-export const COMPOSITOR_VERSION = '1.8.0';
+//   1.9.0 (2026-10-20) — LA SOMBRA Y LA FRANJA LAS ELIGE UNA PERSONA (Sam, 2026-10-20: «quitar o poner la sombra de
+//         las letras… en determinado espacio o palabras» y «cambiar el accent color de la franja»). Tres campos
+//         opcionales, todos dato de la marca en lo que pueden valer:
+//         · `text_shadow` 'on' | 'off': la sombra de TODO el texto. 'off' la quita; 'on' la pone siempre (sin medir
+//           contraste) con la sombra que la marca declara en `layout.text_effect`. Una marca que quiere ofrecerla sin
+//           ponerla por defecto la declara con `when: 'on_request'`. Sin sombra declarada, 'on' no inventa una: se
+//           compone sin ella y se dice (`OVERLAY_SHADOW_NOT_DECLARED`).
+//         · `shadow_spans`: subcadenas literales del titular que van AL REVÉS del resto (sin sombra si el texto la
+//           lleva; con ella si no). Mismos límites que `emphasis`.
+//         · `rule_role`: el color del filete bajo el titular. Sólo uno de los accent con los que la marca resalta
+//           (`emphasisAllowedRoles`) o el suyo de siempre (`layout.rule.palette`); cualquier otro se ignora y se dice.
+//         Sin los tres campos, idéntico a 1.8.0.
+export const COMPOSITOR_VERSION = '1.9.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -242,6 +254,119 @@ export function emphasisAllowedRoles(tokens: Record<string, any> | null | undefi
   add(tokens?.palette?.headline_emphasis);
   const fb = tokens?.layout?.emphasis_contrast?.fallbacks;
   if (Array.isArray(fb)) fb.forEach(add);
+  return out;
+}
+
+// ── 1.9.0 · LA SOMBRA Y LA FRANJA ELEGIDAS POR UNA PERSONA ─────────────────────────────────────────
+
+/** 1.9.0 — `text_shadow`: 'on' | 'off'. Ausente = null (lo que la marca declara). Otro valor es 400. */
+export function parseTextShadowRequest(raw: unknown): 'on' | 'off' | null {
+  if (raw == null || raw === '') return null;
+  if (raw === 'on' || raw === 'off') return raw;
+  throw new CompositorError('COMPOSITOR_TEXT_SHADOW_INVALID', "text_shadow debe ser 'on' u 'off' (o no venir)", 400);
+}
+
+/** 1.9.0 — `shadow_spans`: subcadenas del titular con la sombra al revés. Mismos límites que `emphasis`. */
+export function parseShadowSpansRequest(raw: unknown): string[] {
+  try { return parseEmphasisRequest(raw); } catch (e) {
+    throw new CompositorError('COMPOSITOR_SHADOW_SPANS_INVALID', e instanceof Error ? e.message.replace(/^emphasis/, 'shadow_spans') : String(e), 400);
+  }
+}
+
+/** 1.9.0 — `rule_role`: un rol de `brand_palette` para el filete. Ausente = null. Mal escrito es 400. */
+export function parseRuleRoleRequest(raw: unknown): string | null {
+  if (raw == null || raw === '') return null;
+  if (typeof raw !== 'string' || !/^[a-z0-9_]{1,40}$/.test(raw))
+    throw new CompositorError('COMPOSITOR_RULE_ROLE_INVALID', 'rule_role debe ser el nombre de un rol de brand_palette (minúsculas, números y guion bajo)', 400);
+  return raw;
+}
+
+/**
+ * 1.9.0 — los colores posibles del filete: el suyo de siempre (`layout.rule.palette`) y los accent con los que la marca
+ * resalta (`emphasisAllowedRoles`). PURA. Dato de la marca: cero roles en el código.
+ */
+export function ruleAllowedRoles(tokens: Record<string, any> | null | undefined): string[] {
+  const out: string[] = [];
+  const own = tokens?.layout?.rule?.palette;
+  if (typeof own === 'string' && own) out.push(own);
+  for (const r of emphasisAllowedRoles(tokens)) if (!out.includes(r)) out.push(r);
+  return out;
+}
+
+/** 1.9.0 — el color elegido para el filete. PURA. Sin filete, fuera de la lista o sin hex: sale igual y se dice. */
+export function applyRuleRole<S extends { rule: null | { color: string }; markers: string[] }>(
+  style: S, role: string | null, palette: Array<{ role?: unknown; hex?: unknown }>, allowed: readonly string[],
+): { style: S; applied: string | null } {
+  if (!role) return { style, applied: null };
+  const mark = (m: string) => ({ style: { ...style, markers: [...style.markers, m] }, applied: null });
+  if (!style.rule) return mark(`OVERLAY_RULE_NOT_DECLARED: se pidió el filete en '${role}' y la composición no lleva filete`);
+  if (!allowed.includes(role)) return mark(`OVERLAY_RULE_ROLE_NOT_ALLOWED: '${role}' no está entre los colores de la marca para el filete [${allowed.join(', ')}]; sale con el de siempre`);
+  const hit = (palette ?? []).find((p) => String(p?.role ?? '') === role && typeof p?.hex === 'string');
+  if (!hit) return mark(`OVERLAY_RULE_ROLE_UNKNOWN: la marca no declara brand_palette.role='${role}'; el filete sale con el de siempre`);
+  return { style: { ...style, rule: { ...style.rule, color: hexToRgba(String(hit.hex), 1) } }, applied: role };
+}
+
+/**
+ * 1.9.0 — la sombra pedida por una persona. PURA. 'off' quita la de la marca; 'on' pone la declarada siempre (sin
+ * medir contraste: la eligió alguien mirando la imagen). Los tramos marcan en el titular dónde va al revés. Sin sombra
+ * declarada no se inventa ninguna: lo pedido que la necesita no se aplica y se dice.
+ */
+export function applyTextShadowRequest<S extends {
+  textEffect?: Record<string, any>; textEffectDeclared?: { color: string; blurPct: number; offsetPct: number };
+  slots: Record<string, any>; markers: string[];
+}>(style: S, mode: 'on' | 'off' | null, spans: readonly string[]): { style: S; applied: { mode: 'on' | 'off' | null; spans: string[] } } {
+  let out = style;
+  const markers = [...style.markers];
+  const declared = style.textEffectDeclared;
+  let appliedMode: 'on' | 'off' | null = null;
+  if (mode === 'off') {
+    const { textEffect: _drop, ...rest } = out;
+    out = rest as S; appliedMode = 'off';
+  } else if (mode === 'on') {
+    if (declared) { out = { ...out, textEffect: { ...declared } }; appliedMode = 'on'; }
+    else markers.push("OVERLAY_SHADOW_NOT_DECLARED: se pidió sombra y la marca no declara layout.text_effect; se compone sin ella");
+  }
+  let found: string[] = [];
+  const hl = out.slots?.headline;
+  if (spans.length && hl) {
+    if (!declared) {
+      markers.push('OVERLAY_SHADOW_NOT_DECLARED: hay tramos con la sombra al revés y la marca no declara layout.text_effect; se compone sin tocarlos');
+    } else {
+      const split = splitEmphasis(String(hl.text ?? ''), [...spans]);
+      if (split.missing.length) markers.push(`OVERLAY_SHADOW_SPAN_NOT_IN_HEADLINE: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en el titular`);
+      const ranges: Array<[number, number]> = [];
+      let pos = 0;
+      for (const p of split.parts) { if (p.keyword) ranges.push([pos, pos + p.text.length]); pos += p.text.length; }
+      if (ranges.length) { out = { ...out, slots: { ...out.slots, headline: { ...hl, shadowFlip: ranges } } }; found = split.found; }
+    }
+  }
+  return { style: { ...out, markers }, applied: { mode: appliedMode, spans: found } };
+}
+
+/**
+ * 1.9.0 — los tramos del titular con la marca de sombra al revés (`flip`). PURA. Parte los tramos de énfasis (o el
+ * titular entero) en los bordes de cada rango; el texto visible no cambia.
+ */
+export function withShadowFlip(
+  text: string, parts: Array<{ text: string; keyword: boolean }> | null | undefined, ranges: ReadonlyArray<[number, number]>,
+): Array<{ text: string; keyword: boolean; flip?: boolean }> {
+  const base = parts && parts.length ? parts : [{ text, keyword: false }];
+  const cuts = new Set<number>();
+  for (const [a, b] of ranges) { cuts.add(a); cuts.add(b); }
+  const inFlip = (i: number) => ranges.some(([a, b]) => i >= a && i < b);
+  const out: Array<{ text: string; keyword: boolean; flip?: boolean }> = [];
+  let pos = 0;
+  for (const p of base) {
+    let start = 0;
+    for (let k = 1; k <= p.text.length; k++) {
+      if (k === p.text.length || cuts.has(pos + k)) {
+        const seg = p.text.slice(start, k);
+        if (seg) out.push({ text: seg, keyword: p.keyword, ...(inFlip(pos + start) ? { flip: true } : {}) });
+        start = k;
+      }
+    }
+    pos += p.text.length;
+  }
   return out;
 }
 
@@ -486,6 +611,9 @@ export function resolveOverlayStyle(args: {
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
   // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
   textEffect?: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string };
+  // 1.9.0 — la sombra que la marca declara, se aplique hoy o no (`when: 'on_request'` sólo existe aquí). La usan
+  // `text_shadow: 'on'` y los tramos de `shadow_spans`.
+  textEffectDeclared?: { color: string; blurPct: number; offsetPct: number };
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -495,6 +623,8 @@ export function resolveOverlayStyle(args: {
     emphasis?: null | (EmphasisType & { color: string });
     // 1.7.0 — dónde se corta el titular, en tramos [inicio, fin). Ausente ⇒ satori envuelve solo (1.6.4).
     lines?: Array<[number, number]>;
+    // 1.9.0 — tramos del titular [inicio, fin) cuya sombra va al revés del resto. Ausente ⇒ como 1.8.0.
+    shadowFlip?: Array<[number, number]>;
     // 1.5.0 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el límite de área
     // baja por ellos. Lo usa sólo `fitOverlayTextArea`; la escena no lo lee.
     fitSmaller?: number[];
@@ -721,6 +851,7 @@ export function resolveOverlayStyle(args: {
   // 1.6.0 — sombra por glifo del overlay: la MISMA forma que `carousel.text_effect` (1.3.4), con el color como
   // ROL de `brand_palette` (como el velo y el filete del overlay), no como función del cromo de carrusel.
   let textEffect: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string } | null = null;
+  let textEffectDeclared: { color: string; blurPct: number; offsetPct: number } | null = null;
   if (layoutTok.text_effect != null) {
     try {
       const te = parseCarouselTextEffect(layoutTok.text_effect);
@@ -739,8 +870,10 @@ export function resolveOverlayStyle(args: {
       }
       if (!pal) missing.push(`brand_palette.role='${te.fn}' (pedido por layout.text_effect.color; también admite un hex #RRGGBB)`);
       else if (whenOk) {
-        textEffect = { color: hexToRgba(String(pal.hex), te.alpha), blurPct: te.blurPct, offsetPct: te.offsetPct };
-        if (when === 'low_contrast') textEffect = { ...textEffect, when: 'low_contrast', minContrast, shadowHex: String(pal.hex) };
+        textEffectDeclared = { color: hexToRgba(String(pal.hex), te.alpha), blurPct: te.blurPct, offsetPct: te.offsetPct };
+        // 1.9.0 — 'on_request': declarada, disponible para quien la pida, y apagada por defecto.
+        if (when !== 'on_request') textEffect = { ...textEffectDeclared };
+        if (when === 'low_contrast') textEffect = { ...textEffect!, when: 'low_contrast', minContrast, shadowHex: String(pal.hex) };
       }
     } catch (e) {
       missing.push(`layout.text_effect: ${e instanceof Error ? e.message.replace(/carousel\.text_effect/g, 'layout.text_effect').replace('función de tokens.palette', 'rol de brand_palette') : String(e)}`);
@@ -812,6 +945,7 @@ export function resolveOverlayStyle(args: {
       ...(emphasisContrast ? { emphasisContrast } : {}),
     },
     ...(textEffect ? { textEffect } : {}),
+    ...(textEffectDeclared ? { textEffectDeclared } : {}),
     slots,
     scrim,
     rule,
@@ -1027,27 +1161,41 @@ export function fitOverlayTextArea(args: {
  * estilo, tamaño (escala del titular), tracking, transformación y color. Los demás heredan del padre.
  */
 function emphasisAtomsNode(
-  parts: Array<{ text: string; keyword: boolean }>,
+  parts: Array<{ text: string; keyword: boolean; flip?: boolean }>,
   base: { sizePct: number },
-  em: EmphasisType & { color: string },
+  em: (EmphasisType & { color: string }) | null | undefined,
   width: number,
   // 1.6.0 — la sombra del overlay viaja también a los tramos con énfasis (sin depender de la herencia).
   textShadow?: string,
+  // 1.9.0 — con tramos de sombra al revés, cada tramo lleva la suya explícita (la ranura no la hereda).
+  shadowOf?: (p: { flip?: boolean }) => string | undefined,
 ): Array<Record<string, any>> {
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const size = r2((base.sizePct * em.sizeScale / 100) * width);
-  const emStyle = {
+  const size = em ? r2((base.sizePct * em.sizeScale / 100) * width) : 0;
+  const emStyle = em ? {
     fontFamily: em.family, fontWeight: em.weight, fontStyle: em.italic ? 'italic' : 'normal',
     fontSize: size, letterSpacing: r2(em.letterSpacingEm * size), textTransform: em.transform, color: em.color,
-    ...(textShadow ? { textShadow } : {}),
+    ...(textShadow && !shadowOf ? { textShadow } : {}),
+  } : {};
+  const styleOf = (p: { keyword: boolean; flip?: boolean }) => {
+    const st = p.keyword && em ? emStyle : {};
+    if (!shadowOf) return st;
+    const sh = shadowOf(p);
+    return sh ? { ...st, textShadow: sh } : st;
   };
   return headlineAtoms(parts).map((atom) => ({
     type: 'div',
     props: {
       style: { display: 'flex', flexDirection: 'row', alignItems: 'baseline' },
-      children: atom.map((p) => ({ type: 'span', props: { style: p.keyword ? emStyle : {}, children: p.text } })),
+      children: atom.map((p) => ({ type: 'span', props: { style: styleOf(p), children: p.text } })),
     },
   }));
+}
+
+/** 1.9.0 — la sombra de cada tramo cuando hay tramos al revés: el resto lleva la base; los marcados, lo contrario. PURA. */
+export function shadowForSpan(flip: boolean | undefined, baseShadow: string | undefined, declaredShadow: string): string | undefined {
+  if (!flip) return baseShadow;
+  return baseShadow ? undefined : declaredShadow;
 }
 
 /**
@@ -1055,15 +1203,19 @@ function emphasisAtomsNode(
  * sola si no cabe; con énfasis, la fila lleva los átomos de 1.4.0 de ESA línea.
  */
 function headlineRowsNode(
-  s: { text: string; lines?: Array<[number, number]>; parts?: Array<{ text: string; keyword: boolean }>; emphasis?: any; sizePct: number },
+  s: { text: string; lines?: Array<[number, number]>; parts?: Array<{ text: string; keyword: boolean }> | null; emphasis?: any; sizePct: number },
   width: number, textShadow: string | undefined, align: string,
+  // 1.9.0 — tramos de sombra al revés: el titular entero va por átomos, cada uno con su sombra.
+  flip?: { parts: Array<{ text: string; keyword: boolean; flip?: boolean }>; shadowOf: (p: { flip?: boolean }) => string | undefined },
 ): Array<Record<string, any>> {
   const justify = align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start';
   return (s.lines ?? []).map(([a, b]) => ({
     type: 'div',
     props: {
       style: { display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: justify },
-      children: s.parts && s.emphasis
+      children: flip
+        ? emphasisAtomsNode(partsInRange(flip.parts, a, b), s, s.emphasis, width, textShadow, flip.shadowOf)
+        : s.parts && s.emphasis
         ? emphasisAtomsNode(partsInRange(s.parts, a, b), s, s.emphasis, width, textShadow)
         : s.text.slice(a, b),
     },
@@ -1175,7 +1327,15 @@ export function buildOverlayScene(args: {
   const textChildren: Array<Record<string, any>> = [];
   // 1.6.0 — sin token es undefined y ningún estilo cambia: la escena es la de 1.5.0, clave por clave.
   const shadow = style.textEffect ? overlayTextShadow(style.textEffect, width) : undefined;
-  const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => ({
+  // 1.9.0 — tramos con la sombra al revés: sólo con sombra declarada (sin ella `applyTextShadowRequest` no los marca).
+  const declaredShadow = style.textEffectDeclared ? overlayTextShadow(style.textEffectDeclared, width) : null;
+  const flipOf = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>) =>
+    s.shadowFlip?.length && declaredShadow
+      ? { parts: withShadowFlip(s.text, s.parts, s.shadowFlip), shadowOf: (p: { flip?: boolean }) => shadowForSpan(p.flip, shadow, declaredShadow) }
+      : undefined;
+  const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => {
+    const flip = flipOf(s);
+    return {
     type: 'div',
     props: {
       style: {
@@ -1190,22 +1350,24 @@ export function buildOverlayScene(args: {
         letterSpacing: px(s.letterSpacingEm * s.sizePct, width),
         textTransform: s.transform,
         textAlign: style.layout.align,
-        ...(shadow ? { textShadow: shadow } : {}),
+        ...(shadow && !flip ? { textShadow: shadow } : {}),
         // 1.4.0 — con tramos, la ranura es una fila que envuelve átomos (palabras que no se cortan),
         // alineados por la línea de base: un tramo más grande no descoloca a sus vecinos.
         // 1.7.0 — con cortes impuestos, la ranura es una COLUMNA de filas: una por línea.
         ...(s.lines ? {
           flexDirection: 'column',
           alignItems: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
-        } : s.parts && s.emphasis ? {
+        } : (s.parts && s.emphasis) || flip ? {
           flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline',
           justifyContent: style.layout.align === 'center' ? 'center' : style.layout.align === 'right' ? 'flex-end' : 'flex-start',
         } : {}),
       },
-      children: s.lines ? headlineRowsNode(s, width, shadow, style.layout.align)
+      children: s.lines ? headlineRowsNode(s, width, shadow, style.layout.align, flip)
+        : flip ? emphasisAtomsNode(flip.parts, s, s.emphasis, width, shadow, flip.shadowOf)
         : s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
     },
-  });
+  };
+  };
 
   if (style.slots.headline) textChildren.push(slotNode(style.slots.headline, 0));
   // El filete acompaña al TITULAR: sin titular no hay nada que subrayar. (La franja de identidad es
@@ -1940,26 +2102,25 @@ export function headlineLineRanges(
 }
 
 /** 1.7.0 — los trozos (con su marca de énfasis) que caen dentro de [a, b) del titular. PURO. */
-export function partsInRange(
-  parts: Array<{ text: string; keyword: boolean }>, a: number, b: number,
-): Array<{ text: string; keyword: boolean }> {
-  const out: Array<{ text: string; keyword: boolean }> = [];
+export function partsInRange<P extends { text: string; keyword: boolean }>(parts: P[], a: number, b: number): P[] {
+  const out: P[] = [];
   let pos = 0;
   for (const p of parts) {
     const x = Math.max(a, pos); const y = Math.min(b, pos + p.text.length);
-    if (y > x) out.push({ text: p.text.slice(x - pos, y - pos), keyword: p.keyword });
+    // 1.9.0 — el tramo conserva sus marcas (la sombra al revés), no sólo el énfasis.
+    if (y > x) out.push({ ...p, text: p.text.slice(x - pos, y - pos) });
     pos += p.text.length;
   }
   return out;
 }
 
-export function headlineAtoms(parts: Array<{ text: string; keyword: boolean }>): Array<Array<{ text: string; keyword: boolean }>> {
-  const atoms: Array<Array<{ text: string; keyword: boolean }>> = [[]];
+export function headlineAtoms<P extends { text: string; keyword: boolean }>(parts: P[]): P[][] {
+  const atoms: P[][] = [[]];
   for (const p of parts) {
     for (const piece of p.text.split(/(\s+)/)) {
       if (!piece) continue;
       if (/^\s+$/.test(piece)) { if (atoms[atoms.length - 1].length) atoms.push([]); continue; }
-      atoms[atoms.length - 1].push({ text: piece, keyword: p.keyword });
+      atoms[atoms.length - 1].push({ ...p, text: piece });
     }
   }
   const out = atoms.filter((a) => a.length);
@@ -2984,7 +3145,7 @@ export function withEmphasisColor<S extends { slots: Record<string, any> }>(styl
 // queda DEBAJO del bloque; se mira el 10 % del área que peor contrasta (no la media: un cielo claro detrás de
 // media frase no se compensa con una pared oscura detrás de la otra mitad). INSTANCIA (dato): el umbral
 // `min_contrast` y el color de la sombra. Cero marcas, cero colores en el código.
-const TEXT_EFFECT_WHEN = new Set(['always', 'low_contrast']);
+const TEXT_EFFECT_WHEN = new Set(['always', 'low_contrast', 'on_request']);
 /** Un color literal en un token (sólo `layout.text_effect.color`): #RGB o #RRGGBB. */
 const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 /** Fracción del área que decide el contraste: el peor 10 %. */
@@ -3554,6 +3715,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // 1.4.0 — tramos de énfasis del titular. Se validan con el resto del contrato, antes de leer dato.
     const emphasisIn = parseEmphasisRequest(body.emphasis);
     const emphasisRoleIn = parseEmphasisRoleRequest(body.emphasis_role);
+    // 1.9.0 — la sombra y el filete elegidos por una persona. Se validan con el resto del contrato.
+    const textShadowIn = parseTextShadowRequest(body.text_shadow);
+    const shadowSpansIn = parseShadowSpansRequest(body.shadow_spans);
+    const ruleRoleIn = parseRuleRoleRequest(body.rule_role);
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -3576,7 +3741,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const resolved = resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[], text: { headline, subheadline, emphasis: emphasisIn } });
     // 1.8.0 — el color del resaltado elegido por una persona, si lo hay.
     const roleApplied = applyEmphasisRole(resolved, emphasisRoleIn, palette as any[], emphasisAllowedRoles(picked.tokens));
-    const style = roleApplied.style;
+    // 1.9.0 — el filete y la sombra elegidos por una persona, si los hay. Sin campos, el estilo sale igual.
+    const ruleApplied = applyRuleRole(roleApplied.style, ruleRoleIn, palette as any[], ruleAllowedRoles(picked.tokens));
+    const shadowApplied = textShadowIn || shadowSpansIn.length
+      ? applyTextShadowRequest(ruleApplied.style, textShadowIn, shadowSpansIn) : null;
+    const style = shadowApplied ? shadowApplied.style : ruleApplied.style;
 
     // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
     // Si no, todo lo de abajo es exactamente 1.2.0.
@@ -3890,6 +4059,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         // 1.6.3 — si el énfasis cambió de color para leerse, y por qué.
         ...(emphasisContrastMeta ? { emphasis_contrast: emphasisContrastMeta } : {}),
         ...(emphasisRoleIn ? { emphasis_role: { requested: emphasisRoleIn, applied: roleApplied.applied } } : {}),
+        ...(ruleRoleIn ? { rule_role: { requested: ruleRoleIn, applied: ruleApplied.applied } } : {}),
+        ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
           highlighted: (hl?.parts ?? []).filter((p) => p.keyword).map((p) => p.text),
