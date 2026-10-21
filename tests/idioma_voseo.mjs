@@ -38,7 +38,10 @@ export const PALABRAS_PERMITIDAS = new Set([
   'entendí',
   // sustantivos, gentilicios y topónimos
   'país', 'inglés', 'francés', 'portugués', 'japonés', 'interés', 'estrés', 'café', 'bebé', 'mamá',
-  'papá', 'sofá', 'maní', 'açaí', 'caché', 'cachés', 'relé', 'arnés', 'panamá', 'canadá',
+  'papá', 'sofá', 'maní', 'açaí', 'asaí', 'caché', 'cachés', 'relé', 'arnés', 'capitoné', 'panamá',
+  'canadá',
+  // abreviaturas de días de la semana
+  'mié',
   // nombres propios usados en ejemplos y pruebas
   'tomás',
 ]);
