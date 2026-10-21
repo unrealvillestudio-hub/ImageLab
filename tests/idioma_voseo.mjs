@@ -38,7 +38,8 @@ export const PALABRAS_PERMITIDAS = new Set([
   'entendí',
   // sustantivos, gentilicios y topónimos
   'país', 'inglés', 'francés', 'portugués', 'japonés', 'interés', 'estrés', 'café', 'bebé', 'mamá',
-  'papá', 'sofá', 'maní', 'açaí', 'asaí', 'caché', 'cachés', 'relé', 'arnés', 'capitoné', 'panamá',
+  'papá', 'sofá', 'maní', 'açaí', 'asaí', 'caché', 'cachés', 'relé', 'arnés', 'capitoné', 'comité',
+  'comités', 'panamá',
   'canadá',
   // abreviaturas de días de la semana
   'mié',
