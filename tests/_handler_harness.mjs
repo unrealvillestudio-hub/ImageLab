@@ -42,14 +42,18 @@ export async function loadHandler(sourceText) {
  * función `(URLSearchParams) => filas` cuando la prueba necesita que los filtros cuenten.
  * `image` (2026-10-05, prompt del fallo) sustituye la respuesta del modelo de imagen: `{ status, body }`
  * (el cuerpo se serializa a JSON). Sin `image`, la respuesta con imagen de siempre.
+ * `intercept` (2026-10-21): `(url, init) => Response | undefined`, antes que el resto del arnés.
  * Devuelve { status, json, vertexImage, vertexText }: los CUERPOS que se mandaron a Vertex.
  */
-export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE', image = null } = {}) {
+export async function run(handler, body, { db = {}, synth = 'SYNTHESIZED SCENE', image = null, intercept = null } = {}) {
   const calls = { vertexImage: null, vertexText: null, fetched: [] };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     calls.fetched.push(u.startsWith('data:') ? u.slice(0, 40) : u);
+    // 2026-10-21 (LOTE-IMAGEN) — `intercept(u, init)` deja a una prueba responder una llamada concreta (el bucket
+    // del lote); si devuelve `undefined`, sigue el arnés de siempre. Sin `intercept`, nada cambia.
+    if (intercept) { const r = await intercept(u, init); if (r !== undefined) return r; }
     if (u.startsWith('https://db.example.invalid/rest/v1/')) {
       const [table, query = ''] = u.slice('https://db.example.invalid/rest/v1/'.length).split('?');
       // Una tabla puede ser una lista (se devuelve entera, sin mirar filtros: lo de siempre) o una
