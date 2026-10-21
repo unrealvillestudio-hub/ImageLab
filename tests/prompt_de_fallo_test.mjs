@@ -235,8 +235,9 @@ await ok('R1 · el motivo del bloqueo deja de viajar como dato → el camino de 
 await ok('R2 · el carril deja de guardar el prompt final → el camino de error se pone rojo', () => debeFallar('R2',
   '    fallo.promptFull = finalPrompt;\n\n    // Las imágenes', '\n    // Las imágenes', comprobarFalloSafety));
 await ok('R3 · la respuesta de éxito gana una clave → el golden se pone rojo', () => debeFallar('R3',
-  '      generation_mode:        mode,\n      persona_used:           personaUsed,\n      location_used:',
-  '      generation_mode:        mode,\n      persona_used:           personaUsed,\n      block_reason: null,\n      location_used:', comprobarGolden));
+  // 2026-10-21 (LOTE-IMAGEN) — la respuesta de éxito se arma en `payloadDeImagen` (directo y lote): ahí se inyecta.
+  '    persona_used: r.persona_used,\n    location_used:',
+  '    persona_used: r.persona_used,\n    block_reason: null,\n    location_used:', comprobarGolden));
 await ok('R4 · el log deja de recortar → la comprobación del tope se pone roja', () => debeFallar('R4',
   'const recortado = texto.length > FAILURE_PROMPT_LOG_MAX_CHARS;', 'const recortado = false;', comprobarTope));
 

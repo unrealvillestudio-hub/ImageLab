@@ -36,6 +36,7 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { GoogleAuth } from 'google-auth-library';
+import { createHash } from 'node:crypto';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -2560,6 +2561,178 @@ function imageFromResponse(data: any, httpStatus: number): ImageWithUsage {
 }
 // ── RESPUESTA-IMAGEN:END ──
 
+// ── LOTE-IMAGEN:BEGIN ── (2026-10-21) bloque PURO (sin red, sin env): lo extrae `tests/imagen_en_lote_test.mjs`.
+//
+// LA IMAGEN DEL CARRIL VA EN LOTE (fase 3 del plan de Batch; Sam, 2026-10-20: «sí al plan de Batch, procede»).
+// Vertex AI cobra la mitad por la inferencia en lote (batch prediction); a cambio, la imagen tarda. El carril
+// (`content-run-stage`) decide si espera; ImageLab sólo sabe hacer tres cosas más:
+//   · «preparar» (`lote: { modo: 'preparar' }` en /api/execute): construye el prompt EXACTAMENTE como hoy y devuelve
+//     la petición de `:generateContent` que haría, SIN llamar al modelo de imagen, más el estado que necesita para
+//     terminar. Las fotos de referencia viajan como `fileData` en el bucket del lote (la petición no carga MB).
+//   · «terminar» (`lote: { modo: 'terminar', estado, respuesta }`): recibe la respuesta del lote y produce LA MISMA
+//     respuesta que la llamada directa con esa respuesta: el mismo post-proceso (la placa, su segundo intento), la
+//     misma forma. Sólo añade `lote_cobro`, que dice qué intento se pagó en lote y cuál en línea.
+//   · el envío y la lectura del lote viven en `api/lote.ts` (tiene la cuenta de servicio; el carril no).
+// Sin `lote` en el cuerpo, nada de esto corre y la respuesta es byte a byte la de antes.
+//
+// MULTIMARCA: ni una marca, ni un canal, ni un modelo literal. El modelo es el mismo de la llamada directa.
+export const LOTE_IMAGEN_VERSION = 1;
+// La clave de la única petición de un lote de imagen: una imagen por pieza.
+export const LOTE_IMAGEN_PETICION = 'imagen';
+
+export type ParteDeImagen =
+  | { inlineData: { mimeType: string; data: string } }
+  | { fileData: { fileUri: string; mimeType: string } };
+
+/** El cuerpo de `:generateContent` de la imagen. UNA definición para la llamada en línea y para el lote:
+ *  las imágenes primero, el texto al final (lo de siempre). Sin imágenes, `parts` es `[{ text }]`. */
+export function cuerpoDeImagen(text: string, aspectRatio: string, imagenes: ParteDeImagen[]): Record<string, unknown> {
+  return {
+    contents: [{
+      role: 'user',
+      parts: [...imagenes, { text }],
+    }],
+    generationConfig: {
+      responseModalities: ['IMAGE'],
+      imageConfig: {
+        aspectRatio,
+      },
+    },
+  };
+}
+
+/** Lo que la respuesta de éxito lleva además de la imagen, su consumo y la placa. Se fija al construir el prompt
+ *  y viaja en el estado del lote: «terminar» no vuelve a leer ni a sintetizar nada. */
+export interface RespuestaBaseDeImagen {
+  output: string;
+  preset_used: boolean;
+  preset_id: string | null;
+  brand?: string | null;
+  canal: string;
+  model: string;
+  prompt_full: string;
+  prompt_builder_version: string | null;
+  prompt_builder_model: string | null;
+  prompt_builder_usage: Record<string, number> | null;
+  generation_mode: string;
+  persona_used: boolean;
+  location_used: string | null;
+  location_refs: number;
+  product_composited: boolean;
+  product_in_scene: string[] | null;
+  product_left_scene: Record<string, unknown> | null;
+  product_staging: string | null;
+  product_refs: number;
+  reference_images: number;
+  personas: { personas_used: string[]; persona_refs: number[]; gaze: string | null; reference_budget: number; references_dropped: unknown } | null;
+  overlay: { overlay_canal: string | null; subject_framing: string; text_zone: boolean } | null;
+}
+
+/** Todo lo que la imagen necesita después del prompt. Viaja por JSON (y por `jsonb`, que reordena claves): por eso
+ *  la respuesta se arma campo a campo en `payloadDeImagen`, nunca copiando el objeto. */
+export interface EstadoDeImagen {
+  v: number;
+  prompt: string;            // el prompt final (`prompt_full`), antes de los rótulos y del negativo
+  role_clause: string;       // los rótulos de las fotos (`imageRoleClause`); '' si no aplica
+  negative_prompt: string;
+  aspect_ratio: string;
+  image_urls: string[];      // en el orden en que viajan: la actual (editar), personas, lugar, producto
+  psycho_id: string | null;
+  respuesta: RespuestaBaseDeImagen;
+}
+
+/** El texto que va al modelo de imagen ANTES del negativo: la corrección (segundo intento), el prompt y, con fotos,
+ *  los rótulos delante. Es lo que hacía `generar` dentro del handler, sin cambiar una coma. */
+export function promptDeImagen(e: Pick<EstadoDeImagen, 'prompt' | 'role_clause'>, correction: string | null, conImagenes: boolean): string {
+  const prompt = [correction, e.prompt].filter(Boolean).join(' ');
+  return conImagenes ? [e.role_clause, prompt].filter(Boolean).join(' ') : prompt;
+}
+
+/** La respuesta de éxito, en el orden de siempre. La usan la llamada directa y «terminar». */
+export function payloadDeImagen(
+  e: EstadoDeImagen, imageDataUrl: string, usage: Record<string, number> | null, placa: Record<string, unknown>,
+): Record<string, unknown> {
+  const r = e.respuesta;
+  return {
+    output: r.output,
+    image_data_url: imageDataUrl,
+    preset_used: r.preset_used,
+    preset_id: r.preset_id,
+    brand: r.brand,
+    canal: r.canal,
+    model: r.model,
+    usage,
+    prompt_full: r.prompt_full,
+    prompt_builder_version: r.prompt_builder_version,
+    prompt_builder_model: r.prompt_builder_model,
+    prompt_builder_usage: r.prompt_builder_usage,
+    generation_mode: r.generation_mode,
+    persona_used: r.persona_used,
+    location_used: r.location_used,
+    location_refs: r.location_refs,
+    product_composited: r.product_composited,
+    product_in_scene: r.product_in_scene,
+    ...(r.product_left_scene ? { product_left_scene: {
+      products: (r.product_left_scene as any).products, reason: (r.product_left_scene as any).reason, budget: (r.product_left_scene as any).budget,
+    } } : {}),
+    ...(r.product_staging ? { product_staging: r.product_staging } : {}),
+    product_refs: r.product_refs,
+    reference_images: r.reference_images,
+    ...(r.personas ? {
+      personas_used: r.personas.personas_used,
+      persona_refs: r.personas.persona_refs,
+      gaze: r.personas.gaze,
+      reference_budget: r.personas.reference_budget,
+      references_dropped: r.personas.references_dropped,
+    } : {}),
+    ...(r.overlay ? {
+      overlay_canal: r.overlay.overlay_canal,
+      subject_framing: r.overlay.subject_framing,
+      text_zone: r.overlay.text_zone,
+    } : {}),
+    ...placa,
+    status: 'ok',
+  };
+}
+
+/** El modo lote del cuerpo. Ausente ⇒ `null` (lo de siempre). Lo que no se entiende es un error dicho, no un
+ *  modo por defecto: un «terminar» mal formado que cayera al camino normal pagaría otra imagen. */
+export function leerModoLote(raw: unknown):
+  { modo: null } | { modo: 'preparar' } | { modo: 'terminar'; estado: unknown; respuesta: Record<string, unknown> } | { modo: 'error'; error: string } {
+  if (raw === undefined || raw === null) return { modo: null };
+  const o = raw as Record<string, unknown>;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { modo: 'error', error: 'IMAGELAB_LOTE_MODO_INVALIDO: `lote` tiene que ser un objeto' };
+  if (o.modo === 'preparar') return { modo: 'preparar' };
+  if (o.modo === 'terminar') {
+    if (!o.estado || typeof o.estado !== 'object') return { modo: 'error', error: 'IMAGELAB_LOTE_SIN_ESTADO: «terminar» exige el estado de «preparar»' };
+    if (!o.respuesta || typeof o.respuesta !== 'object' || Array.isArray(o.respuesta))
+      return { modo: 'error', error: 'IMAGELAB_LOTE_SIN_RESPUESTA: «terminar» exige la respuesta del lote' };
+    return { modo: 'terminar', estado: o.estado, respuesta: o.respuesta as Record<string, unknown> };
+  }
+  return { modo: 'error', error: `IMAGELAB_LOTE_MODO_DESCONOCIDO: ${JSON.stringify(o.modo ?? null).slice(0, 40)}` };
+}
+
+/** Lee el estado guardado. Fail-loud: lo que falta no se rellena, se dice. */
+export function leerEstadoDeImagen(raw: unknown): { ok: true; estado: EstadoDeImagen } | { ok: false; error: string } {
+  const e = (raw ?? {}) as Record<string, any>;
+  if (e.v !== LOTE_IMAGEN_VERSION) return { ok: false, error: `versión ${JSON.stringify(e.v ?? null)} (se espera ${LOTE_IMAGEN_VERSION})` };
+  const falta: string[] = [];
+  for (const k of ['prompt', 'role_clause', 'negative_prompt', 'aspect_ratio']) if (typeof e[k] !== 'string') falta.push(k);
+  if (!Array.isArray(e.image_urls) || e.image_urls.some((u: unknown) => typeof u !== 'string')) falta.push('image_urls');
+  if (e.psycho_id !== null && typeof e.psycho_id !== 'string') falta.push('psycho_id');
+  const r = e.respuesta;
+  if (!r || typeof r !== 'object') falta.push('respuesta');
+  else {
+    for (const k of ['output', 'canal', 'model', 'prompt_full', 'generation_mode']) if (typeof r[k] !== 'string') falta.push(`respuesta.${k}`);
+    for (const k of ['preset_used', 'persona_used', 'product_composited']) if (typeof r[k] !== 'boolean') falta.push(`respuesta.${k}`);
+    for (const k of ['location_refs', 'product_refs', 'reference_images']) if (typeof r[k] !== 'number') falta.push(`respuesta.${k}`);
+    if (r.reference_images !== (Array.isArray(e.image_urls) ? e.image_urls.length : -1)) falta.push('respuesta.reference_images (≠ image_urls)');
+  }
+  if (falta.length) return { ok: false, error: `estado incompleto: ${falta.join(', ')}` };
+  return { ok: true, estado: e as EstadoDeImagen };
+}
+// ── LOTE-IMAGEN:END ──
+
 /**
  * Text-to-image via gemini-2.5-flash-image:generateContent.
  * (Name retained from the Imagen era to keep call sites stable.)
@@ -2582,18 +2755,8 @@ async function vertexPredictImagen(params: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        contents: [{
-          role: 'user',
-          parts: [{ text }],
-        }],
-        generationConfig: {
-          responseModalities: ['IMAGE'],
-          imageConfig: {
-            aspectRatio: normalizeAspectRatio(params.aspectRatio),
-          },
-        },
-      }),
+      // LOTE-IMAGEN (2026-10-21) — el cuerpo sale de `cuerpoDeImagen`, el mismo que va al lote.
+      body: JSON.stringify(cuerpoDeImagen(text, normalizeAspectRatio(params.aspectRatio), [])),
       signal: controller.signal,
     });
 
@@ -2675,11 +2838,10 @@ async function vertexPredictImagenCapability(params: {
 
   const token = await getAccessToken();
 
-  const parts: any[] = params.images.map(img => ({
+  const imagenes: ParteDeImagen[] = params.images.map(img => ({
     inlineData: { mimeType: img.mimeType, data: img.data },
   }));
   const text = appendNegative(params.prompt, params.negativePrompt);
-  parts.push({ text });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
@@ -2690,15 +2852,8 @@ async function vertexPredictImagenCapability(params: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: {
-          responseModalities: ['IMAGE'],
-          imageConfig: {
-            aspectRatio: normalizeAspectRatio(params.aspectRatio),
-          },
-        },
-      }),
+      // LOTE-IMAGEN (2026-10-21) — el cuerpo sale de `cuerpoDeImagen`, el mismo que va al lote.
+      body: JSON.stringify(cuerpoDeImagen(text, normalizeAspectRatio(params.aspectRatio), imagenes)),
       signal: controller.signal,
     });
 
@@ -2859,6 +3014,153 @@ async function generateImageDirect(
   return { image_data_url, preset_used: presetUsed, preset_id: presetId, usage };
 }
 
+// --- LOTE-IMAGEN (2026-10-21) — generar, entregar, terminar (impuros). Ver el bloque LOTE-IMAGEN. -------------
+
+/** Una llamada en línea al modelo de imagen, con el estado del prompt. `correction` sólo en el segundo intento
+ *  por placa: va delante del prompt final, que no cambia. Es el `generar` que vivía dentro del handler. */
+function generarImagen(e: EstadoDeImagen, images: InlineImage[], correction: string | null): Promise<ImageWithUsage> {
+  return images.length
+    ? vertexPredictImagenCapability({
+        prompt: promptDeImagen(e, correction, true),
+        negativePrompt: e.negative_prompt,
+        aspectRatio: e.aspect_ratio,
+        images,
+      })
+    : vertexPredictImagen({
+        prompt: promptDeImagen(e, correction, false),
+        negativePrompt: e.negative_prompt,
+        aspectRatio:    e.aspect_ratio,
+      });
+}
+
+/** El modo de cobro de cada intento: `diferido` si salió del lote, `estandar` si se llamó en línea. */
+type ModoDeCobro = 'estandar' | 'diferido';
+
+/**
+ * Lo que pasa DESPUÉS de tener la primera imagen, igual en directo y al terminar un lote: la placa y su segundo
+ * intento (en línea), y la respuesta. `cobro` dice qué intento se pagó cómo; la llamada directa no lo publica.
+ */
+async function entregarImagen(
+  e: EstadoDeImagen, imagenes: () => Promise<InlineImage[]>, primeraImagen: ImageWithUsage, t0: number, brandId: string,
+  cobroPrimera: ModoDeCobro,
+): Promise<{ payload: Record<string, unknown>; cobro: { entregada: ModoDeCobro; descartados: ModoDeCobro[] } }> {
+  const generar = async (correction: string | null) => generarImagen(e, await imagenes(), correction);
+  let { image_data_url: imageDataUrl, usage } = primeraImagen;
+  let cobroEntregada: ModoDeCobro = cobroPrimera;
+  const cobroDescartados: ModoDeCobro[] = [];
+
+  // ── PLACA (2026-10-10) — se mide la imagen; con placa y con tiempo, UN segundo intento que nombra el
+  // borde. Se entrega la mejor de las dos; la descartada viaja en `discarded_attempts` con su consumo,
+  // para que el consumidor la asiente: se generó y se cobró. Sin placa, la respuesta es la de siempre.
+  const medida1 = await edgePlateOfImage(imageDataUrl);
+  if (medida1.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED brand=${brandId}: ${medida1.error}`);
+  let edgePlate: EdgePlate | null = medida1.plate;
+  const discardedAttempts: Array<{ model: string; usage: Record<string, number> | null; edge_plate: EdgePlate; reason: string }> = [];
+  if (edgePlate) {
+    const elapsed = Date.now() - t0;
+    if (edgePlateRetryAllowed(elapsed)) {
+      console.warn(`[ImageLab][PLACA] brand=${brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) a los ${elapsed} ms: segundo intento`);
+      const primera = { image_data_url: imageDataUrl, usage, plate: edgePlate };
+      let segunda: ImageWithUsage | null = null;
+      try {
+        segunda = await generar(edgePlateRetryClause(edgePlate));
+      } catch (err) {
+        // El segundo intento falló: se entrega la primera, con su placa declarada. Si el proveedor
+        // reportó consumo del intento fallido, viaja igual: pudo cobrarse.
+        const u = (err as any)?.usage ?? null;
+        console.warn(`[ImageLab][PLACA] EDGE_PLATE_RETRY_FAILED brand=${brandId}: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+        if (u) { discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: u, edge_plate: primera.plate, reason: 'EDGE_PLATE_RETRY_FAILED' }); cobroDescartados.push('estandar'); }
+      }
+      if (segunda) {
+        const medida2 = await edgePlateOfImage(segunda.image_data_url);
+        if (medida2.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED (segundo intento) brand=${brandId}: ${medida2.error}`);
+        // La segunda gana si no tiene placa o si la suya es menor; si no, se entrega la primera.
+        if (!medida2.error && edgePlateSize(medida2.plate) < edgePlateSize(primera.plate)) {
+          discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: primera.usage, edge_plate: primera.plate, reason: 'EDGE_PLATE' });
+          cobroDescartados.push(cobroPrimera);
+          imageDataUrl = segunda.image_data_url;
+          usage = segunda.usage;
+          edgePlate = medida2.plate;
+          cobroEntregada = 'estandar';
+        } else {
+          discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: segunda.usage, edge_plate: medida2.plate ?? primera.plate,
+            reason: medida2.error ? 'EDGE_PLATE_UNMEASURED' : 'EDGE_PLATE' });
+          cobroDescartados.push('estandar');
+        }
+      }
+    } else {
+      console.warn(`[ImageLab][PLACA] EDGE_PLATE_NO_RETRY brand=${brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) y ${elapsed} ms gastados: se entrega con la placa declarada`);
+    }
+  }
+  const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
+  return { payload: payloadDeImagen(e, imageDataUrl, usage, plateTrace), cobro: { entregada: cobroEntregada, descartados: cobroDescartados } };
+}
+
+/**
+ * «terminar»: la respuesta del lote ocupa el lugar de la primera llamada al modelo de imagen y todo lo demás es lo
+ * de la llamada directa. No llama al constructor ni vuelve a leer la base. Un fallo de la imagen (bloqueo, sin
+ * imagen) devuelve el MISMO cuerpo de fallo que en directo; un estado ilegible, `IMAGELAB_LOTE_*` (el carril
+ * entonces repite la imagen en línea).
+ */
+async function terminarImagenDelLote(
+  body: any, lote: { modo: 'terminar'; estado: unknown; respuesta: Record<string, unknown> }, res: VercelResponse,
+): Promise<void> {
+  const t0 = Date.now();
+  const ledgerCtx = { platform: typeof body.params?.canal === 'string' ? body.params.canal : null, t0, tag: 'execute/lote' };
+  const leido = leerEstadoDeImagen(lote.estado);
+  if (leido.ok === false) { res.status(400).json({ status: 'error', error: `IMAGELAB_LOTE_ESTADO_INVALIDO: ${(leido as { error: string }).error}` }); return; }
+  const e = (leido as { estado: EstadoDeImagen }).estado;
+  const r = e.respuesta;
+  const builder = r.prompt_builder_version
+    ? { version: r.prompt_builder_version, model: r.prompt_builder_model ?? '', usage: r.prompt_builder_usage ?? null } : null;
+  const fallo: FailurePromptContext = { promptFull: e.prompt, negativePrompt: e.negative_prompt, presetId: r.preset_id, psychoId: e.psycho_id };
+  const conImagenes = e.image_urls.length > 0;
+  try {
+    let primera: ImageWithUsage;
+    try {
+      primera = imageFromResponse(lote.respuesta, 200);
+    } catch (err) {
+      // El mismo fallo que en directo: el texto que leyó el modelo viaja en el cuerpo del fallo.
+      const f = asProviderCallError(err, 'image', 'Gemini image (lote): sin respuesta.');
+      f.promptSent = appendNegative(promptDeImagen(e, null, conImagenes), e.negative_prompt);
+      throw f;
+    }
+    // Las fotos sólo se bajan si hay un segundo intento (en línea); el lote ya las leyó del bucket.
+    let fotos: InlineImage[] | null = null;
+    const imagenes = async () => {
+      if (!fotos) { const xs: InlineImage[] = []; for (const u of e.image_urls) xs.push(await fetchImageInline(u)); fotos = xs; }
+      return fotos;
+    };
+    const entrega = await entregarImagen(e, imagenes, primera, t0, String(body.brandId), 'diferido');
+    await respondAndRecord(res, 200, body, { ...entrega.payload, lote_cobro: entrega.cobro }, ledgerCtx);
+  } catch (err) {
+    await respondAndRecord(res, 500, body,
+      { ...logFailurePrompt(failurePayload(err, builder, fallo)), lote_cobro: { entregada: 'diferido', descartados: [] } }, ledgerCtx);
+  }
+}
+
+/** El bucket del lote (`VERTEX_BATCH_BUCKET`), sin `gs://` ni barra final. Vacío ⇒ el modo lote no está configurado. */
+function bucketDelLote(): string {
+  return String(process.env.VERTEX_BATCH_BUCKET ?? '').trim().replace(/^gs:\/\//, '').replace(/\/+$/, '');
+}
+
+const EXTENSION_POR_MIME: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+/** Deja una foto de referencia en el bucket del lote y devuelve su `fileData`. El nombre es el sha-256 del
+ *  contenido: la misma foto no se duplica, y el lifecycle del bucket la borra a los 7 días. */
+async function subirReferenciaAlLote(img: InlineImage): Promise<{ fileUri: string; mimeType: string }> {
+  const bucket = bucketDelLote();
+  if (!bucket) throw new Error('IMAGELAB_LOTE_NO_CONFIGURADO: falta VERTEX_BATCH_BUCKET');
+  const bytes = Buffer.from(img.data, 'base64');
+  const name = `referencias/${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION_POR_MIME[img.mimeType] ?? 'bin'}`;
+  const token = await getAccessToken();
+  const r = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=media&name=${encodeURIComponent(name)}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': img.mimeType }, body: bytes,
+  });
+  if (!r.ok) throw new Error(`IMAGELAB_LOTE_REFERENCIA: Cloud Storage respondió ${r.status} al subir ${name}: ${(await r.text().catch(() => '')).slice(0, 200)}`);
+  return { fileUri: `gs://${bucket}/${name}`, mimeType: img.mimeType };
+}
+
 // --- HTTP handler ----------------------------------------------------------
 
 const CORS = {
@@ -2931,6 +3233,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   if (!body.brandId) { res.status(400).json(failurePayload(new Error('brandId is required'), null)); return; }
+
+  // LOTE-IMAGEN (2026-10-21) — el modo lote del carril. Sin `lote`, `modo` es null y nada de esto corre.
+  const lote = leerModoLote(body.lote);
+  if (lote.modo === 'error') { res.status(400).json({ status: 'error', error: (lote as { error: string }).error }); return; }
+  if (lote.modo === 'terminar') { await terminarImagenDelLote(body, lote as { modo: 'terminar'; estado: unknown; respuesta: Record<string, unknown> }, res); return; }
+  // «preparar» sin bucket no puede dejar las fotos donde el lote las lee: se dice ANTES de pagar el constructor.
+  if (lote.modo === 'preparar' && !bucketDelLote()) {
+    res.status(503).json({ status: 'error', error: 'IMAGELAB_LOTE_NO_CONFIGURADO: falta VERTEX_BATCH_BUCKET' });
+    return;
+  }
 
   // El constructor, declarado FUERA del try: si la imagen falla después de que él corrió, su consumo
   // tiene que llegar al cuerpo del fallo. Dentro del try se perdía con la excepción.
@@ -3120,129 +3432,105 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     fallo.promptFull = finalPrompt;
 
     // Las imágenes que acompañan al prompt: la actual (editar) y las de la persona, si se la nombra.
-    const images: InlineImage[] = [];
-    if (mode === 'edit_from_current') images.push(await fetchImageInline(String(params.source_image_url)));
     // 2026-10-03 — el reparto vive en `allocateReferences` (bloque PB, con test). Con una persona, la
     // regla de siempre; con dos o más, el presupuesto del modelo. El lugar acepta también `data:image/`,
     // como la persona: el carril manda https, una prueba puede mandar la foto en línea.
     const locationRefs = alloc.location;
     const productRefs = alloc.product;
     const personaRefs = alloc.persona.flat();
-    for (const u of personaRefs) images.push(await fetchImageInline(u));
-    for (const u of locationRefs) images.push(await fetchImageInline(u));
-    for (const u of productRefs) images.push(await fetchImageInline(u));
+    // LOTE-IMAGEN (2026-10-21) — las URLs de las fotos, en el orden en que viajan. La llamada directa las baja
+    // aquí mismo, una por una, como siempre; «preparar» las deja en el bucket del lote.
+    const imageUrls: string[] = [
+      ...(mode === 'edit_from_current' ? [String(params.source_image_url)] : []),
+      ...personaRefs, ...locationRefs, ...productRefs,
+    ];
+
+    // LOTE-IMAGEN (2026-10-21) — todo lo que la imagen necesita desde aquí, en una forma que viaja por JSON. La
+    // respuesta de éxito y el segundo intento por placa salen de este estado, en directo y al terminar un lote.
+    const estado: EstadoDeImagen = {
+      v: LOTE_IMAGEN_VERSION,
+      prompt: finalPrompt,
+      // Los rótulos de las fotos: sólo viajan si hay fotos (`promptDeImagen`).
+      role_clause: imageRoleClause({
+        hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
+        personas: usedPersonas.length >= 2 ? usedPersonas.map((p, i) => ({ name: p.name, refs: alloc.persona[i].length })) : null,
+        locationName: location?.name ?? null, locationRefs: locationRefs.length,
+        productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
+        productRefs: productRefs.length,
+      }),
+      negative_prompt: built.negativePrompt,
+      aspect_ratio: built.aspectRatio,
+      image_urls: imageUrls,
+      psycho_id: built.psychoId ?? null,
+      respuesta: {
+        output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
+        preset_used:    built.presetUsed,
+        preset_id:      built.presetId,
+        brand:          built.brandName,
+        canal:          built.canal,
+        // M-3 / Unidad 1 — procedencia para el ledger del consumidor (Orchestrator path, el que usa
+        // content-run-stage vía execLab): modelo real + usage crudo de Vertex (o null).
+        model:          GEMINI_IMAGE_MODEL,
+        // BRIEF-IMG-01 fase 2 — el prompt ENTERO con el que nació esta imagen, SIEMPRE, sintetizado o
+        // no. Sin esto no hay forma de regenerar «con todo el prompt + la corrección».
+        prompt_full:            finalPrompt,
+        prompt_builder_version: builder?.version ?? null,
+        prompt_builder_model:   builder?.model ?? null,
+        prompt_builder_usage:   builder?.usage ?? null,
+        generation_mode:        mode,
+        persona_used:           personaUsed,
+        location_used:          location ? location.name : null,
+        location_refs:          locationRefs.length,
+        product_composited:     productComposited && !productInScene,
+        product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
+        // 2026-10-15 — si el producto salió de la escena para dejar sitio a la identidad, cuál y por qué.
+        product_left_scene:     alloc.product_left ? { products: productWanted!.items.map((i) => i.name), reason: 'identity_budget', budget: alloc.budget } : null,
+        // Sólo con producto en escena: sin él, la respuesta es la de siempre, byte a byte.
+        product_staging:        productStaging ?? null,
+        product_refs:           productRefs.length,
+        reference_images:       imageUrls.length,
+        // 2026-10-03 — sólo cuando se pidió `personas[]` o entraron dos o más: con el alias legacy y una
+        // persona, la respuesta es la de siempre, clave por clave.
+        personas: resolved.source === 'personas' || usedPersonas.length >= 2 ? {
+          personas_used: usedPersonas.map((p) => p.name),
+          persona_refs: alloc.persona.map((r) => r.length),
+          gaze: gazeR.gaze,
+          reference_budget: alloc.budget,
+          references_dropped: alloc.dropped,
+        } : null,
+        overlay: (overlayTrace as any).subject_framing !== undefined ? overlayTrace as RespuestaBaseDeImagen['overlay'] : null,
+      },
+    };
+
+    // LOTE-IMAGEN — «preparar»: la petición exacta de `:generateContent`, SIN llamar al modelo de imagen. Las fotos
+    // van al bucket del lote (`fileData`); el resto del cuerpo es el de la llamada directa (`cuerpoDeImagen`).
+    if (lote.modo === 'preparar') {
+      const partes: ParteDeImagen[] = [];
+      for (const u of imageUrls) partes.push({ fileData: await subirReferenciaAlLote(await fetchImageInline(u)) });
+      const peticion = cuerpoDeImagen(appendNegative(promptDeImagen(estado, null, partes.length > 0), estado.negative_prompt),
+        normalizeAspectRatio(estado.aspect_ratio), partes);
+      console.log(`[ImageLab][LOTE] preparada brand=${request.brandId} fotos=${partes.length} prompt=${finalPrompt.length} chars`);
+      await respondAndRecord(res, 200, body, {
+        status: 'prepared',
+        model: GEMINI_IMAGE_MODEL,
+        // El constructor SÍ corrió (y se cobró) al preparar: lo asienta quien llama, como en la llamada directa.
+        prompt_builder_version: builder?.version ?? null,
+        prompt_builder_model:   builder?.model ?? null,
+        prompt_builder_usage:   builder?.usage ?? null,
+        lote: { v: LOTE_IMAGEN_VERSION, peticiones: [{ id: LOTE_IMAGEN_PETICION, model: GEMINI_IMAGE_MODEL, request: peticion }], estado },
+      }, ledgerCtx);
+      return;
+    }
+
+    const images: InlineImage[] = [];
+    for (const u of imageUrls) images.push(await fetchImageInline(u));
     if (alloc.over_budget) {
       console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada sobre un presupuesto de ${alloc.budget}`);
     }
 
-    // `correction` sólo en el segundo intento por placa: va delante del prompt final, que no cambia.
-    const generar = (correction: string | null) => {
-      const prompt = [correction, finalPrompt].filter(Boolean).join(' ');
-      return images.length
-        ? vertexPredictImagenCapability({
-            prompt: [imageRoleClause({
-              hasSource: mode === 'edit_from_current', personaName: persona?.name ?? null, personaRefs: personaRefs.length,
-              personas: usedPersonas.length >= 2 ? usedPersonas.map((p, i) => ({ name: p.name, refs: alloc.persona[i].length })) : null,
-              locationName: location?.name ?? null, locationRefs: locationRefs.length,
-              productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
-              productRefs: productRefs.length,
-            }), prompt].filter(Boolean).join(' '),
-            negativePrompt: built.negativePrompt,
-            aspectRatio: built.aspectRatio,
-            images,
-          })
-        : vertexPredictImagen({
-            prompt,
-            negativePrompt: built.negativePrompt,
-            aspectRatio:    built.aspectRatio,
-          });
-    };
-    let { image_data_url: imageDataUrl, usage } = await generar(null);
-
-    // ── PLACA (2026-10-10) — se mide la imagen; con placa y con tiempo, UN segundo intento que nombra el
-    // borde. Se entrega la mejor de las dos; la descartada viaja en `discarded_attempts` con su consumo,
-    // para que el consumidor la asiente: se generó y se cobró. Sin placa, la respuesta es la de siempre.
-    const medida1 = await edgePlateOfImage(imageDataUrl);
-    if (medida1.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED brand=${request.brandId}: ${medida1.error}`);
-    let edgePlate: EdgePlate | null = medida1.plate;
-    const discardedAttempts: Array<{ model: string; usage: Record<string, number> | null; edge_plate: EdgePlate; reason: string }> = [];
-    if (edgePlate) {
-      const elapsed = Date.now() - t0Handler;
-      if (edgePlateRetryAllowed(elapsed)) {
-        console.warn(`[ImageLab][PLACA] brand=${request.brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) a los ${elapsed} ms: segundo intento`);
-        const primera = { image_data_url: imageDataUrl, usage, plate: edgePlate };
-        let segunda: ImageWithUsage | null = null;
-        try {
-          segunda = await generar(edgePlateRetryClause(edgePlate));
-        } catch (err) {
-          // El segundo intento falló: se entrega la primera, con su placa declarada. Si el proveedor
-          // reportó consumo del intento fallido, viaja igual: pudo cobrarse.
-          const u = (err as any)?.usage ?? null;
-          console.warn(`[ImageLab][PLACA] EDGE_PLATE_RETRY_FAILED brand=${request.brandId}: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
-          if (u) discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: u, edge_plate: primera.plate, reason: 'EDGE_PLATE_RETRY_FAILED' });
-        }
-        if (segunda) {
-          const medida2 = await edgePlateOfImage(segunda.image_data_url);
-          if (medida2.error) console.warn(`[ImageLab][PLACA] EDGE_PLATE_UNMEASURED (segundo intento) brand=${request.brandId}: ${medida2.error}`);
-          // La segunda gana si no tiene placa o si la suya es menor; si no, se entrega la primera.
-          if (!medida2.error && edgePlateSize(medida2.plate) < edgePlateSize(primera.plate)) {
-            discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: primera.usage, edge_plate: primera.plate, reason: 'EDGE_PLATE' });
-            imageDataUrl = segunda.image_data_url;
-            usage = segunda.usage;
-            edgePlate = medida2.plate;
-          } else {
-            discardedAttempts.push({ model: GEMINI_IMAGE_MODEL, usage: segunda.usage, edge_plate: medida2.plate ?? primera.plate,
-              reason: medida2.error ? 'EDGE_PLATE_UNMEASURED' : 'EDGE_PLATE' });
-          }
-        }
-      } else {
-        console.warn(`[ImageLab][PLACA] EDGE_PLATE_NO_RETRY brand=${request.brandId} placa en ${edgePlate.sides.join('+')} (${edgePlateSize(edgePlate)} %) y ${elapsed} ms gastados: se entrega con la placa declarada`);
-      }
-    }
-    const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
-
-    await respondAndRecord(res, 200, body, {
-      output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
-      image_data_url: imageDataUrl,
-      preset_used:    built.presetUsed,
-      preset_id:      built.presetId,
-      brand:          built.brandName,
-      canal:          built.canal,
-      // M-3 / Unidad 1 — procedencia para el ledger del consumidor (Orchestrator path, el que usa
-      // content-run-stage vía execLab): modelo real + usage crudo de Vertex (o null).
-      model:          GEMINI_IMAGE_MODEL,
-      usage,
-      // BRIEF-IMG-01 fase 2 — el prompt ENTERO con el que nació esta imagen, SIEMPRE, sintetizado o
-      // no. Sin esto no hay forma de regenerar «con todo el prompt + la corrección».
-      prompt_full:            finalPrompt,
-      prompt_builder_version: builder?.version ?? null,
-      prompt_builder_model:   builder?.model ?? null,
-      prompt_builder_usage:   builder?.usage ?? null,
-      generation_mode:        mode,
-      persona_used:           personaUsed,
-      location_used:          location ? location.name : null,
-      location_refs:          locationRefs.length,
-      product_composited:     productComposited && !productInScene,
-      product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
-      // 2026-10-15 — si el producto salió de la escena para dejar sitio a la identidad, cuál y por qué.
-      ...(alloc.product_left ? { product_left_scene: { products: productWanted!.items.map((i) => i.name), reason: 'identity_budget', budget: alloc.budget } } : {}),
-      // Sólo con producto en escena: sin él, la respuesta es la de siempre, byte a byte.
-      ...(productStaging ? { product_staging: productStaging } : {}),
-      product_refs:           productRefs.length,
-      reference_images:       images.length,
-      // 2026-10-03 — sólo cuando se pidió `personas[]` o entraron dos o más: con el alias legacy y una
-      // persona, la respuesta es la de siempre, clave por clave.
-      ...(resolved.source === 'personas' || usedPersonas.length >= 2 ? {
-        personas_used: usedPersonas.map((p) => p.name),
-        persona_refs: alloc.persona.map((r) => r.length),
-        gaze: gazeR.gaze,
-        reference_budget: alloc.budget,
-        references_dropped: alloc.dropped,
-      } : {}),
-      ...overlayTrace,
-      ...plateTrace,
-      status:         'ok',
-    }, ledgerCtx);
+    const primera = await generarImagen(estado, images, null);
+    const entrega = await entregarImagen(estado, async () => images, primera, t0Handler, String(request.brandId), 'estandar');
+    await respondAndRecord(res, 200, body, entrega.payload, ledgerCtx);
   } catch (err) {
     await respondAndRecord(res, 500, body, logFailurePrompt(failurePayload(err, builder, fallo)), ledgerCtx);
   }

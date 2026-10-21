@@ -138,11 +138,17 @@ await ok('edgePlateSize: 0 sin placa, la peor con placa', () => {
   assert.equal(M.edgePlateSize({ sides: ['top', 'bottom'], pct: { top: 8, bottom: 15, left: 0, right: 0 }, width: 1, height: 1 }), 15);
 });
 await ok('el handler genera como mucho DOS veces y declara la placa sólo cuando la hubo', () => {
-  const h = source.slice(source.indexOf('const generar = (correction'), source.indexOf('const plateTrace'));
-  assert.equal((h.match(/await generar\(/g) ?? []).length, 2, 'una llamada inicial y un único reintento');
+  // 2026-10-21 (LOTE-IMAGEN) — §14.3: la primera imagen llega hecha a `entregarImagen` (la llamada directa la genera
+  // en el handler; «terminar» la trae del lote) y la placa decide ahí. Lo que tiene que ser cierto no cambia: como
+  // mucho DOS imágenes, la inicial y un único reintento.
+  const h = source.slice(source.indexOf('const generar = async (correction'), source.indexOf('const plateTrace'));
+  assert.equal((h.match(/await generar\(/g) ?? []).length, 1, 'un único reintento dentro de la entrega');
+  const handler = source.slice(source.indexOf('export default async function handler('));
+  assert.equal((handler.match(/await generarImagen\(/g) ?? []).length, 1, 'una sola llamada inicial en el handler');
+  assert.equal((source.match(/generarImagen\(/g) ?? []).length, 3, 'la definición, la inicial y la del reintento: nada más genera');
   assert.ok(h.includes('edgePlateRetryAllowed(elapsed)'), 'el reintento depende del tiempo gastado');
   assert.ok(source.includes('const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};'));
-  assert.ok(source.includes('...plateTrace,'), 'la traza viaja en la respuesta');
+  assert.ok(source.includes('payloadDeImagen(e, imageDataUrl, usage, plateTrace)') && source.includes('    ...placa,\n    status: \'ok\','), 'la traza viaja en la respuesta');
 });
 await ok('una imagen que no se puede medir NO cambia la respuesta (arnés: «AAAA» no es un PNG)', async () => {
   const restore = silence();

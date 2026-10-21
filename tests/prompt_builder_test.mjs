@@ -343,7 +343,12 @@ ok('same_scene: el handler exige la imagen actual y el constructor, y la imagen 
   assert.match(source, /mode === 'edit_from_current' \|\| mode === 'same_scene'\) && !params\.source_image_url/);
   assert.match(source, /SAME_SCENE_WITHOUT_BUILDER/);
   assert.match(source, /\.\.\.\(mode === 'same_scene' \? \{ images: \[await fetchImageInline\(String\(params\.source_image_url\)\)\] \} : \{\}\)/);
-  assert.match(source, /if \(mode === 'edit_from_current'\) images\.push\(await fetchImageInline/, 'al generador sólo la manda editar');
+  // 2026-10-21 (LOTE-IMAGEN) — §14.3: la lista de fotos del generador se arma UNA vez (`imageUrls`, que la llamada
+  // directa baja y «preparar» sube al bucket). Lo que tiene que ser cierto no cambia: la imagen actual entra en esa
+  // lista sólo al editar, y es la única vía por la que una foto llega al generador.
+  assert.match(source, /\.\.\.\(mode === 'edit_from_current' \? \[String\(params\.source_image_url\)\] : \[\]\),/, 'al generador sólo la manda editar');
+  assert.equal((source.match(/source_image_url\)\)/g) ?? []).length, 1, 'la imagen actual sólo se baja para el constructor (same_scene)');
+  assert.match(source, /for \(const u of imageUrls\) images\.push\(await fetchImageInline\(u\)\);/, 'el generador recibe exactamente la lista');
 });
 
 console.log(`\n✅ prompt_builder_test — ${n} bloques OK`);

@@ -30,3 +30,6 @@ _releases/
 releases/**/*.zip
 releases/**/*.sha256
 
+
+# Directorio temporal de tests/imagen_en_lote_test.mjs (se borra al terminar)
+.lote-test-*/
