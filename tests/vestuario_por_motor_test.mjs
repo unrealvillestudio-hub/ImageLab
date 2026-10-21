@@ -157,7 +157,7 @@ await ok('lo nuevo no nombra marcas ni personas', () => {
   for (const lit of ['Neurone', 'Patricia', 'Lucien', 'ForumPHs', 'Unrealville', 'salon']) assert.ok(!nuevo.includes(lit), lit);
 });
 await ok('lo nuevo no usa formas voseantes', () => {
-  assert.ok(!/\b(decidí|tenés|podés|querés|hacé|mirá|fijate|usá|poné|sabés|elegí)\b/i.test(nuevo));
+  assert.ok(!/(?<!\p{L})(decidí|tenés|podés|querés|hacé|mirá|fijate|usá|poné|sabés|elegí)(?!\p{L})/iu.test(nuevo));
 });
 
 console.log(`\n${n} ok · 0 fail`);

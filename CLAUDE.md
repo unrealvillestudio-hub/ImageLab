@@ -44,7 +44,7 @@ Antes de cualquier acción en este repositorio, Claude Code DEBE cargar y obedec
    > sesión **trabó a CC**: leyó «nunca por CC» como imperativo vigente. Fuente de verdad:
    > `https://unrlvl-context.vercel.app/protocols/CC_PROTOCOL.md` §1 + «Flujo de entrega de context
    > files». Los `CLAUDE.md` de cada repo **sólo apuntan** al protocolo; cuando duplican una regla,
-   > divergen — que es exactamente lo que pasó acá.
+   > divergen — que es exactamente lo que pasó aquí.
 
 3. **VERIFICACIÓN REFORZADA POR COMPLEJIDAD:** cambios que afecten `lab_jobs`, `lab_configs`, Edge Functions, o el flujo del pipeline requieren mensaje de verificación EXPLÍCITO a Sam antes de commitear (objetivo, pasos, archivos, repos y EFs afectados), porque un error se propaga aguas abajo a CopyLab/ImageLab/Meta y a todas las marcas. Reportar al final con el formato de CC_PROTOCOL (incluida PRESERVACIÓN DE CONTEXTO).
 

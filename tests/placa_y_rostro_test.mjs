@@ -224,7 +224,7 @@ await ok('lo nuevo no nombra marcas, personas ni canales', () => {
   }
 });
 await ok('lo nuevo no usa formas voseantes', () => {
-  assert.ok(!/\b(decidí|tenés|podés|querés|hacé|mirá|fijate|usá|poné|sabés)\b/i.test(nuevo));
+  assert.ok(!/(?<!\p{L})(decidí|tenés|podés|querés|hacé|mirá|fijate|usá|poné|sabés)(?!\p{L})/iu.test(nuevo));
 });
 
 console.log(`\n${n} ok · 0 fail`);

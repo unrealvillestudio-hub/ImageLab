@@ -11,13 +11,13 @@
  * quedaron bloqueadas por eso el mismo día.
  *
  * LA DECISIÓN (Sam). La generación deja de producir texto (cláusula del eje en `api/execute.ts`,
- * bloque C) y el texto se compone acá, por código, sobre la imagen limpia. Un generador estocástico
+ * bloque C) y el texto se compone aquí, por código, sobre la imagen limpia. Un generador estocástico
  * no vuelve a tocar una letra.
  *
  * MOTOR ELEGIDO Y POR QUÉ. `satori` (HTML/CSS → SVG) + `@resvg/resvg-js` (SVG → PNG). Es el mismo
  * par que hay debajo de `@vercel/og`, el generador de OG-images del stack donde ImageLab ya vive
  * (Vercel, runtime Node); se usan directos y no vía `@vercel/og` porque éste está pensado para el
- * runtime Edge y acá el handler es Node (`VercelRequest/VercelResponse`, igual que `/api/execute`).
+ * runtime Edge y aquí el handler es Node (`VercelRequest/VercelResponse`, igual que `/api/execute`).
  * satori vectoriza el texto a `<path>`, así que el PNG no depende de las fuentes del sistema.
  *
  * DETERMINISMO. El bloque PURO de abajo (COMPOSITOR:BEGIN/END) resuelve tokens → estilo → escena
@@ -28,7 +28,7 @@
  * LAS TRES REGLAS DURAS DEL BRIEF, y dónde se cumplen:
  *   (a) el texto del overlay sale del COPY YA JUZGADO. Este endpoint NO escribe ni reescribe texto:
  *       recibe `headline` / `subheadline` y los compone VERBATIM. Quien los deriva de la pieza es
- *       `content-run-stage` (bloque puro COMPOSITOR-TEXTO). Acá no hay ninguna rama que genere,
+ *       `content-run-stage` (bloque puro COMPOSITOR-TEXTO). Aquí no hay ninguna rama que genere,
  *       recorte, traduzca o complete texto: si no entra, no sale.
  *   (b) tipografía, paleta y posición son DATO POR MARCA. Salen de tres tablas que ya existen o se
  *       siembran: `brand_typography` (familia + import), `brand_palette` (hex por rol) y
@@ -598,7 +598,7 @@ export function fitFontSizePct(
   return { sizePct: Number(steps[steps.length - 1].size_pct), overflow: true };
 }
 
-/** `#RRGGBB` (o `#RGB`) + alfa → `rgba()`. El hex sale de `brand_palette`; acá no hay ninguno. */
+/** `#RRGGBB` (o `#RGB`) + alfa → `rgba()`. El hex sale de `brand_palette`; aquí no hay ninguno. */
 export function hexToRgba(hex: string, alpha = 1): string {
   const h = String(hex ?? '').trim().replace(/^#/, '');
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
@@ -619,11 +619,11 @@ export function hexToRgba(hex: string, alpha = 1): string {
  *
  * Los ROLES los nombra la MARCA en sus propios tokens; el motor sólo los sigue. Dos marcas con
  * catálogos de rol disjuntos —una que llama a sus colores por material y otra por función— componen
- * con este mismo código sin que aparezca acá el nombre de ninguna. Esa indirección es lo que hace
+ * con este mismo código sin que aparezca aquí el nombre de ninguna. Esa indirección es lo que hace
  * que el motor sobreviva a la marca N+1; el test lo verifica grepeando este bloque.
  *
  * FAIL-LOUD ACUMULATIVO: junta TODO lo que falta y lo reporta junto (un solo viaje para el que
- * siembra el dato), y no compone. Un default de fuente o de color acá anularía el brief entero.
+ * siembra el dato), y no compone. Un default de fuente o de color aquí anularía el brief entero.
  */
 export function resolveOverlayStyle(args: {
   tokens: Record<string, any>;
@@ -686,7 +686,7 @@ export function resolveOverlayStyle(args: {
     const raw = slot === 'headline' ? args.text?.headline : args.text?.subheadline;
     const value = String(raw ?? '');
     // Ranura sin texto = ranura que no se dibuja. `subheadline` es opcional POR CONTRATO: una pieza
-    // sin bajada compone igual. `headline` vacío no llega acá (lo rechaza el handler).
+    // sin bajada compone igual. `headline` vacío no llega aquí (lo rechaza el handler).
     if (!value.trim()) continue;
 
     const st = ((t.typography ?? {})[slot] ?? {}) as Record<string, any>;
@@ -2937,7 +2937,7 @@ export function fitCarouselCoverArea(args: { chrome: CarouselChrome; metrics?: F
 // EJE (código): QUÉ se evita —la caja del bloque de texto no toca la caja de una cara, con un margen— y CÓMO se
 // elige —la primera ancla candidata libre; si ninguna, la de menor solape—. INSTANCIA (dato): si se aplica, en
 // qué anclas se prueba y con qué margen (`layout.avoid_faces`). Las cajas de las caras las mide un modelo de
-// visión fuera de este bloque; acá entran como dato (0..1 sobre el ancho y el alto).
+// visión fuera de este bloque; aquí entran como dato (0..1 sobre el ancho y el alto).
 export interface FaceBox { x0: number; y0: number; x1: number; y1: number }
 
 /** Candidatas por defecto: la declarada y luego las otras dos filas de SU MISMA columna (la marca eligió un lado
@@ -4007,8 +4007,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
     // de BRIEF 7 sigue viva para el caso en que no habría NADA que dibujar, y se evalúa abajo,
-    // cuando los tokens ya dijeron si hay identidad. Lo que no cambia: acá no se escribe texto.
-    // F3 — una lámina de carrusel con fondo de superficie no lleva foto: la imagen no se exige acá y
+    // cuando los tokens ya dijeron si hay identidad. Lo que no cambia: aquí no se escribe texto.
+    // F3 — una lámina de carrusel con fondo de superficie no lleva foto: la imagen no se exige aquí y
     // se vuelve a exigir abajo si la marca no tiene `tokens.carousel` (sin cromo no hay superficie).
     if (!hasImage && carouselIn?.background !== 'surface') {
       throw new CompositorError('COMPOSITOR_IMAGE_MISSING', 'falta image_data_url o image_url (la imagen limpia a componer)', 400);
@@ -4149,7 +4149,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     // CAPA DE PRODUCTO — `products: [{ image_url, name? }]`. Lo resuelve el carril desde la ficha
-    // (`product_blueprints`); acá sólo se baja, se mide y se pega.
+    // (`product_blueprints`); aquí sólo se baja, se mide y se pega.
     const productsIn = (Array.isArray(body.products) ? body.products : [])
       .filter((p: any) => p && typeof p.image_url === 'string' && /^https?:\/\//.test(p.image_url));
     const prodPick = resolveProductLayer({ tokens: picked.tokens, textAnchor: style.slots.headline ? style.layout.anchor : null, count: productsIn.length });

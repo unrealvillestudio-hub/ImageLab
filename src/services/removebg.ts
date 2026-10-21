@@ -26,7 +26,7 @@ export async function removeBg(params: {
     // The client normalizes images first (see prepareImageForUpload), so this is
     // a defensive fallback message.
     if (res.status === 413) {
-      throw new Error('La imagen es demasiado grande para procesar. Probá con una imagen más liviana.');
+      throw new Error('La imagen es demasiado grande para procesar. Prueba con una imagen más liviana.');
     }
     let detail = '';
     try { detail = (await res.json())?.error ?? ''; } catch { detail = await res.text().catch(() => ''); }

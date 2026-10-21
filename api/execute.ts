@@ -119,7 +119,7 @@ const UPSTREAM_TIMEOUT_MS = 55_000;
 //     sirvió (bloqueo de seguridad, sin imagen, sin texto). Esa respuesta reporta consumo y se
 //     devuelve tal cual: el productor no inventa un esquema ni fabrica ceros.
 //
-// Ninguna regla de facturación vive acá: este archivo informa lo que pasó; el asiento lo decide el
+// Ninguna regla de facturación vive aquí: este archivo informa lo que pasó; el asiento lo decide el
 // carril con la tarifa, que es dato.
 //
 // ── EL PROMPT DEL FALLO (2026-10-05) ──────────────────────────────────────────────────────────────
@@ -715,7 +715,7 @@ async function sb<T>(path: string): Promise<T | null> {
     const data = await res.json();
     const row = Array.isArray(data) ? (data[0] ?? null) : data;
     if (row == null) {
-      // Ausencia legítima: informativo, no error. Un ERROR acá enseñaría a ignorar los ERROR.
+      // Ausencia legítima: informativo, no error. Un ERROR aquí enseñaría a ignorar los ERROR.
       console.log(`[ImageLab][sb] sin filas en "${where}" (ausencia legítima) · path=${path}`);
     }
     return row;
@@ -746,7 +746,7 @@ const FALLBACK_NEGATIVE = 'blurry, low quality, amateur, stock photo look, water
 // --- Canal: normalización (#95-D) -----------------------------------------
 //
 // ImageLab es el ÚNICO punto donde convergen los tres caminos, así que el vocabulario visual se
-// normaliza acá y no en cada emisor:
+// normaliza aquí y no en cada emisor:
 //
 //   [A] UI            → elige el canal en la interfaz
 //   [B] Orchestrator → lab-worker  → `normalizeCanal()` sube a MAYÚSCULAS y cae a INSTAGRAM_FEED
@@ -791,7 +791,7 @@ function normalizeCanal(canal: string | null | undefined): string {
  *   · `or=(...)` haría una sola llamada, pero **ese operador no se usa en ninguna parte de este
  *     stack**: sería sintaxis de PostgREST sin precedente verificado. Este ecosistema ya perdió
  *     tiempo con un `order=` por columna inexistente que se tragaba en silencio (10-jul); no vale
- *     la pena ahorrar un round-trip a cambio de estrenar un operador acá.
+ *     la pena ahorrar un round-trip a cambio de estrenar un operador aquí.
  * `eq` es el que usa todo el archivo y está probado. La segunda llamada solo ocurre en el miss.
  */
 async function loadImagelabPreset(brandId: string, canal: string): Promise<any | null> {
@@ -993,7 +993,7 @@ export interface VisualSpec {
   preset_source: 'brand' | 'global' | 'none';
 }
 
-/** Primer valor no vacío. `''` y `null` cuentan como ausencia; `0` y `false` no aplican acá. */
+/** Primer valor no vacío. `''` y `null` cuentan como ausencia; `0` y `false` no aplican aquí. */
 function firstNonEmpty(...vals: unknown[]): string | null {
   for (const v of vals) {
     if (v === null || v === undefined) continue;
@@ -1032,7 +1032,7 @@ export function mergeVisualSpec(
   }
 
   // Negativo ACUMULATIVO, no excluyente: lo prohibido por la marca sigue prohibido aunque el canal
-  // agregue lo suyo. Un `??` acá dejaría caer el candado de marca al aparecer un preset.
+  // agregue lo suyo. Un `??` aquí dejaría caer el candado de marca al aparecer un preset.
   // BRIEF 7 — el eje va PRIMERO y siempre: el negativo del motor no depende de que una marca lo
   // haya declarado. El dedup por término de abajo hace que una marca que ya prohibía "text" (hoy:
   // NeuroneSCF, VivoseMask, VizosCosmetics, UnrealvilleStudio, LucienSael) no lo duplique.
@@ -1147,7 +1147,7 @@ export function composeVisualPrompt(
 //
 // LO QUE HACE ESTE BLOQUE: decide si hay que sintetizar, arma el mensaje para el modelo de texto,
 // resuelve si la PERSONA de la marca aparece, y garantiza que las cláusulas del motor sobreviven a la
-// síntesis. La llamada al modelo vive FUERA (es I/O); acá sólo hay forma y decisión, y el test
+// síntesis. La llamada al modelo vive FUERA (es I/O); aquí sólo hay forma y decisión, y el test
 // `tests/prompt_builder_test.mjs` la extrae y la ejecuta tal cual se despliega.
 //
 // MULTIMARCA: cero marcas, cero canales, cero idiomas. La persona llega como DATO (`params.persona`,
@@ -1213,7 +1213,7 @@ export interface PromptPersona {
 }
 
 /** Una locación real de la marca (`public.location_blueprints`, enlazada por `public.brand_locations`).
- *  Llega resuelta por el carril: acá no se decide cuál, sólo cómo se cuenta al modelo. */
+ *  Llega resuelta por el carril: aquí no se decide cuál, sólo cómo se cuenta al modelo. */
 export interface PromptLocation {
   name: string;
   description: string;
