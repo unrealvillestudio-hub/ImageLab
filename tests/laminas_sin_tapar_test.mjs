@@ -158,7 +158,7 @@ console.log('\n── 2 · los tokens son dato validado ──');
 test('2a · ausentes o apagados no existen; encendidos, con sus valores por defecto', () => {
   assert.equal(avoidOf({ carousel: { avoid_faces: { enabled: false } } }), null);
   const a = avoidOf({ carousel: { avoid_faces: { enabled: true } } });
-  assert.deepEqual(a, { marginPct: 2, products: null, placements: ['center', 'bottom', 'top'], columnPcts: [], fallback: [], insetMinPct: 25, bandAlpha: null });
+  assert.deepEqual(a, { marginPct: 2, products: null, placements: ['center', 'bottom', 'top'], columnPcts: [], fallback: [], insetMinPct: 25, bandAlpha: null, insetAlternate: false });
   const c = avoidOf({ carousel: { avoid_faces: { enabled: true, column_pct: 55, fallback: ['inset', 'band'], band: { alpha: 0.9 } }, avoid_products: { enabled: true } } });
   assert.deepEqual(c.placements, ['center', 'bottom', 'top', 'center_left', 'bottom_left', 'top_left', 'center_right', 'bottom_right', 'top_right']);
   assert.deepEqual(c.products, { marginPct: 1 });
@@ -287,6 +287,30 @@ test("4b · 'inset' que no cabe ⇒ el siguiente recurso ('band'): banda de supe
   const sc = sceneOf(pick.fit.chrome, BODY_TEXT, pol);
   const bands = findAll(sc, (n) => n.props?.style?.backgroundColor === b.color);
   assert.equal(bands.length, 1); assert.equal(bands[0].props.style.width, W); assert.equal(bands[0].props.style.top, b.y0);
+});
+test("4a bis · 1.11.1 · con `inset_alternate`, las láminas pares llevan el texto abajo y la foto arriba; las impares, como en 1.11.0", () => {
+  const pol = M.deepMergeTokens(POLICY, { carousel: { avoid_faces: { fallback: ['inset'], inset_alternate: true } } });
+  const ch = chromeN1(BODY, BODY_TEXT, pol);
+  const avoid = avoidOf(pol);
+  assert.equal(avoid.insetAlternate, true);
+  const par = M.chooseCarouselPlacement({ chrome: ch, faces: everywhere, avoid, slideIndex: 4 });
+  assert.equal(par.report.fallback, 'inset'); assert.equal(par.report.inset_text, 'bottom'); assert.equal(par.report.placement_used, 'bottom');
+  assert.match(par.warnings[0], /el texto abajo sobre la superficie de la marca y la foto reducida arriba/);
+  const rp = M.carouselBlockRect(par.fit.chrome, null).rect;
+  assert.ok(par.fit.chrome.inset.y1 < rp.y0, 'la foto va arriba del texto');
+  const impar = M.chooseCarouselPlacement({ chrome: ch, faces: everywhere, avoid, slideIndex: 5 });
+  assert.equal(impar.report.inset_text, 'top');
+  const ri = M.carouselBlockRect(impar.fit.chrome, null).rect;
+  assert.ok(impar.fit.chrome.inset.y0 > ri.y1, 'la foto va debajo del texto');
+  // Sin el token, idéntico a 1.11.0 aunque la lámina sea par.
+  const antes = M.chooseCarouselPlacement({ chrome: chromeN1(BODY, BODY_TEXT, M.deepMergeTokens(POLICY, { carousel: { avoid_faces: { fallback: ['inset'] } } })),
+    faces: everywhere, avoid: avoidOf(M.deepMergeTokens(POLICY, { carousel: { avoid_faces: { fallback: ['inset'] } } })), slideIndex: 4 });
+  assert.equal(antes.report.inset_text, 'top');
+  // Mal escrito, falla nombrando.
+  assert.throws(() => avoidOf(M.deepMergeTokens(POLICY, { carousel: { avoid_faces: { inset_alternate: 'si' } } })), /inset_alternate/);
+});
+test('4a ter · 1.11.1 · el cableado pasa el número de la lámina a la colocación', () => {
+  assert.match(SRC, /chooseCarouselPlacement\(\{ chrome: area\.chrome, metrics, avoid, slideIndex: carouselIn!\.index,/);
 });
 test('4c · sin último recurso aplicable: la colocación que menos tapa, y se dice', () => {
   const ch = chromeN1(BODY, BODY_TEXT, POLICY);

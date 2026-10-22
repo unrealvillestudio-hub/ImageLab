@@ -179,7 +179,12 @@ declare const process: { env: Record<string, string | undefined> };
 //           los productos, envases y objetos protagonistas, y cuentan como una cara (lámina y overlay).
 //         Sin los tokens, la lámina y el overlay salen idénticos a 1.10.0. Si la detección falla, se compone como en
 //         1.10.0 y se dice. `meta.carousel.avoid` dice qué se detectó, qué se eligió y por qué.
-export const COMPOSITOR_VERSION = '1.11.0';
+//   1.11.1 (2026-10-22) — EL 'INSET' NO SE VUELVE PATRÓN (Sam, 2026-10-22: «me gusta el recurso de las láminas 4 y 5
+//         mientras aporte variedad y no un patrón»). Medido en 3c58d5a1 tras 1.11.0: tres láminas con 'inset', las tres
+//         con el texto arriba. Token de DATO `carousel.avoid_faces.inset_alternate` (booleano): las láminas pares llevan
+//         el texto abajo y la foto arriba; las impares, como en 1.11.0. Determinista por número de lámina. Sin el token,
+//         idéntico a 1.11.0. `meta.carousel.avoid.inset_text` dice de qué lado quedó el texto.
+export const COMPOSITOR_VERSION = '1.11.1';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -3397,6 +3402,8 @@ export interface CarouselAvoid {
   // Anchos de columna (% del ancho interior), en orden de preferencia: el más ancho primero suele romper menos líneas.
   placements: string[]; columnPcts: number[];
   fallback: Array<'inset' | 'band'>; insetMinPct: number; bandAlpha: number | null;
+  // 1.11.1 — el 'inset' alterna de lado por lámina (texto arriba en las impares, abajo en las pares).
+  insetAlternate: boolean;
 }
 const CAROUSEL_PLACE_RE = /^(top|center|bottom)(?:_(left|right))?$/;
 const CAROUSEL_FALLBACKS = new Set(['inset', 'band']);
@@ -3468,6 +3475,11 @@ export function resolveCarouselAvoid(tokens: Record<string, any> | null | undefi
     if (!Number.isFinite(al) || al <= 0 || al > 1) missing.push(`carousel.avoid_faces.band.alpha (0 < x ≤ 1; obligatoria con fallback 'band'; llegó ${JSON.stringify(a?.band)})`);
     else bandAlpha = al;
   }
+  // 1.11.1 — `inset_alternate`: booleano. Ausente ⇒ false, y el 'inset' es el de 1.11.0 (texto siempre arriba).
+  if (a?.inset_alternate != null && typeof a.inset_alternate !== 'boolean') {
+    missing.push(`carousel.avoid_faces.inset_alternate=${JSON.stringify(a.inset_alternate)} (true o false)`);
+  }
+  const insetAlternate = a?.inset_alternate === true;
   let products: CarouselAvoid['products'] = null;
   if (!off(ap)) {
     const p = ap as Record<string, any>;
@@ -3480,7 +3492,7 @@ export function resolveCarouselAvoid(tokens: Record<string, any> | null | undefi
     throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
       `faltan datos de marca para componer la lámina de carrusel: ${missing.join(' · ')}.`);
   }
-  return { marginPct, products, placements, columnPcts, fallback: [...new Set(fbRaw)] as Array<'inset' | 'band'>, insetMinPct, bandAlpha };
+  return { marginPct, products, placements, columnPcts, fallback: [...new Set(fbRaw)] as Array<'inset' | 'band'>, insetMinPct, bandAlpha, insetAlternate };
 }
 
 /** Cajas medidas sobre la FOTO (0..1) → cajas sobre el LIENZO de la lámina (0..1), con el `objectFit: cover` con que la
@@ -3552,6 +3564,8 @@ function withAlphaRgb(color: string, alpha: number): string {
  */
 export function chooseCarouselPlacement(args: {
   chrome: CarouselChrome; metrics?: FitMetrics | null; faces: FaceBox[]; products?: FaceBox[] | null; avoid: CarouselAvoid;
+  /** 1.11.1 — el número de la lámina (1..N). Sólo lo usa el 'inset' con `inset_alternate`. */
+  slideIndex?: number | null;
 }): {
   fit: ReturnType<typeof fitCarouselContent>; warnings: string[];
   report: {
@@ -3636,16 +3650,24 @@ export function chooseCarouselPlacement(args: {
   const least = keep.reduce((acc, c) => (c.overlap_pct < acc.overlap_pct ? c : acc), keep[0]);
   for (const mode of avoid.fallback) {
     if (mode === 'inset') {
-      const top = all.find((c) => c.placement === 'top') ?? evalC({ code: 'top', col: null });
-      const y0 = r2(M + top.m.top + top.m.gap + top.m.mid + top.m.gap);
-      const y1 = r2(H - M - top.m.foot - top.m.gap);
+      // 1.11.1 — VARIEDAD, NO PATRÓN (Sam, 2026-10-22: «me gusta el recurso… mientras aporte variedad y no un patrón»).
+      // Medido ese día en 3c58d5a1: tres láminas con 'inset', las tres con el texto arriba. Con `inset_alternate`, las
+      // láminas pares llevan el texto abajo y la foto arriba; las impares, como en 1.11.0. Determinista por número de
+      // lámina: recomponer no cambia el lado, y dos láminas seguidas con 'inset' nunca repiten disposición.
+      const abajo = avoid.insetAlternate && Number.isInteger(args.slideIndex) && (args.slideIndex as number) % 2 === 0;
+      const lado = abajo ? 'bottom' : 'top';
+      const c0 = all.find((c) => c.placement === lado) ?? evalC({ code: lado, col: null });
+      const y0 = abajo ? r2(M + c0.m.top + c0.m.gap) : r2(M + c0.m.top + c0.m.gap + c0.m.mid + c0.m.gap);
+      const y1 = abajo ? r2(H - M - c0.m.foot - c0.m.gap - c0.m.mid - c0.m.gap) : r2(H - M - c0.m.foot - c0.m.gap);
       const pct = Math.round((10000 * (y1 - y0)) / H) / 100;
-      if (top.fit.report.overflow || pct < avoid.insetMinPct) continue;
+      if (c0.fit.report.overflow || pct < avoid.insetMinPct) continue;
       const inset = { x0: M, y0, x1: r2(W - M), y1 };
       const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; la menor tapa ${least.overlap_pct} %. ` +
-        `Último recurso 'inset': el texto arriba sobre la superficie de la marca y la foto reducida debajo (${pct} % del alto)`;
-      return { fit: { ...top.fit, chrome: { ...top.fit.chrome, inset } }, warnings: [`CAROUSEL_PHOTO_INSET_FOR_SUBJECT: ${reason}`],
-        report: report(top, 'inset', reason, { inset }) };
+        (abajo
+          ? `Último recurso 'inset': el texto abajo sobre la superficie de la marca y la foto reducida arriba (${pct} % del alto)`
+          : `Último recurso 'inset': el texto arriba sobre la superficie de la marca y la foto reducida debajo (${pct} % del alto)`);
+      return { fit: { ...c0.fit, chrome: { ...c0.fit.chrome, inset } }, warnings: [`CAROUSEL_PHOTO_INSET_FOR_SUBJECT: ${reason}`],
+        report: report(c0, 'inset', reason, { inset, inset_text: lado }) };
     }
     if (mode === 'band' && avoid.bandAlpha != null) {
       const band = { y0: Math.max(0, r2(least.rect.y0 - least.m.gap)), y1: Math.min(H, r2(least.rect.y1 + least.m.gap)) };
@@ -4530,7 +4552,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
         if (fc.faces) {
           const { width: cw, height: ch } = area.chrome.canvas;
-          const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid,
+          const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid, slideIndex: carouselIn!.index,
             faces: coverMapBoxes(fc.faces, slideDims.width, slideDims.height, cw, ch),
             products: coverMapBoxes(fc.products ?? [], slideDims.width, slideDims.height, cw, ch) });
           fit = pick.fit;
