@@ -1,4 +1,4 @@
-// 1.12.0 — EL TITULAR CABE EN EL ALTO, EN CUALQUIER PROPORCIÓN. Test del bloque PURO y del cableado.
+// 1.13.0 — EL TITULAR CABE EN EL ALTO, EN CUALQUIER PROPORCIÓN. Test del bloque PURO y del cableado.
 //
 // EL CASO. El carril va a pedir portadas 16:9 (la proporción a la que una red profesional recorta la portada de un
 // artículo). Los tamaños del overlay salen del ANCHO y el escalón se elige por caracteres: en un lienzo apaisado un
