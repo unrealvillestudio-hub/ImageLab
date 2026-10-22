@@ -165,7 +165,21 @@ declare const process: { env: Record<string, string | undefined> };
 //         Campo opcional `identity_role`: el color de la franja de identidad (el sello a sangre del borde). Sólo su
 //         color de siempre (`identity.palette`) o los accent con los que la marca resalta; cualquier otro se ignora y
 //         se dice. Sin el campo, idéntico a 1.9.0.
-export const COMPOSITOR_VERSION = '1.10.0';
+//   1.11.0 (2026-10-22) — EL TEXTO DE LA LÁMINA NO TAPA CARAS NI PRODUCTOS (Sam, 2026-10-22, pieza 3c58d5a1: «todo el
+//         texto está sobre la cara o los productos, se suponía que eso ya estaba corregido»). 1.6.x sólo protegía el
+//         overlay; la lámina de carrusel componía su bloque en el centro fijo de la maqueta v4 sin mirar la foto, y la
+//         detección no pedía productos. Tres tokens de DATO, con la forma de `layout.avoid_faces`:
+//         · `carousel.avoid_faces` { enabled, margin_pct?, placements?, column_pct?, fallback?, inset_min_pct?, band? } —
+//           en las láminas con foto (portada, cuerpo y cierre) se detectan caras con la MISMA llamada de 1.6.x y el bloque
+//           se compone en la primera colocación libre de la maqueta: fila (centro, abajo, arriba) y, si la marca la
+//           declara, columna (izquierda, derecha). Si ninguna libra, el último recurso es dato (`fallback`): 'inset'
+//           compone la lámina sobre la superficie de la marca con la foto reducida debajo del texto; 'band' pone una
+//           banda de superficie bajo el texto. Nunca se oscurece la foto entera.
+//         · `carousel.avoid_products` y `layout.avoid_products` { enabled, margin_pct? } — la misma llamada pide también
+//           los productos, envases y objetos protagonistas, y cuentan como una cara (lámina y overlay).
+//         Sin los tokens, la lámina y el overlay salen idénticos a 1.10.0. Si la detección falla, se compone como en
+//         1.10.0 y se dice. `meta.carousel.avoid` dice qué se detectó, qué se eligió y por qué.
+export const COMPOSITOR_VERSION = '1.11.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -640,6 +654,8 @@ export function resolveOverlayStyle(args: {
     avoidFaces?: { anchors: string[]; marginPct: number; keepAlign: boolean };
     // 1.6.3 — sólo existen si la marca o el canal los declaran.
     avoidSceneText?: { marginPct: number; blurPct: number | null };
+    // 1.11.0 — sólo existe si la marca o el canal lo declaran. Va con `avoidFaces`: comparte su detección.
+    avoidProducts?: { marginPct: number };
     emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number };
   };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
@@ -933,6 +949,23 @@ export function resolveOverlayStyle(args: {
       avoidSceneText = { marginPct, blurPct };
     }
   }
+  // 1.11.0 — el texto tampoco tapa un producto de la escena. Va con `avoid_faces`: la MISMA llamada de detección pide
+  // los productos, y cuentan como una cara (deciden el ancla y el tamaño). Ausente o apagado ⇒ no existe.
+  let avoidProducts: { marginPct: number } | null = null;
+  const apTok = layoutTok.avoid_products as unknown;
+  if (apTok != null && !(isPlain(apTok) && (apTok as Record<string, unknown>).enabled === false)) {
+    const a = apTok as Record<string, unknown>;
+    const marginPct = Number(a.margin_pct ?? 1);
+    if (!isPlain(apTok) || a.enabled !== true) {
+      missing.push(`layout.avoid_products (objeto { enabled: true, margin_pct?: 0..20 }; llegó ${JSON.stringify(apTok)})`);
+    } else if (!Number.isFinite(marginPct) || marginPct < 0 || marginPct > 20) {
+      missing.push(`layout.avoid_products.margin_pct=${a.margin_pct} (0 ≤ x ≤ 20)`);
+    } else if (!avoidFaces) {
+      missing.push('layout.avoid_products pide layout.avoid_faces encendido: comparte su detección y sus anclas');
+    } else {
+      avoidProducts = { marginPct };
+    }
+  }
   // 1.6.3 — el énfasis se lee: umbral y colores alternativos, por rol de la marca.
   let emphasisContrast: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number } | null = null;
   if (layoutTok.emphasis_contrast != null) {
@@ -976,6 +1009,7 @@ export function resolveOverlayStyle(args: {
       ...(safeZonePct ? { safeZonePct } : {}),
       ...(avoidFaces ? { avoidFaces } : {}),
       ...(avoidSceneText ? { avoidSceneText } : {}),
+      ...(avoidProducts ? { avoidProducts } : {}),
       ...(emphasisContrast ? { emphasisContrast } : {}),
     },
     ...(textEffect ? { textEffect } : {}),
@@ -1593,6 +1627,16 @@ const CAROUSEL_ELEMENT_COLOR: Record<string, string> = {
   cta_text: 'text', cta_underline: 'light', swipe: 'light',
 };
 
+// 1.11.0 — claves de `tokens.carousel` que son POLÍTICA (qué evita el bloque de texto), no cromo. Pueden vivir en la
+// capa global para todas las marcas; por sí solas no declaran un carrusel: una marca sin cromo propio sigue
+// componiendo como 1.2.0 (`CAROUSEL_NOT_DECLARED`), aunque la capa global encienda la política.
+export const CAROUSEL_POLICY_KEYS = new Set(['avoid_faces', 'avoid_products']);
+
+/** ¿La fila resuelta declara el CROMO de carrusel? Las claves de política no cuentan. PURO. */
+export function carouselChromeDeclared(ct: unknown): boolean {
+  return isPlain(ct) && Object.keys(ct).some((k) => !CAROUSEL_POLICY_KEYS.has(k));
+}
+
 export interface CarouselIn {
   index: number; total: number; role: 'cover' | 'body' | 'closing'; background: 'image' | 'surface';
   eyebrow: string | null; keyword: string | null;
@@ -1824,10 +1868,15 @@ export function resolveCarouselChrome(args: {
   // 1.5.0 — el límite de área de la plataforma; sólo rige la PORTADA (las láminas interiores son
   // tarjetas de texto por diseño, decisión de Sam del 2026-10-13). Ausente ⇒ sin límite.
   maxTextAreaPct?: number;
+  // 1.11.0 — dónde va el bloque de texto, y el último recurso si ninguna colocación libra caras y productos. Los pone
+  // SÓLO `chooseCarouselPlacement`; ausentes ⇒ el bloque en el centro de la maqueta, a todo el ancho (1.10.0).
+  block?: CarouselBlock;
+  inset?: { x0: number; y0: number; x1: number; y1: number };
+  band?: { y0: number; y1: number; color: string };
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
-  if (!args.carousel || !isPlain(ctRaw) || Object.keys(ctRaw).length === 0) return { applied: false };
+  if (!args.carousel || !carouselChromeDeclared(ctRaw)) return { applied: false };
   const ct = ctRaw as Record<string, any>;
   const slide = args.carousel;
   const missing: string[] = [];
@@ -2202,8 +2251,11 @@ export function buildCarouselScene(args: {
   const B = px(T.body.sizePct);
   const M = px(chrome.marginPct);
   const inner = r2(W - 2 * M);
+  // 1.11.0 — el bloque central se compone al ancho de SU columna (`chrome.block`); sin ella, a todo el ancho.
+  const blockW = carouselBlockWidth(chrome, inner);
   const slide = chrome.slide;
-  const withImage = slide.background === 'image' && !!args.backgroundSrc;
+  // 1.11.0 — con `inset` (último recurso) la lámina va sobre la superficie y la foto, reducida, debajo del texto.
+  const withImage = slide.background === 'image' && !!args.backgroundSrc && !chrome.inset;
   const children: Array<Record<string, any>> = [];
   // 1.3.4 — efecto de texto: sólo sobre foto, y sólo en nodos de TEXTO (no en el logotipo, la barra de
   // progreso, las marcas de los pasos ni las flechas). Sin token `fx` es {}: ningún estilo cambia y la
@@ -2273,8 +2325,19 @@ export function buildCarouselScene(args: {
         },
       });
     }
+    // 1.11.0 — último recurso 'band': una banda de la superficie de la marca bajo el texto, a sangre. Sólo ahí:
+    // el resto de la foto no se oscurece (Sam, 2026-10-15).
+    if (chrome.band) {
+      children.push({ type: 'div', props: { style: { position: 'absolute', left: 0, width: W, top: chrome.band.y0, height: r2(chrome.band.y1 - chrome.band.y0), backgroundColor: chrome.band.color } } });
+    }
   } else {
     children.push({ type: 'div', props: { style: { position: 'absolute', top: 0, left: 0, width: W, height: H, backgroundColor: chrome.surface } } });
+    // 1.11.0 — último recurso 'inset': la foto entera de la lámina, reducida al hueco libre que deja el texto.
+    if (chrome.inset && slide.background === 'image' && args.backgroundSrc) {
+      const iw = r2(chrome.inset.x1 - chrome.inset.x0);
+      const ih = r2(chrome.inset.y1 - chrome.inset.y0);
+      children.push({ type: 'img', props: { src: args.backgroundSrc, width: iw, height: ih, style: { position: 'absolute', left: chrome.inset.x0, top: chrome.inset.y0, width: iw, height: ih, objectFit: 'cover' } } });
+    }
   }
 
   // ── arriba: progreso por lámina + etiqueta · i / n ──
@@ -2319,7 +2382,7 @@ export function buildCarouselScene(args: {
     mid.push({
       type: 'div',
       props: {
-        style: { display: 'flex', flexWrap: 'wrap', width: inner, ...hf, color: c.headline, ...fx, ...(HE ? { alignItems: 'baseline' } : {}) },
+        style: { display: 'flex', flexWrap: 'wrap', width: blockW, ...hf, color: c.headline, ...fx, ...(HE ? { alignItems: 'baseline' } : {}) },
         children: headlineAtoms(chrome.headline).map((atom) => ({
           type: 'div',
           props: {
@@ -2340,18 +2403,18 @@ export function buildCarouselScene(args: {
       },
     });
   }
-  const subNode = (marginTop: number) => text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: inner, ...fx });
+  const subNode = (marginTop: number) => text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...fx });
   if (slide.figure) {
     const fs = px(T.figure.sizePct);
-    mid.push(text(slide.figure.value, { ...font(T.figure, fs), color: c.figure, marginTop: mid.length ? r2(B * 0.8) : 0, width: inner, ...fx }));
+    mid.push(text(slide.figure.value, { ...font(T.figure, fs), color: c.figure, marginTop: mid.length ? r2(B * 0.8) : 0, width: blockW, ...fx }));
     if (slide.figure.bar) {
       const bh = Math.max(2, r2(L * 0.53));
-      const from = r2((slide.figure.bar.from / 100) * inner);
-      const w = r2(((slide.figure.bar.to - slide.figure.bar.from) / 100) * inner);
+      const from = r2((slide.figure.bar.from / 100) * blockW);
+      const w = r2(((slide.figure.bar.to - slide.figure.bar.from) / 100) * blockW);
       mid.push({
         type: 'div',
         props: {
-          style: { display: 'flex', position: 'relative', width: inner, height: bh, marginTop: r2(L * 1.26), borderRadius: r2(bh / 2), backgroundColor: c.bar_track, overflow: 'hidden' },
+          style: { display: 'flex', position: 'relative', width: blockW, height: bh, marginTop: r2(L * 1.26), borderRadius: r2(bh / 2), backgroundColor: c.bar_track, overflow: 'hidden' },
           children: [{
             type: 'div',
             props: { style: { position: 'absolute', top: 0, left: from, width: w, height: bh, backgroundImage: `linear-gradient(90deg, ${c.bar_from}, ${c.bar_to})` } },
@@ -2364,7 +2427,7 @@ export function buildCarouselScene(args: {
     mid.push({
       type: 'div',
       props: {
-        style: { display: 'flex', flexDirection: 'row', alignItems: 'center', marginTop: r2(B * 0.69), width: inner },
+        style: { display: 'flex', flexDirection: 'row', alignItems: 'center', marginTop: r2(B * 0.69), width: blockW },
         children: [
           { type: 'div', props: { style: { width: dot, height: dot, borderRadius: r2(dot / 2), backgroundColor: c.source_mark, marginRight: r2(L * 0.74), flexShrink: 0 } } },
           text(slide.figure.source, { ...font(T.label, r2(L * 1.1)), letterSpacing: r2(T.label.letterSpacingEm * 0.4 * L * 1.1), textTransform: 'none', color: c.source_text, ...fx }),
@@ -2381,7 +2444,7 @@ export function buildCarouselScene(args: {
     mid.push({
       type: 'div',
       props: {
-        style: { display: 'flex', flexDirection: 'column', marginTop: mid.length ? r2(B * 0.83) : 0, width: inner },
+        style: { display: 'flex', flexDirection: 'column', marginTop: mid.length ? r2(B * 0.83) : 0, width: blockW },
         children: slide.steps.map((s, k) => ({
           type: 'div',
           props: {
@@ -2414,7 +2477,7 @@ export function buildCarouselScene(args: {
           type: 'div',
           props: {
             // Subrayado, sin forma de botón: en una imagen nada se toca (maqueta v4).
-            style: { display: 'flex', flexDirection: 'row', alignItems: 'center', maxWidth: inner, paddingBottom: r2(cs * 0.45), borderBottom: `${Math.max(1, r2(cs * 0.09))}px solid ${c.cta_underline}` },
+            style: { display: 'flex', flexDirection: 'row', alignItems: 'center', maxWidth: blockW, paddingBottom: r2(cs * 0.45), borderBottom: `${Math.max(1, r2(cs * 0.09))}px solid ${c.cta_underline}` },
             children: [
               text(slide.cta, { ...font(T.label, cs), letterSpacing: r2(T.label.letterSpacingEm * 0.75 * cs), color: c.cta_text, flexShrink: 1, ...fx }),
               arrow(c.cta_underline, cs, 'down'),
@@ -2477,6 +2540,17 @@ export function buildCarouselScene(args: {
   // ni sale del lienzo. Una lámina que ya cabía no lleva estas claves y su escena no cambia.
   const guard = chrome.fitGuard === true;
   const rigid = (node: Record<string, any>) => (guard ? { ...node, props: { ...node.props, style: { ...node.props.style, flexShrink: 0 } } } : node);
+  // 1.11.0 — la colocación del bloque (`chrome.block`): arriba o abajo, un espaciador se queda con el hueco y el
+  // bloque guarda el aire mínimo de la medición; la columna derecha empuja el bloque. Sin `block`, la de 1.10.0.
+  const blk = chrome.block ?? null;
+  const gapB = r2(L * FIT_MIN_GAP_LABELS);
+  const midNode = { type: 'div', props: { style: {
+    display: 'flex', flexDirection: 'column', width: blockW,
+    ...(blk && blk.side === 'right' ? { marginLeft: r2(inner - blockW) } : {}),
+    ...(blk && blk.place === 'top' ? { marginTop: gapB } : {}),
+    ...(blk && blk.place === 'bottom' ? { marginBottom: gapB } : {}),
+    ...(guard ? { flexShrink: 1, minHeight: 0, overflow: 'hidden' } : {}) }, children: mid } };
+  const spacer = { type: 'div', props: { style: { display: 'flex', flexGrow: 1 } } };
   children.push({
     type: 'div',
     props: {
@@ -2484,11 +2558,9 @@ export function buildCarouselScene(args: {
         position: 'absolute', top: 0, left: 0, width: W, height: H,
         display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: M,
       },
-      children: [
-        rigid(top),
-        { type: 'div', props: { style: { display: 'flex', flexDirection: 'column', width: inner, ...(guard ? { flexShrink: 1, minHeight: 0, overflow: 'hidden' } : {}) }, children: mid } },
-        rigid(foot),
-      ],
+      children: blk && blk.place === 'top' ? [rigid(top), midNode, spacer, rigid(foot)]
+        : blk && blk.place === 'bottom' ? [rigid(top), spacer, midNode, rigid(foot)]
+        : [rigid(top), midNode, rigid(foot)],
     },
   });
 
@@ -2633,6 +2705,10 @@ type FitMetrics = Record<string, FontAdvance | null | undefined>;
  */
 export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetrics | null | undefined): {
   top: number; mid: number; foot: number; available: number; gap: number; slack: number; estimated: string[];
+  // 1.11.0 — ancho de la línea más larga del bloque central (px), y el ancho del que dispone (la columna, si la hay).
+  midWidth: number; blockWidth: number;
+  // 1.11.0 — alguna palabra del bloque central es más ancha que su columna: no cabe sin partirse ni salirse.
+  wordOverflow: boolean;
 } {
   const W = chrome.canvas.width;
   const H = chrome.canvas.height;
@@ -2643,8 +2719,12 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   const B = px(T.body.sizePct);
   const M = px(chrome.marginPct);
   const inner = r2(W - 2 * M);
+  // 1.11.0 — el bloque central se mide al ancho de SU columna; sin `block`, el de siempre.
+  const blockW = carouselBlockWidth(chrome, inner);
   const slide = chrome.slide;
   const estimated: string[] = [];
+  let midW = 0;
+  let wide = false;
 
   // Ancho de un texto en una familia, a un tamaño, con su tracking y su transformación.
   const widthFn = (k: CarouselType, size: number, letterSpacing: number, transform: string) => {
@@ -2662,22 +2742,31 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
     };
   };
   // Líneas de un texto partido en palabras, a lo ancho disponible (corte voraz, como el de satori).
-  const lines = (s: string, widthOf: (s: string) => number, maxW: number) => {
+  // 1.11.0 — devuelve también el ancho de la línea más larga (para la caja del bloque).
+  const linesW = (s: string, widthOf: (s: string) => number, maxW: number) => {
     const words = String(s ?? '').split(/\s+/).filter(Boolean);
-    if (!words.length) return 0;
+    if (!words.length) return { n: 0, w: 0, over: false };
     const space = widthOf(' ');
     let n = 1;
     let cur = -1;
+    let wMax = 0;
+    let over = false;
     for (const w of words) {
       const ww = widthOf(w);
+      if (ww > maxW + 0.5) over = true;
       if (cur < 0) cur = ww;
       else if (cur + space + ww <= maxW + 0.01) cur += space + ww;
-      else { n++; cur = ww; }
+      else { n++; wMax = Math.max(wMax, cur); cur = ww; }
     }
-    return n;
+    return { n, w: Math.min(maxW, Math.max(wMax, cur)), over };
+  };
+  const textHW = (k: CarouselType, size: number, s: string, maxW: number, letterSpacing = r2(k.letterSpacingEm * size), transform = k.transform, lh = k.lineHeight) => {
+    const r = linesW(s, widthFn(k, size, letterSpacing, transform), maxW);
+    return { h: r.n * size * lh, w: r.w, over: r.over };
   };
   const textH = (k: CarouselType, size: number, s: string, maxW: number, letterSpacing = r2(k.letterSpacingEm * size), transform = k.transform, lh = k.lineHeight) =>
-    lines(s, widthFn(k, size, letterSpacing, transform), maxW) * size * lh;
+    textHW(k, size, s, maxW, letterSpacing, transform, lh).h;
+  const seen = (w: number, over = false) => { midW = Math.max(midW, w); if (over) wide = true; };
 
   // ── cabecera ──
   const counterW = widthFn(T.label, L, r2(T.label.letterSpacingEm * L), 'none')(`${slide.index} / ${slide.total}`);
@@ -2696,8 +2785,10 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
       let cur = 0;
       for (const atom of headlineAtoms(chrome.headline)) {
         const aw = Math.ceil(atom.reduce((s, p) => s + wOf(p.text), 0));
-        if (cur > 0 && cur + aw > inner + 0.01) { n++; cur = aw; } else cur += aw;
+        if (aw > blockW + 0.5) wide = true;
+        if (cur > 0 && cur + aw > blockW + 0.01) { n++; seen(cur); cur = aw; } else cur += aw;
       }
+      seen(Math.min(cur, blockW));
       mid += n * hs * T.headline.lineHeight;
     } else {
       // 1.4.0 — con énfasis, cada tramo se mide con SU fuente y SU tamaño, y cada línea es tan alta
@@ -2710,25 +2801,32 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
       for (const atom of headlineAtoms(chrome.headline)) {
         const aw = Math.ceil(atom.reduce((s, p) => s + (p.keyword ? eOf(p.text) : wOf(p.text)), 0));
         const ah = Math.max(...atom.map((p) => (p.keyword ? es : hs)));
-        if (cur > 0 && cur + aw > inner + 0.01) { total += lineMax; cur = aw; lineMax = ah; }
+        if (aw > blockW + 0.5) wide = true;
+        if (cur > 0 && cur + aw > blockW + 0.01) { total += lineMax; seen(cur); cur = aw; lineMax = ah; }
         else { cur += aw; lineMax = Math.max(lineMax, ah); }
       }
+      seen(Math.min(cur, blockW));
       mid += (total + lineMax) * T.headline.lineHeight;
     }
     any = true;
   }
   if (slide.figure) {
     const fs = px(T.figure.sizePct);
-    mid += (any ? r2(B * 0.8) : 0) + textH(T.figure, fs, slide.figure.value, inner);
+    const fv = textHW(T.figure, fs, slide.figure.value, blockW);
+    mid += (any ? r2(B * 0.8) : 0) + fv.h;
+    seen(fv.w, fv.over);
     any = true;
-    if (slide.figure.bar) mid += r2(L * 1.26) + Math.max(2, r2(L * 0.53));
-    if (chrome.subheadline) mid += r2(B * 0.69) + textH(T.body, B, chrome.subheadline, inner);
+    if (slide.figure.bar) { mid += r2(L * 1.26) + Math.max(2, r2(L * 0.53)); seen(blockW); }
+    if (chrome.subheadline) { const sb = textHW(T.body, B, chrome.subheadline, blockW); mid += r2(B * 0.69) + sb.h; seen(sb.w, sb.over); }
     const dot = r2(L * 0.63);
     const ls = r2(L * 1.1);
-    mid += r2(B * 0.69) + Math.max(dot,
-      textH(T.label, ls, slide.figure.source, inner - dot - r2(L * 0.74), r2(T.label.letterSpacingEm * 0.4 * ls), 'none'));
+    const src = textHW(T.label, ls, slide.figure.source, blockW - dot - r2(L * 0.74), r2(T.label.letterSpacingEm * 0.4 * ls), 'none');
+    mid += r2(B * 0.69) + Math.max(dot, src.h);
+    seen(dot + r2(L * 0.74) + src.w, src.over);
   } else if (chrome.subheadline) {
-    mid += (any ? r2(B * 0.69) : 0) + textH(T.body, B, chrome.subheadline, inner);
+    const sb = textHW(T.body, B, chrome.subheadline, blockW);
+    mid += (any ? r2(B * 0.69) : 0) + sb.h;
+    seen(sb.w, sb.over);
     any = true;
   }
   if (slide.steps.length) {
@@ -2736,16 +2834,20 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
     const mark = r2(B * 0.55);
     mid += any ? r2(B * 0.83) : 0;
     slide.steps.forEach((s, k) => {
-      mid += (k > 0 ? r2(B * 0.48) : 0) + Math.max(mark, textH(T.body, ss, s.text, inner - mark - r2(B * 0.62), undefined, undefined, 1.35));
+      const st = textHW(T.body, ss, s.text, blockW - mark - r2(B * 0.62), undefined, undefined, 1.35);
+      mid += (k > 0 ? r2(B * 0.48) : 0) + Math.max(mark, st.h);
+      seen(mark + r2(B * 0.62) + st.w, st.over);
     });
     any = true;
   }
   if (slide.cta && slide.role === 'closing') {
     const cs = r2(L * 1.16);
     const arrowW = r2(cs * 0.62) + r2(cs * 0.45);
+    const ct = textHW(T.label, cs, slide.cta, blockW - arrowW, r2(T.label.letterSpacingEm * 0.75 * cs));
     mid += (any ? r2(B * 0.97) : 0) +
-      Math.max(r2(cs * 0.84), textH(T.label, cs, slide.cta, inner - arrowW, r2(T.label.letterSpacingEm * 0.75 * cs))) +
+      Math.max(r2(cs * 0.84), ct.h) +
       r2(cs * 0.45) + Math.max(1, r2(cs * 0.09));
+    seen(ct.w + arrowW, ct.over);
   }
 
   // ── pie ──
@@ -2761,7 +2863,8 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   const available = H - 2 * M - top - foot;
   const gap = r2(L * FIT_MIN_GAP_LABELS);
   const r = (n: number) => Math.round(n * 100) / 100;
-  return { top: r(top), mid: r(mid), foot: r(foot), available: r(available), gap, slack: r(available - mid - 2 * gap), estimated };
+  return { top: r(top), mid: r(mid), foot: r(foot), available: r(available), gap, slack: r(available - mid - 2 * gap), estimated,
+    midWidth: r(Math.min(midW, blockW)), blockWidth: r(blockW), wordOverflow: wide };
 }
 
 /**
@@ -2967,7 +3070,7 @@ export function overlayTextRect(style: ReturnType<typeof resolveOverlayStyle>, w
 
 /** Las cajas de caras que devuelve el modelo (`{ faces: [{ box_2d: [ymin, xmin, ymax, xmax] }] }`, 0..1000) a
  *  0..1. Lo que no tiene forma de caja se descarta; nunca se inventa una. PURO. */
-export function parseFaceBoxes(text: string, key: 'faces' | 'signs' = 'faces'): FaceBox[] {
+export function parseFaceBoxes(text: string, key: 'faces' | 'signs' | 'products' = 'faces'): FaceBox[] {
   let data: any;
   try { data = JSON.parse(text); } catch { return []; }
   const list = Array.isArray(data?.[key]) ? data[key] : (key === 'faces' && Array.isArray(data)) ? data : [];
@@ -3017,11 +3120,15 @@ export function chooseOverlayAnchor(args: {
   metrics?: Record<string, FontAdvance | null | undefined> | null; faces: FaceBox[]; productAnchor?: string | null;
   // 1.6.3 — letreros de la escena (0..1). Sólo cuentan con `layout.avoidSceneText`; nunca deciden el tamaño.
   signs?: FaceBox[] | null;
+  // 1.11.0 — productos de la escena (0..1). Sólo cuentan con `layout.avoidProducts`, y cuentan como una cara.
+  products?: FaceBox[] | null;
 }): { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
   faces: number; anchor_declared: string; anchor_used: string; moved: boolean; overlap_pct: number;
   candidates: Array<{ anchor: string; overlap_pct: number }>; reduced: string[];
   // 1.6.3 — sólo con letreros detectados y el token encendido.
   signs?: number; sign_overlap_pct?: number; signs_under_text?: FaceBox[];
+  // 1.11.0 — sólo con el token encendido.
+  products?: number;
 } } {
   const { style, width, height } = args;
   const af = style.layout.avoidFaces;
@@ -3029,6 +3136,15 @@ export function chooseOverlayAnchor(args: {
   const declared = style.layout.anchor;
   const pad = (af.marginPct / 100) * Math.min(width, height);
   const boxes = args.faces.map((f) => ({ x0: f.x0 * width - pad, y0: f.y0 * height - pad, x1: f.x1 * width + pad, y1: f.y1 * height + pad }));
+  // 1.11.0 — los productos se suman a las cajas que el texto no toca, con su propio margen. Sin el token, nada cambia.
+  const ap = style.layout.avoidProducts ?? null;
+  const prodList = ap ? (args.products ?? []) : [];
+  if (ap) {
+    const pp = (ap.marginPct / 100) * Math.min(width, height);
+    for (const f of prodList) boxes.push({ x0: f.x0 * width - pp, y0: f.y0 * height - pp, x1: f.x1 * width + pp, y1: f.y1 * height + pp });
+  }
+  const tapa = ap ? 'una cara o un producto' : 'una cara';
+  const libre = ap ? 'libre de caras y productos' : 'libre de caras';
   const cands = af.anchors.filter((a) => ANCHORS[a] && a !== (args.productAnchor ?? null));
   const score = (st: ReturnType<typeof resolveOverlayStyle>) => cands.map((anchor) => {
     const r = overlayTextRect(st, width, height, args.metrics, anchor);
@@ -3102,11 +3218,11 @@ export function chooseOverlayAnchor(args: {
   const declaredScore = scored.find((c) => c.anchor === declared)?.overlap_pct ?? 0;
   const markers = [...style.markers];
   if (faceAnchor !== declared) {
-    markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba una cara (${declaredScore} % de su caja); se compone en ${faceAnchor}`);
+    markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba ${tapa} (${declaredScore} % de su caja); se compone en ${faceAnchor}`);
   }
-  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : 'sin tapar una cara'}: ${what.join(' · ')}`);
+  if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : `sin tapar ${tapa}`}: ${what.join(' · ')}`);
   if (best.overlap_pct > 0) {
-    markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto libre de caras ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
+    markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto ${libre} ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
   markers.push(...signMarkers);
   const out = best.anchor === declared && markers.length === style.markers.length ? style : {
@@ -3118,6 +3234,7 @@ export function chooseOverlayAnchor(args: {
     faces: args.faces.length, anchor_declared: declared, anchor_used: best.anchor, moved: best.anchor !== declared,
     overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
     ...(signList ? { signs: signList.length, sign_overlap_pct: signOverlap, signs_under_text: signsUnder } : {}),
+    ...(ap ? { products: prodList.length } : {}),
   } };
 }
 
@@ -3263,6 +3380,303 @@ export function overlayTextShadow(te: { color: string; blurPct: number; offsetPc
   const blur = r2((te.blurPct / 100) * canvasWidth);
   const off = r2((te.offsetPct / 100) * canvasWidth);
   return `0px 0px ${blur}px ${te.color}, 0px ${off}px ${blur}px ${te.color}`;
+}
+
+// ── 1.11.0 · EL TEXTO DE LA LÁMINA NO TAPA CARAS NI PRODUCTOS ──────────────────────────────────────────────────────
+// EL CASO (Sam, 2026-10-22, pieza 3c58d5a1, cinco láminas): «todo el texto está sobre la cara o los
+// productos, se suponía que eso ya estaba corregido». 1.6.x protegía sólo el overlay; la lámina componía su bloque en
+// el centro fijo de la maqueta v4 sin mirar la foto.
+// EJE (código): QUÉ se evita —la caja del bloque central no toca la caja de una cara ni de un producto, con margen—,
+// DÓNDE puede ir el bloque —las filas de la maqueta (centro, abajo, arriba) y, si la marca la declara, una columna a la
+// izquierda o a la derecha— y CÓMO se elige —la primera colocación libre sin reducir más que en el centro; si no, la
+// primera libre que cabe; si ninguna, el último recurso declarado—. INSTANCIA (dato): todo lo demás, en
+// `tokens.carousel.avoid_faces` y `tokens.carousel.avoid_products`. Las cajas entran como dato (0..1 del LIENZO).
+export interface CarouselBlock { place: 'top' | 'center' | 'bottom'; side: 'left' | 'right' | null; columnPct: number }
+export interface CarouselAvoid {
+  marginPct: number; products: null | { marginPct: number };
+  // Anchos de columna (% del ancho interior), en orden de preferencia: el más ancho primero suele romper menos líneas.
+  placements: string[]; columnPcts: number[];
+  fallback: Array<'inset' | 'band'>; insetMinPct: number; bandAlpha: number | null;
+}
+const CAROUSEL_PLACE_RE = /^(top|center|bottom)(?:_(left|right))?$/;
+const CAROUSEL_FALLBACKS = new Set(['inset', 'band']);
+// Orden por defecto: el centro de la maqueta (lo de siempre), y luego las otras dos filas a todo el ancho. Las columnas
+// sólo existen si la marca declara su ancho (`column_pct`), y van después: estrechan el bloque y lo alargan.
+export const CAROUSEL_DEFAULT_ROWS = ['center', 'bottom', 'top'];
+
+/** Ancho (px) del bloque central: el de su columna si `chrome.block` la declara; si no, el interior entero. PURO. */
+export function carouselBlockWidth(chrome: { block?: CarouselBlock }, inner: number): number {
+  const b = chrome.block;
+  if (!b || !b.side) return inner;
+  return Math.round(inner * b.columnPct) / 100;
+}
+
+/**
+ * Lee y valida la política de la lámina. Ausente o `enabled: false` ⇒ null y la lámina es la de 1.10.0. Mal escrita ⇒
+ * falla nombrando, como el resto de los tokens (fail-loud acumulado). PURO.
+ */
+export function resolveCarouselAvoid(tokens: Record<string, any> | null | undefined): CarouselAvoid | null {
+  const ct = (tokens ?? {}).carousel;
+  if (!isPlain(ct)) return null;
+  const missing: string[] = [];
+  const off = (v: unknown) => v == null || (isPlain(v) && (v as Record<string, unknown>).enabled === false);
+  const af = ct.avoid_faces as unknown;
+  const ap = ct.avoid_products as unknown;
+  if (off(af)) {
+    if (!off(ap)) {
+      throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
+        'faltan datos de marca para componer la lámina de carrusel: carousel.avoid_products pide carousel.avoid_faces encendido: comparte su detección y sus colocaciones.');
+    }
+    return null;
+  }
+  const a = af as Record<string, any>;
+  if (!isPlain(af) || a.enabled !== true) {
+    missing.push(`carousel.avoid_faces (objeto { enabled: true, margin_pct?, placements?, column_pct?, fallback? }; llegó ${JSON.stringify(af)})`);
+  }
+  const marginPct = Number(a?.margin_pct ?? 2);
+  if (!Number.isFinite(marginPct) || marginPct < 0 || marginPct > 20) missing.push(`carousel.avoid_faces.margin_pct=${a?.margin_pct} (0 ≤ x ≤ 20)`);
+  // `column_pct`: un ancho o una lista de anchos, cada uno 30..95 % del ancho interior.
+  let columnPcts: number[] = [];
+  if (a?.column_pct != null) {
+    const raw = Array.isArray(a.column_pct) ? a.column_pct : [a.column_pct];
+    const vals = raw.map(Number);
+    if (!raw.length || vals.some((c: number) => !Number.isFinite(c) || c < 30 || c > 95)) {
+      missing.push(`carousel.avoid_faces.column_pct=${JSON.stringify(a.column_pct)} (un número o una lista; cada uno 30 ≤ x ≤ 95, % del ancho interior)`);
+    } else columnPcts = [...new Set(vals as number[])];
+  }
+  const columnPct = columnPcts.length ? columnPcts[0] : null;
+  let placements: string[] = [...CAROUSEL_DEFAULT_ROWS];
+  if (columnPct != null && a?.placements == null) {
+    for (const side of ['left', 'right']) for (const row of CAROUSEL_DEFAULT_ROWS) placements.push(`${row}_${side}`);
+  }
+  if (a?.placements != null) {
+    const list = Array.isArray(a.placements) ? a.placements.map(String) : null;
+    const bad = list === null ? ['(no es una lista)'] : list.filter((p) => !CAROUSEL_PLACE_RE.test(p));
+    if (bad.length) missing.push(`carousel.avoid_faces.placements: ${bad.join(', ')} (válidos: top, center, bottom y, con column_pct, <fila>_left o <fila>_right)`);
+    else if (list && columnPct == null && list.some((p) => p.includes('_'))) {
+      missing.push('carousel.avoid_faces.placements pide columnas y falta carousel.avoid_faces.column_pct');
+    } else if (list) placements = [...new Set(list)];
+  }
+  const fbRaw = a?.fallback == null ? [] : (Array.isArray(a.fallback) ? a.fallback : [a.fallback]).map(String);
+  const fbBad = fbRaw.filter((f: string) => !CAROUSEL_FALLBACKS.has(f));
+  if (fbBad.length) missing.push(`carousel.avoid_faces.fallback: ${fbBad.join(', ')} (válidos: ${[...CAROUSEL_FALLBACKS].join(', ')})`);
+  const insetMinPct = Number(a?.inset_min_pct ?? 25);
+  if (!Number.isFinite(insetMinPct) || insetMinPct < 5 || insetMinPct > 80) missing.push(`carousel.avoid_faces.inset_min_pct=${a?.inset_min_pct} (5 ≤ x ≤ 80, % del alto)`);
+  let bandAlpha: number | null = null;
+  if (fbRaw.includes('band')) {
+    const al = Number(isPlain(a?.band) ? a.band.alpha : NaN);
+    if (!Number.isFinite(al) || al <= 0 || al > 1) missing.push(`carousel.avoid_faces.band.alpha (0 < x ≤ 1; obligatoria con fallback 'band'; llegó ${JSON.stringify(a?.band)})`);
+    else bandAlpha = al;
+  }
+  let products: CarouselAvoid['products'] = null;
+  if (!off(ap)) {
+    const p = ap as Record<string, any>;
+    const pm = Number(p?.margin_pct ?? 1);
+    if (!isPlain(ap) || p.enabled !== true) missing.push(`carousel.avoid_products (objeto { enabled: true, margin_pct?: 0..20 }; llegó ${JSON.stringify(ap)})`);
+    else if (!Number.isFinite(pm) || pm < 0 || pm > 20) missing.push(`carousel.avoid_products.margin_pct=${p.margin_pct} (0 ≤ x ≤ 20)`);
+    else products = { marginPct: pm };
+  }
+  if (missing.length) {
+    throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
+      `faltan datos de marca para componer la lámina de carrusel: ${missing.join(' · ')}.`);
+  }
+  return { marginPct, products, placements, columnPcts, fallback: [...new Set(fbRaw)] as Array<'inset' | 'band'>, insetMinPct, bandAlpha };
+}
+
+/** Cajas medidas sobre la FOTO (0..1) → cajas sobre el LIENZO de la lámina (0..1), con el `objectFit: cover` con que la
+ *  escena la dibuja: escala para cubrir y centra. Lo que queda fuera del lienzo se descarta. PURO. */
+export function coverMapBoxes(boxes: FaceBox[], imgW: number, imgH: number, W: number, H: number): FaceBox[] {
+  if (!(imgW > 0 && imgH > 0 && W > 0 && H > 0)) return [];
+  const k = Math.max(W / imgW, H / imgH);
+  const ox = (W - imgW * k) / 2;
+  const oy = (H - imgH * k) / 2;
+  const cx = (v: number) => Math.min(1, Math.max(0, (v * imgW * k + ox) / W));
+  const cy = (v: number) => Math.min(1, Math.max(0, (v * imgH * k + oy) / H));
+  const out: FaceBox[] = [];
+  for (const b of boxes ?? []) {
+    const m = { x0: cx(b.x0), y0: cy(b.y0), x1: cx(b.x1), y1: cy(b.y1) };
+    if (m.x1 > m.x0 && m.y1 > m.y0) out.push(m);
+  }
+  return out;
+}
+
+/** La caja (px) del bloque central de una lámina, con las MISMAS medidas que `buildCarouselScene`: x desde el margen
+ *  (o desde la columna derecha) hasta la línea más larga; y según la fila. PURO. */
+export function carouselBlockRect(chrome: CarouselChrome, metrics: FitMetrics | null | undefined): {
+  rect: { x0: number; y0: number; x1: number; y1: number }; m: ReturnType<typeof measureCarouselLayout>;
+} {
+  const W = chrome.canvas.width;
+  const H = chrome.canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const M = r2((chrome.marginPct / 100) * W);
+  const inner = r2(W - 2 * M);
+  const m = measureCarouselLayout(chrome, metrics);
+  const b = chrome.block ?? null;
+  const x0 = M + (b && b.side === 'right' ? inner - m.blockWidth : 0);
+  const place = b ? b.place : 'center';
+  const y0 = place === 'top' ? M + m.top + m.gap
+    : place === 'bottom' ? H - M - m.foot - m.gap - m.mid
+      : M + m.top + Math.max(0, m.available - m.mid) / 2;
+  return { rect: { x0: r2(x0), y0: r2(y0), x1: r2(x0 + m.midWidth), y1: r2(y0 + m.mid) }, m };
+}
+
+/** % de la caja del bloque que cae sobre las cajas dadas (px). PURO. */
+function rectOverlapPct(r: { x0: number; y0: number; x1: number; y1: number }, boxes: Array<{ x0: number; y0: number; x1: number; y1: number }>): number {
+  const area = Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
+  let inter = 0;
+  for (const b of boxes) {
+    const w = Math.min(r.x1, b.x1) - Math.max(r.x0, b.x0);
+    const h = Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0);
+    if (w > 0 && h > 0) inter += w * h;
+  }
+  return Math.round((10000 * Math.min(inter, area)) / area) / 100;
+}
+
+/** Un color `rgb(…)`/`rgba(…)` con otro alfa. PURO. */
+function withAlphaRgb(color: string, alpha: number): string {
+  const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(color ?? ''));
+  return m ? `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${alpha})` : color;
+}
+
+/**
+ * ELIGE DÓNDE VA EL BLOQUE DE LA LÁMINA. PURO y determinista. Recibe el cromo ANTES del ajuste vertical y devuelve el
+ * ajuste (`fitCarouselContent`) de la colocación elegida, para que el llamador lo use en vez de ajustar por su cuenta.
+ *   1. El centro de la maqueta (lo de siempre). Libre ⇒ devuelve EXACTAMENTE el ajuste de 1.10.0: la escena no cambia.
+ *   2. La primera colocación de `placements` que queda libre sin reducir más de lo que se reducía en el centro.
+ *   3. La primera libre que cabe, aunque reduzca el tamaño (el ajuste vertical lo dice). Nunca una que omita más pasos que
+ *      el centro: mover el texto no cuesta contenido.
+ *   3 bis. El titular por los escalones más chicos de su `fit_steps`, en cada colocación: la primera que libra.
+ *   4. El último recurso, en el orden de `fallback`: 'inset' (texto arriba sobre la superficie y la foto reducida en el
+ *      hueco que queda, si mide al menos `inset_min_pct` del alto) o 'band' (la colocación que menos tapa, con una
+ *      banda de superficie bajo el texto). Sin último recurso aplicable: la que menos tapa, y se dice.
+ */
+export function chooseCarouselPlacement(args: {
+  chrome: CarouselChrome; metrics?: FitMetrics | null; faces: FaceBox[]; products?: FaceBox[] | null; avoid: CarouselAvoid;
+}): {
+  fit: ReturnType<typeof fitCarouselContent>; warnings: string[];
+  report: {
+    faces: number; products: number | null; placement_declared: 'center'; placement_used: string; column_pct: number | null; moved: boolean;
+    overlap_pct: number; candidates: Array<{ placement: string; column_pct: number | null; overlap_pct: number; face_overlap_pct: number; product_overlap_pct: number; reduced: boolean; overflow: boolean }>;
+    fallback: null | 'inset' | 'band'; reason: string; headline_size_pct?: number;
+    inset?: { x0: number; y0: number; x1: number; y1: number }; band?: { y0: number; y1: number };
+  };
+} {
+  const { chrome, avoid } = args;
+  const metrics = args.metrics ?? null;
+  const W = chrome.canvas.width;
+  const H = chrome.canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const M = r2((chrome.marginPct / 100) * W);
+  const toPx = (list: FaceBox[], marginPct: number) => {
+    const p = (marginPct / 100) * Math.min(W, H);
+    return list.map((f) => ({ x0: f.x0 * W - p, y0: f.y0 * H - p, x1: f.x1 * W + p, y1: f.y1 * H + p }));
+  };
+  const faceBoxes = toPx(args.faces ?? [], avoid.marginPct);
+  const prodList = avoid.products ? (args.products ?? []) : [];
+  const prodBoxes = avoid.products ? toPx(prodList, avoid.products.marginPct) : [];
+  const allBoxes = [...faceBoxes, ...prodBoxes];
+  const fitKey = (r: ReturnType<typeof fitCarouselContent>['report']) =>
+    `${r.figure_scale}|${r.headline_size_pct}|${r.body_scale}|${r.steps_dropped}|${r.overflow}`;
+  // Cada colocación con columna se prueba con cada ancho declarado, en su orden; las filas a todo el ancho, una vez.
+  type Slot = { code: string; col: number | null };
+  const slots: Slot[] = avoid.placements.filter((p) => p !== 'center').flatMap((p) => (p.includes('_')
+    ? avoid.columnPcts.map((col) => ({ code: p, col })) : [{ code: p, col: null }]));
+  const withBlockOf = (from: CarouselChrome, sl: Slot): CarouselChrome => {
+    const mm = CAROUSEL_PLACE_RE.exec(sl.code)!;
+    const side = (mm[2] ?? null) as CarouselBlock['side'];
+    return { ...from, block: { place: mm[1] as CarouselBlock['place'], side, columnPct: side ? (sl.col ?? 100) : 100 } };
+  };
+  const evalC = (sl: Slot | null, from: CarouselChrome = chrome) => {
+    const fit = fitCarouselContent({ chrome: sl === null ? from : withBlockOf(from, sl), metrics });
+    const { rect, m } = carouselBlockRect(fit.chrome, metrics);
+    return { placement: sl?.code ?? 'center', column_pct: sl?.col ?? null, fit, rect, m, key: fitKey(fit.report),
+      overlap_pct: rectOverlapPct(rect, allBoxes), face_overlap_pct: rectOverlapPct(rect, faceBoxes), product_overlap_pct: rectOverlapPct(rect, prodBoxes) };
+  };
+  const what = avoid.products ? 'una cara o un producto' : 'una cara';
+  const label = (c: { placement: string; column_pct: number | null }) => (c.column_pct != null ? `${c.placement} (columna ${c.column_pct} %)` : c.placement);
+  const base = evalC(null);
+  const cands = slots.map((sl) => evalC(sl));
+  const all = [base, ...cands];
+  const report = (used: typeof base, fallback: null | 'inset' | 'band', reason: string, extra: Record<string, unknown> = {}) => ({
+    faces: (args.faces ?? []).length, products: avoid.products ? prodList.length : null,
+    placement_declared: 'center' as const, placement_used: used.placement, column_pct: used.column_pct, moved: used.placement !== 'center',
+    overlap_pct: fallback === 'inset' ? 0 : used.overlap_pct,
+    candidates: all.map((c) => ({ placement: c.placement, column_pct: c.column_pct, overlap_pct: c.overlap_pct, face_overlap_pct: c.face_overlap_pct,
+      product_overlap_pct: c.product_overlap_pct, reduced: c.key !== base.key, overflow: c.fit.report.overflow })),
+    fallback, reason, ...extra,
+  });
+  if (base.overlap_pct === 0) {
+    return { fit: base.fit, warnings: [], report: report(base, null, allBoxes.length ? `en el centro el texto no toca ${what}` : 'no se detectó nada que evitar') };
+  }
+  // Mover el texto nunca cuesta contenido: una colocación que omite más pasos que el centro no es libre.
+  // Ni una palabra más ancha que su columna: se partiría o se saldría del bloque.
+  const ok = (c: typeof base) => c.overlap_pct === 0 && !c.fit.report.overflow && !c.m.wordOverflow
+    && c.fit.report.steps_dropped <= base.fit.report.steps_dropped;
+  const chosen = cands.find((c) => ok(c) && c.key === base.key) ?? cands.find(ok);
+  if (chosen) {
+    const reason = `en el centro el texto tapaba ${what} (${base.overlap_pct} % de su caja); se compone en ${label(chosen)}`;
+    return { fit: chosen.fit, warnings: [`CAROUSEL_BLOCK_MOVED_FOR_SUBJECT: ${reason}`], report: report(chosen, null, reason) };
+  }
+  // 3 bis. El titular, un escalón más chico de su `fit_steps` cada vez, en cada colocación: la foto se ve entera antes
+  // de llegar al último recurso. El primer escalón y la primera colocación que libran ganan, y se dice.
+  for (const h of chrome.fitLadder.headline) {
+    const shrunk: CarouselChrome = { ...chrome, type: { ...chrome.type, headline: { ...chrome.type.headline, sizePct: h } },
+      fitLadder: { headline: chrome.fitLadder.headline.filter((x) => x < h) } };
+    for (const sl of [null, ...slots]) {
+      const c = evalC(sl, shrunk);
+      if (ok(c)) {
+        const reason = `ninguna colocación libra ${what} al tamaño de siempre (la menor tapa ${Math.min(...all.map((x) => x.overlap_pct))} %); ` +
+          `con el titular ${chrome.type.headline.sizePct}→${h} % se compone en ${label(c)}`;
+        return { fit: c.fit, warnings: [`CAROUSEL_TEXT_REDUCED_FOR_SUBJECT: ${reason}`], report: report(c, null, reason, { headline_size_pct: h }) };
+      }
+    }
+  }
+  // La que menos tapa, entre las que no omiten pasos (el centro siempre está entre ellas).
+  const keep = all.filter((c) => c === base || (c.fit.report.steps_dropped <= base.fit.report.steps_dropped && !c.m.wordOverflow));
+  const least = keep.reduce((acc, c) => (c.overlap_pct < acc.overlap_pct ? c : acc), keep[0]);
+  for (const mode of avoid.fallback) {
+    if (mode === 'inset') {
+      const top = all.find((c) => c.placement === 'top') ?? evalC({ code: 'top', col: null });
+      const y0 = r2(M + top.m.top + top.m.gap + top.m.mid + top.m.gap);
+      const y1 = r2(H - M - top.m.foot - top.m.gap);
+      const pct = Math.round((10000 * (y1 - y0)) / H) / 100;
+      if (top.fit.report.overflow || pct < avoid.insetMinPct) continue;
+      const inset = { x0: M, y0, x1: r2(W - M), y1 };
+      const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; la menor tapa ${least.overlap_pct} %. ` +
+        `Último recurso 'inset': el texto arriba sobre la superficie de la marca y la foto reducida debajo (${pct} % del alto)`;
+      return { fit: { ...top.fit, chrome: { ...top.fit.chrome, inset } }, warnings: [`CAROUSEL_PHOTO_INSET_FOR_SUBJECT: ${reason}`],
+        report: report(top, 'inset', reason, { inset }) };
+    }
+    if (mode === 'band' && avoid.bandAlpha != null) {
+      const band = { y0: Math.max(0, r2(least.rect.y0 - least.m.gap)), y1: Math.min(H, r2(least.rect.y1 + least.m.gap)) };
+      const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; se usa ${label(least)}, que tapa ${least.overlap_pct} %. ` +
+        `Último recurso 'band': una banda de la superficie de la marca bajo el texto (alfa ${avoid.bandAlpha})`;
+      return { fit: { ...least.fit, chrome: { ...least.fit.chrome, band: { ...band, color: withAlphaRgb(chrome.surface, avoid.bandAlpha) } } },
+        warnings: [`CAROUSEL_BAND_FOR_SUBJECT: ${reason}`], report: report(least, 'band', reason, { band }) };
+    }
+  }
+  const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what} y no hay último recurso aplicable; se usa ${label(least)}, que tapa ${least.overlap_pct} %`;
+  return { fit: least.fit, warnings: [`CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE: ${reason}`], report: report(least, null, reason) };
+}
+
+/** El recorte (px de la FOTO) para el último recurso 'inset': la proporción del hueco, centrado en lo que hay que ver
+ *  (la unión de caras y productos, 0..1 de la foto) o, si no cabe, desde su parte de arriba; sin nada, en el centro.
+ *  Nunca sale de la foto. PURO. */
+export function insetCropRect(imgW: number, imgH: number, boxW: number, boxH: number, focus: FaceBox[]): { left: number; top: number; width: number; height: number } {
+  const aspect = boxW / boxH;
+  let width = imgW, height = imgH;
+  if (imgW / imgH > aspect) width = Math.max(1, Math.round(imgH * aspect));
+  else height = Math.max(1, Math.round(imgW / aspect));
+  const clamp = (v: number, hi: number) => Math.min(Math.max(0, v), Math.max(0, hi));
+  let left = Math.round((imgW - width) / 2), top = Math.round((imgH - height) / 2);
+  if (focus && focus.length) {
+    const u = focus.reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) }));
+    // Centrado en la unión; si la unión no cabe en el recorte, se conserva su parte de ARRIBA (la frente de una cara,
+    // la tapa y la etiqueta de un envase), con un respiro del 4 % del recorte.
+    left = (u.x1 - u.x0) * imgW > width ? Math.round(u.x0 * imgW - 0.04 * width) : Math.round(((u.x0 + u.x1) / 2) * imgW - width / 2);
+    top = (u.y1 - u.y0) * imgH > height ? Math.round(u.y0 * imgH - 0.04 * height) : Math.round(((u.y0 + u.y1) / 2) * imgH - height / 2);
+  }
+  return { left: clamp(left, imgW - width), top: clamp(top, imgH - height), width, height };
 }
 
 // ── COMPOSITOR:END ──
@@ -3469,6 +3883,11 @@ const SIGNS_PROMPT =
   ' Also detect every area of legible text or signage that is part of the scene itself: lit signs (for example an ON AIR sign), ' +
   'posters, screens, boards and lettering on walls. Return each one in signs as box_2d with the same format, tightly around the sign. ' +
   'Do not include product packaging or labels, nor text on clothing. If there are none, return an empty signs list.';
+// 1.11.0 — se suma sólo si la marca declara `avoid_products` (overlay o lámina): sin el token, la petición es la de 1.6.3.
+const PRODUCTS_PROMPT =
+  ' Also detect every product that is a protagonist of the scene: bottles, jars, tubes, boxes, packages, devices or any ' +
+  'other object shown on purpose, held or displayed. Do not include furniture, walls, plants or background objects. ' +
+  'Return each one in products as box_2d with the same format, tightly around the object. If there are none, return an empty products list.';
 
 // ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
 // Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
@@ -3915,17 +4334,19 @@ export async function ledgerRecordDirect(body: unknown, rows: LedgerRow[], ctx: 
 // ── LIBRO-DIRECTO:END ──
 
 type FaceCheck = {
-  faces: FaceBox[] | null; signs: FaceBox[] | null; model: string; model_source?: LabModel['source']; called: boolean; http_status: number | null;
+  faces: FaceBox[] | null; signs: FaceBox[] | null; products: FaceBox[] | null; model: string; model_source?: LabModel['source']; called: boolean; http_status: number | null;
   usage: { input_tokens: number; output_tokens: number } | null; error: string | null; duration_ms: number;
 };
 
 async function detectFaces(
   bytes: Uint8Array, mime: string,
-  opts: { signs?: boolean; calibration?: { model: string; params: Record<string, unknown> | null } | null } = {},
+  opts: { signs?: boolean; products?: boolean; calibration?: { model: string; params: Record<string, unknown> | null } | null } = {},
 ): Promise<FaceCheck> {
   const t0 = Date.now();
-  const out: FaceCheck = { faces: null, signs: null, model: 'UNKNOWN', called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const out: FaceCheck = { faces: null, signs: null, products: null, model: 'UNKNOWN', called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
   const boxList = { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'], properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } };
+  // Las listas que se piden: caras siempre; letreros (1.6.3) y productos (1.11.0) sólo si la marca los declara.
+  const schemaKeys = ['faces', ...(opts.signs ? ['signs'] : []), ...(opts.products ? ['products'] : [])];
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), FACES_TIMEOUT_MS);
   try {
@@ -3940,12 +4361,10 @@ async function detectFaces(
       method: 'POST', signal: controller.signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') }] }],
+        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') + (opts.products ? PRODUCTS_PROMPT : '') }] }],
         generationConfig: mergeGenerationConfig({
           temperature: 0, responseMimeType: 'application/json',
-          responseSchema: opts.signs
-            ? { type: 'OBJECT', required: ['faces', 'signs'], properties: { faces: boxList, signs: boxList } }
-            : { type: 'OBJECT', required: ['faces'], properties: { faces: boxList } },
+          responseSchema: { type: 'OBJECT', required: schemaKeys, properties: Object.fromEntries(schemaKeys.map((k) => [k, boxList])) },
         }, lm.generationParams),
       }),
     });
@@ -3960,6 +4379,7 @@ async function detectFaces(
     if (!text) throw new Error(`sin respuesta (${data?.candidates?.[0]?.finishReason ?? 'sin texto'})`);
     out.faces = parseFaceBoxes(text);
     if (opts.signs) out.signs = parseFaceBoxes(text, 'signs');
+    if (opts.products) out.products = parseFaceBoxes(text, 'products');
   } catch (err) {
     out.error = err instanceof Error && err.name === 'AbortError' ? `el detector superó ${FACES_TIMEOUT_MS / 1000} s`
       : (err instanceof Error ? err.message : String(err)).slice(0, 240);
@@ -4036,7 +4456,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // Si no, todo lo de abajo es exactamente 1.2.0.
     const warnings: string[] = [];
     const carouselTokens = picked.tokens.carousel;
-    const carouselOn = !!carouselIn && isPlain(carouselTokens) && Object.keys(carouselTokens).length > 0;
+    // 1.11.0 — las claves de política (`avoid_faces`, `avoid_products`) no declaran un carrusel: viven en la capa global.
+    const carouselOn = !!carouselIn && carouselChromeDeclared(carouselTokens);
     if (carouselIn && !carouselOn) {
       warnings.push(`CAROUSEL_NOT_DECLARED: la marca no declara tokens.carousel (capas: ${picked.layers.join(' < ')}); se compone como 1.2.0`);
       if (!hasImage) {
@@ -4062,13 +4483,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Fondo: la foto se baja sólo si la lámina la usa. El lienzo es el de la marca (dato), así que
       // todas las láminas de un carrusel salen del MISMO tamaño, tengan foto o no.
       let backgroundSrc: string | null = null;
+      let slideBytes: Uint8Array | null = null;
+      let slideDims: ReturnType<typeof imageDimensions> | null = null;
       if (chrome.slide.background === 'image') {
         const cleanBytes = body.image_data_url
           ? dataUrlToBytes(String(body.image_data_url))
           : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
         const d = imageDimensions(cleanBytes);
         backgroundSrc = `data:${d.mime};base64,${b64(cleanBytes)}`;
+        slideBytes = cleanBytes;
+        slideDims = d;
       }
+      // 1.11.0 — la política de la lámina (dato). Se valida siempre; sólo actúa sobre foto.
+      const avoid = resolveCarouselAvoid(picked.tokens);
       const fonts = await Promise.all(chrome.fonts.map(async (f) => ({
         slot: `carousel:${f.role}`,
         ...(await loadFont(`carousel:${f.role}`, { role: f.role, family: f.family, cssImport: f.cssImport, fontUrl: null, weight: f.weight, italic: f.italic })),
@@ -4079,7 +4506,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // 1.5.0 — primero el límite de área de la plataforma (sólo portada), después el ajuste vertical.
       const area = fitCarouselCoverArea({ chrome, metrics });
       warnings.push(...area.warnings);
-      const fit = fitCarouselContent({ chrome: area.chrome, metrics });
+      // 1.11.0 — EL TEXTO NO TAPA CARAS NI PRODUCTOS. Con la política y foto: la MISMA detección de 1.6.x (más
+      // productos, si se declaran) y la colocación libre de la maqueta. Sin política, sin foto o si la detección falla,
+      // el ajuste de siempre: la lámina de 1.10.0.
+      let fit: ReturnType<typeof fitCarouselContent>;
+      let slideFaceMeta: Record<string, unknown> | null = null;
+      let avoidMeta: Record<string, unknown> | null = null;
+      if (avoid && slideBytes && slideDims) {
+        const fc = await detectFaces(slideBytes, slideDims.mime, { products: !!avoid.products,
+          calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
+        slideFaceMeta = { model: fc.model, model_source: fc.model_source ?? null, provider_called: fc.called, provider_http_status: fc.http_status,
+          usage: fc.usage, duration_ms: fc.duration_ms, boxes: fc.faces, ...(avoid.products ? { product_boxes: fc.products } : {}), error: fc.error };
+        // LIBRO-DIRECTO — como en el overlay: la llamada se asienta en cuanto se hizo. El carril (`ledger_by_caller`) la
+        // asienta él con `logComposeFaces`, que lee este mismo `meta.faces`.
+        if (fc.called) {
+          try {
+            await ledgerRecordDirect(body, [ledgerCallRow({ outputType: 'image_overlay_faces', model: fc.model, usage: fc.usage,
+              ok: !fc.error, httpStatus: fc.http_status, billable: 'estructura', durationMs: fc.duration_ms,
+              markers: fc.error ? [String(fc.error).slice(0, 240)] : [] })], { platform: canal, durationMs: fc.duration_ms, tag: 'compose' });
+          } catch (err) {
+            console.error(`[ImageLab][LIBRO] compose asiento omitido: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+          }
+        }
+        if (fc.faces) {
+          const { width: cw, height: ch } = area.chrome.canvas;
+          const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid,
+            faces: coverMapBoxes(fc.faces, slideDims.width, slideDims.height, cw, ch),
+            products: coverMapBoxes(fc.products ?? [], slideDims.width, slideDims.height, cw, ch) });
+          fit = pick.fit;
+          warnings.push(...pick.warnings);
+          avoidMeta = pick.report;
+          // Último recurso 'inset': la foto se recorta a la proporción del hueco, centrada en lo que hay que ver.
+          const ins = fit.chrome.inset;
+          if (ins) {
+            try {
+              const cr = insetCropRect(slideDims.width, slideDims.height, ins.x1 - ins.x0, ins.y1 - ins.y0,
+                [...fc.faces, ...(avoid.products ? (fc.products ?? []) : [])]);
+              const cropped = await sharp(Buffer.from(slideBytes)).extract(cr).png().toBuffer();
+              backgroundSrc = `data:image/png;base64,${b64(new Uint8Array(cropped))}`;
+              avoidMeta = { ...avoidMeta, inset_crop: cr };
+            } catch (e) {
+              warnings.push(`CAROUSEL_PHOTO_INSET_CROP_FAILED: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}; la foto entra entera, centrada`);
+            }
+          }
+        } else {
+          fit = fitCarouselContent({ chrome: area.chrome, metrics });
+          warnings.push(`CAROUSEL_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; se compone en el centro de la maqueta, como siempre`);
+          avoidMeta = { faces: null, placement_used: 'center', moved: false, fallback: null, reason: `detección no disponible: ${fc.error ?? 'sin respuesta'}` };
+        }
+      } else {
+        fit = fitCarouselContent({ chrome: area.chrome, metrics });
+      }
       warnings.push(...fit.warnings);
       const scene = buildCarouselScene({ chrome: fit.chrome, style, backgroundSrc });
       const { width, height } = chrome.canvas;
@@ -4103,7 +4580,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         width, height,
         fonts: fonts.map((f) => ({ slot: f.slot, family: f.name, weight: f.weight, source: f.source })),
         // La franja de identidad sólo se dibuja en láminas con foto (sobre superficie, el logotipo firma).
-        identity: style.identity && backgroundSrc
+        identity: style.identity && backgroundSrc && !fit.chrome.inset
           ? { mode: style.identity.mode, color: style.identity.color, width_pct: style.identity.widthPct,
               thickness_px: Math.max(1, Math.round((style.identity.widthPct / 100) * Math.min(width, height))),
               short_side: Math.min(width, height) }
@@ -4115,6 +4592,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         meta: {
           carousel_applied: true,
           warnings,
+          // 1.11.0 — la detección de la lámina, con la forma del overlay: el carril la asienta (`logComposeFaces`).
+          ...(slideFaceMeta ? { faces: slideFaceMeta } : {}),
           carousel: {
             index: chrome.slide.index, total: chrome.slide.total, role: chrome.slide.role, background: chrome.slide.background,
             keyword_found: !!chrome.headline.find((p) => p.keyword), logo: chrome.logo ? chrome.logo.kind : null,
@@ -4124,7 +4603,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
                   styled: !!chrome.headlineEmphasis }
               : null,
             // 1.3.4 — si la lámina llevó efecto de texto, y cuál: sólo en láminas con foto.
-            text_effect: chrome.textEffect && backgroundSrc
+            text_effect: chrome.textEffect && backgroundSrc && !fit.chrome.inset
               ? { kind: chrome.textEffect.kind, color: chrome.textEffect.fn, alpha: chrome.textEffect.alpha,
                   blur_pct: chrome.textEffect.blurPct, offset_pct: chrome.textEffect.offsetPct, text_shadow: carouselTextShadow(chrome.textEffect, width) }
               : null,
@@ -4132,6 +4611,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             fit: fit.report,
             // 1.5.0 — el límite de área de la portada, si rigió.
             ...(area.report ? { text_area: area.report } : {}),
+            // 1.11.0 — qué se detectó, dónde quedó el bloque y por qué (sólo con la política y foto).
+            ...(avoidMeta ? { avoid: avoidMeta } : {}),
           },
         },
         duration_ms: Date.now() - t0,
@@ -4204,10 +4685,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let signsUnder: FaceBox[] = [];
     if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
       const wantSigns = !!finalStyle.layout.avoidSceneText;
-      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns,
+      // 1.11.0 — con `avoid_products`, la MISMA llamada pide también los productos de la escena.
+      const wantProducts = !!finalStyle.layout.avoidProducts;
+      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns, products: wantProducts,
         calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
       faceMeta = { model: fc.model, model_source: fc.model_source ?? null, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
-        duration_ms: fc.duration_ms, boxes: fc.faces, ...(wantSigns ? { sign_boxes: fc.signs } : {}), error: fc.error };
+        duration_ms: fc.duration_ms, boxes: fc.faces, ...(wantSigns ? { sign_boxes: fc.signs } : {}),
+        ...(wantProducts ? { product_boxes: fc.products } : {}), error: fc.error };
       // LIBRO-DIRECTO — la llamada al detector se asienta AQUÍ, en cuanto se hizo: si la composición
       // falla después, el gasto ya existió. Clase 'estructura', como la asienta el carril.
       if (fc.called) {
@@ -4221,7 +4705,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
-          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs });
+          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs, products: fc.products });
         finalStyle = ch.style;
         faceMeta = { ...faceMeta, ...(ch.report ?? {}) };
         signsUnder = ch.report?.signs_under_text ?? [];
