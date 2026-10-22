@@ -1,0 +1,192 @@
+{
+ "1.12.0": {
+  "ref": "1835e62",
+  "casos": {
+   "06a5180c": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": true,
+    "scene_sha256": "d9f0d204b3d50a650379a948e835919ee171bb77f9efb6de720ba28e314de058"
+   },
+   "0cd8f005": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "1e2e665bc6e4ab92783eff503bdce35667d3da01c916a0d2bd2e74d606e35c26"
+   },
+   "2383b96f": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "17def47130102d5d4d06411e69890f765f6811c37ba7f41e8ba78f17377e7aa2"
+   },
+   "7085ece4": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "0a2643fe4c6674d90ca225160e876a6b60f2bdbb684368f5d9f4377283211bc7"
+   },
+   "b24cdc5f": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "7433d5323793030d9e30c2475ff068ac3a0d213fc5186be1cdc9dae04a4fde4b"
+   },
+   "da5bafa1": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "d5add808d63516d498d41f9f18df3d6d4390d01eb1910fe34e2d3224de12c381"
+   },
+   "f0955319": {
+    "anchor": "middle_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "6c32ad3cd7ce906567ceed85f0639eb0981669aab5e8c3daacb4be9effd2734e"
+   },
+   "fe9847d5": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "8596d1b8372672c2d6553046e9aa144e188f8e0bd9b38f68bbc0c4f02187ea36"
+   },
+   "733c033a": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "714449b3c06826390f25588291e727a3b073ca46516b947c0557855b64c546db"
+   },
+   "b95fd1c9": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 5.4,
+    "subheadline": false,
+    "scene_sha256": "9aa03d9bfce1840e64a730bcf9b4a28b59e0a92ce4e20dd048727ee0d94b9569"
+   },
+   "d9e97f57": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "da67d00e3712aeed2f0c404ad028404ec37f3643ee2f4dfe1c57e2d52143bf2f"
+   }
+  }
+ },
+ "1.13.0": {
+  "ref": "7307254",
+  "casos": {
+   "06a5180c": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": true,
+    "scene_sha256": "d9f0d204b3d50a650379a948e835919ee171bb77f9efb6de720ba28e314de058"
+   },
+   "0cd8f005": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "1e2e665bc6e4ab92783eff503bdce35667d3da01c916a0d2bd2e74d606e35c26"
+   },
+   "2383b96f": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "17def47130102d5d4d06411e69890f765f6811c37ba7f41e8ba78f17377e7aa2"
+   },
+   "7085ece4": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "0a2643fe4c6674d90ca225160e876a6b60f2bdbb684368f5d9f4377283211bc7"
+   },
+   "b24cdc5f": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "7433d5323793030d9e30c2475ff068ac3a0d213fc5186be1cdc9dae04a4fde4b"
+   },
+   "da5bafa1": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "d5add808d63516d498d41f9f18df3d6d4390d01eb1910fe34e2d3224de12c381"
+   },
+   "f0955319": {
+    "anchor": "middle_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "6c32ad3cd7ce906567ceed85f0639eb0981669aab5e8c3daacb4be9effd2734e"
+   },
+   "fe9847d5": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "8596d1b8372672c2d6553046e9aa144e188f8e0bd9b38f68bbc0c4f02187ea36"
+   },
+   "733c033a": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "714449b3c06826390f25588291e727a3b073ca46516b947c0557855b64c546db"
+   },
+   "b95fd1c9": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 5.4,
+    "subheadline": false,
+    "scene_sha256": "9aa03d9bfce1840e64a730bcf9b4a28b59e0a92ce4e20dd048727ee0d94b9569"
+   },
+   "d9e97f57": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "da67d00e3712aeed2f0c404ad028404ec37f3643ee2f4dfe1c57e2d52143bf2f"
+   }
+  }
+ },
+ "1.13.0+avoid_people": {
+  "ref": "7307254",
+  "casos": {
+   "733c033a": {
+    "anchor": "bottom_left",
+    "max_width_pct": 46.5,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "764b3aa63f3cb40b3d459a5f888967dd166b23e6f68a1ccc01c0156ef59bb7da"
+   },
+   "b95fd1c9": {
+    "anchor": "bottom_left",
+    "max_width_pct": 43,
+    "headline_size_pct": 5.4,
+    "subheadline": false,
+    "scene_sha256": "50f9275d751a16860838cf183b2ee126c36eae4de7c9ab3c1eecac9e86dd28be"
+   },
+   "d9e97f57": {
+    "anchor": "bottom_left",
+    "max_width_pct": 30.5,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "31e2ee937895d21c3591915349832f91030a59ed9852b5b074fab4945e1bb467"
+   }
+  }
+ }
+}
