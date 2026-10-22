@@ -1221,6 +1221,40 @@ export interface PromptLocation {
   // 2026-10-03 — las palabras que el lugar muestra (un letrero del set). Dato de
   // `location_blueprints.raw_config.allowed_scene_text`; sin él, la cláusula sin texto de siempre.
   allowed_scene_text?: string[];
+  // 2026-10-22 — CÓMO entra el lugar (dato del carril: `location_blueprints.scene_mode` o la escena del tema).
+  // `evoke`: una ciudad o un barrio; la escena es NUEVA y «se ve como» ese lugar, y sus fotos (si viajan) son
+  // sólo referencia de estilo y atmósfera. Ausente o cualquier otro valor: `exact`, el lugar real de siempre.
+  mode?: LocationMode | null;
+  // 2026-10-22 — lo que la escena NO debe parecer (dato de `locality_visual_profiles.avoid`). Sólo en `evoke`.
+  avoid?: string[] | null;
+}
+
+/** 2026-10-22 — los dos modos de un lugar. `exact` es el de siempre; `evoke` lo pide el dato. */
+export type LocationMode = 'exact' | 'evoke';
+/** El modo efectivo de un lugar: `evoke` sólo si el dato lo declara; todo lo demás es `exact`. */
+export function locationModeOf(loc: { mode?: unknown } | null | undefined): LocationMode {
+  return loc?.mode === 'evoke' ? 'evoke' : 'exact';
+}
+/** Lo que el lugar evocado no debe parecer: textos limpios, sin vacíos ni repetidos, en su orden. */
+export function normalizeLocationAvoid(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const a of raw) {
+    const s = typeof a === 'string' ? a.trim() : '';
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+/**
+ * La cláusula del lugar evocado. Va con las del motor y se repone si la síntesis la pierde: que la escena se
+ * vea como la ciudad y no copie el edificio de la foto es justo lo que el modelo tiende a olvidar.
+ */
+export function locationEvokeClause(name: string, refs: number, avoid: string[] = []): string {
+  const n = String(name ?? '').trim();
+  const a = normalizeLocationAvoid(avoid);
+  return `The setting must read unmistakably as ${n}, in a new view of it` +
+    (refs > 0 ? ' — never a copy of the building, street or framing of the location reference photo' : '') +
+    (a.length ? `; it must not look like ${a.join(', ')}` : '');
 }
 
 /** Tope de fotos de referencia de persona por llamada: más fotos no dan más parecido y sí más coste. */
@@ -1909,7 +1943,10 @@ export function subjectLetter(i: number): string { return SUBJECT_LETTERS[i] ?? 
  * los blueprints de avatars»): con dos personas y el kit, cada persona viajó con UNA foto (18ff54c6,
  * 9c684715: `reference_images = 3`), y al editar viajaron 4 imágenes a un modelo que admite 3 (c0a849f8).
  */
-export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[]; reserved?: number }): {
+export function allocateReferences(args: { personaRefs: string[][]; locationRefs: string[]; productRefs: string[]; reserved?: number;
+  // 2026-10-22 — el lugar se EVOCA: su foto es sólo estilo, así que es lo primero que cede, también con una
+  // persona. Sin la bandera, el reparto de siempre, byte a byte.
+  locationEvoke?: boolean }): {
   persona: string[][]; location: string[]; product: string[];
   budget: number | null; over_budget: boolean; product_left: boolean;
   dropped: { persona: number; location: number; product: number };
@@ -1918,10 +1955,15 @@ export function allocateReferences(args: { personaRefs: string[][]; locationRefs
   const lr = args.locationRefs ?? [];
   const xr = args.productRefs ?? [];
   if (pr.length <= 1) {
-    const location = lr.slice(0, MAX_LOCATION_REFS);
     const product = xr.slice(0, MAX_PRODUCT_REFS);
-    const cap = location.length || product.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
+    const cap = lr.length || product.length ? MAX_PERSONA_REFS_WITH_OTHERS : MAX_PERSONA_REFS;
     const persona = pr.map((r) => (r ?? []).slice(0, cap));
+    // Evocar: la foto de estilo entra sólo si queda plaza dentro de `MODEL_MAX_INPUT_IMAGES` (contando la
+    // imagen actual al editar). Exacto: la regla de siempre (una foto del lugar, sin presupuesto).
+    const usados = Math.max(0, Math.floor(Number(args.reserved ?? 0)) || 0) + (persona[0]?.length ?? 0) + product.length;
+    const location = args.locationEvoke
+      ? (usados < MODEL_MAX_INPUT_IMAGES ? lr.slice(0, MAX_LOCATION_REFS) : [])
+      : lr.slice(0, MAX_LOCATION_REFS);
     return { persona, location, product, budget: null, over_budget: false, product_left: false,
       dropped: { persona: (pr[0]?.length ?? 0) - (persona[0]?.length ?? 0), location: lr.length - location.length, product: xr.length - product.length } };
   }
@@ -1973,6 +2015,8 @@ export function engineClausesFor(args: {
   anchored?: string[] | null;
   /** 2026-10-11 — las personas con la ropa de sus fotos declarada (`referenceOutfitsOf`). Ausente: la lista de antes. */
   outfitAvoid?: Array<{ name: string; outfit: string }> | null;
+  /** 2026-10-22 — el lugar evocado (`locationEvokeClause`). Ausente: la lista de antes. */
+  locationEvoke?: { name: string; refs: number; avoid?: string[] | null } | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
@@ -1990,7 +2034,10 @@ export function engineClausesFor(args: {
       .map((o) => personaReferenceOutfitClause(o.name, o.outfit))),
     ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
-    ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : [])];
+    ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : []),
+    // Al editar no: la escena ya existe y editar no es reubicar.
+    ...(args.locationEvoke?.name?.trim() && !edit
+      ? [locationEvokeClause(args.locationEvoke.name, args.locationEvoke.refs, args.locationEvoke.avoid ?? [])] : [])];
 }
 
 export interface PromptBuilderInput {
@@ -2099,7 +2146,20 @@ export function buildBuilderUserMessage(input: PromptBuilderInput): string {
     parts.push(`PERSONA EXPRESSION:\n${personaExpressionBlock(input.persona)}`);
     parts.push(`PERSONA WARDROBE:\n${personaWardrobeBlock(input.persona, input.mode, input.wardrobeSeed)}`);
   }
-  if (input.location?.name?.trim() && input.location.description?.trim()) {
+  if (input.location?.name?.trim() && input.location.description?.trim() && locationModeOf(input.location) === 'evoke') {
+    // 2026-10-22 — EVOCAR: la ciudad o el barrio, en una escena NUEVA. La foto (si viaja) es estilo, no sujeto.
+    const refs = (input.location.reference_image_urls ?? []).length;
+    parts.push(
+      `LOCATION — the scene is set in "${input.location.name.trim()}" and must read unmistakably as that place, in a NEW view of it ` +
+      '(another street, rooftop, balcony, waterfront or angle), built from its typical architecture, skyline, vegetation, light and climate described below. ' +
+      (refs
+        ? 'The attached location photo(s) are an ATMOSPHERE and STYLE reference only (light, materials, palette, vegetation): never reproduce the exact building, street, view or framing they show. '
+        : 'There is no photo of it: build the place from this description alone. ') +
+      `The camera frames the subject, not the place — the place never dominates the person:\n${input.location.description.trim()}`,
+    );
+    const avoid = normalizeLocationAvoid(input.location.avoid);
+    if (avoid.length) parts.push(`LOCATION — MUST NOT LOOK LIKE: ${avoid.join('; ')}.`);
+  } else if (input.location?.name?.trim() && input.location.description?.trim()) {
     const refs = (input.location.reference_image_urls ?? []).length;
     parts.push(
       `LOCATION — the scene takes place at "${input.location.name.trim()}", a real place of this brand` +
@@ -2143,6 +2203,8 @@ export function imageRoleClause(args: {
   productNames?: string[] | null; productRefs?: number;
   // 2026-10-03 — dos o más personas: cada una con cuántas fotos suyas viajan, en el orden de las imágenes.
   personas?: Array<{ name: string; refs: number }> | null;
+  // 2026-10-22 — el lugar se evoca: su foto se rotula como ESTILO, no como el lugar donde ocurre la escena.
+  locationEvoke?: boolean;
 }): string {
   if ((args.personas ?? []).length >= 2) return labeledReferencesClause(args as typeof args & { personas: Array<{ name: string; refs: number }> });
   const c: string[] = [];
@@ -2169,7 +2231,9 @@ export function imageRoleClause(args: {
     at += perRefs;
   }
   if (locRefs > 0) {
-    c.push(`${span(locRefs)} show the real place "${args.locationName}": set the scene there as the backdrop, keeping its materials, colours and style recognizable; frame the subject, not the room. Do not copy any person from those photos.`);
+    c.push(args.locationEvoke
+      ? `${span(locRefs)} ${locRefs === 1 ? 'is' : 'are'} a STYLE reference of "${args.locationName}" only: match its light, climate, vegetation and architectural language, and compose a new view — never reproduce the building, street or view it shows. Do not copy any person from those photos.`
+      : `${span(locRefs)} show the real place "${args.locationName}": set the scene there as the backdrop, keeping its materials, colours and style recognizable; frame the subject, not the room. Do not copy any person from those photos.`);
     at += locRefs;
   }
   if (prodRefs > 0) {
@@ -2190,6 +2254,8 @@ export function labeledReferencesClause(args: {
   hasSource: boolean; personas: Array<{ name: string; refs: number }>;
   locationName?: string | null; locationRefs?: number; productNames?: string[] | null; productRefs?: number;
   styleRefs?: number;
+  // 2026-10-22 — ver `imageRoleClause`: con el lugar evocado, su foto es ESTILO del lugar.
+  locationEvoke?: boolean;
 }): string {
   const c: string[] = [];
   const people = args.personas.map((p, i) => ({ name: String(p.name ?? '').trim(), refs: Math.max(0, p.refs ?? 0), letter: subjectLetter(i) }));
@@ -2208,7 +2274,9 @@ export function labeledReferencesClause(args: {
     at += p.refs;
   }
   if (locRefs > 0) {
-    labels.push(`${span(locRefs)}: BACKGROUND, the real place "${args.locationName}" — set the scene there, keeping its materials, colours and style recognizable; do not copy any person from it.`);
+    labels.push(args.locationEvoke
+      ? `${span(locRefs)}: STYLE of the place "${args.locationName}" — match its light, climate, vegetation and architectural language in a new view; never reproduce the building, street or view it shows, and do not copy any person from it.`
+      : `${span(locRefs)}: BACKGROUND, the real place "${args.locationName}" — set the scene there, keeping its materials, colours and style recognizable; do not copy any person from it.`);
     at += locRefs;
   }
   if (prodRefs > 0) {
@@ -2618,6 +2686,8 @@ export interface RespuestaBaseDeImagen {
   persona_used: boolean;
   location_used: string | null;
   location_refs: number;
+  // 2026-10-22 — sólo con el lugar evocado; ausente, la respuesta de siempre.
+  location_mode?: 'evoke';
   product_composited: boolean;
   product_in_scene: string[] | null;
   product_left_scene: Record<string, unknown> | null;
@@ -2670,6 +2740,7 @@ export function payloadDeImagen(
     persona_used: r.persona_used,
     location_used: r.location_used,
     location_refs: r.location_refs,
+    ...(r.location_mode === 'evoke' ? { location_mode: 'evoke' } : {}),
     product_composited: r.product_composited,
     product_in_scene: r.product_in_scene,
     ...(r.product_left_scene ? { product_left_scene: {
@@ -3293,6 +3364,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       params.location && typeof params.location.name === 'string' && typeof params.location.description === 'string'
         ? params.location as PromptLocation : null;
     const allowedSceneText = normalizeAllowedSceneText(location?.allowed_scene_text);
+    // 2026-10-22 — EVOCAR: el lugar es una ciudad o un barrio, la escena es nueva y la foto es estilo (dato del carril).
+    const locationEvoke = !!location && locationModeOf(location) === 'evoke';
     // Opción (c) (Sam, 2026-09-27): el producto se PINTA en la escena. Sólo se pega por código si la
     // marca lo declara (`imagelab_overlay_tokens.product.mode = 'composite'`), y entonces no se pinta.
     const productIn: PromptProduct | null =
@@ -3333,6 +3406,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
       productRefs: productWanted ? productWanted.items.map((i) => i.image_url) : [],
       reserved: mode === 'edit_from_current' ? 1 : 0,
+      // 2026-10-22 — sólo con el lugar evocado: sin él, el reparto de siempre.
+      ...(locationEvoke ? { locationEvoke: true } : {}),
     });
     const productInScene = alloc.product_left ? null : productWanted;
     if (alloc.product_left) {
@@ -3346,7 +3421,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       ? (personaUsed ? productStagingFor(productInScene.kind ?? null, productInScene.items.length, stagingSeed) : 'on_surface')
       : null;
 
-    const builderLocation: PromptLocation | null = location && usedPersonas.length >= 2
+    // Con el lugar evocado, su foto también puede ceder con una persona: el constructor sólo habla de la que viaja.
+    const builderLocation: PromptLocation | null = location && (usedPersonas.length >= 2 || locationEvoke)
       ? { ...location, reference_image_urls: alloc.location } : location;
 
     let finalPrompt = built.prompt;
@@ -3402,6 +3478,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         protagonist: sceneProtagonistOf(usedPersonas)?.name ?? null,
         anchored: faceAnchoredNames(usedPersonas, alloc.persona),
         outfitAvoid: referenceOutfitsOf(usedPersonas),
+        ...(locationEvoke ? { locationEvoke: { name: location!.name, refs: alloc.location.length, avoid: normalizeLocationAvoid(location!.avoid) } } : {}),
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
       console.log(`[ImageLab][IMG-01] constructor v=${v.version} modelo=${v.model_id} modo=${mode} directrices=${directives.length} persona=${personaUsed ? 'sí' : 'no'} prompt=${finalPrompt.length} chars`);
@@ -3457,6 +3534,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         locationName: location?.name ?? null, locationRefs: locationRefs.length,
         productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
         productRefs: productRefs.length,
+        ...(locationEvoke ? { locationEvoke: true } : {}),
       }),
       negative_prompt: built.negativePrompt,
       aspect_ratio: built.aspectRatio,
@@ -3481,6 +3559,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         persona_used:           personaUsed,
         location_used:          location ? location.name : null,
         location_refs:          locationRefs.length,
+        // 2026-10-22 — sólo con el lugar evocado: sin él, la respuesta es la de siempre, clave por clave.
+        ...(locationEvoke ? { location_mode: 'evoke' as const } : {}),
         product_composited:     productComposited && !productInScene,
         product_in_scene:       productInScene ? productInScene.items.slice(0, MAX_PRODUCT_REFS).map((i) => i.name) : null,
         // 2026-10-15 — si el producto salió de la escena para dejar sitio a la identidad, cuál y por qué.
