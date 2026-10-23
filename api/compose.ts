@@ -234,7 +234,14 @@ declare const process: { env: Record<string, string | undefined> };
 //           caras y productos: el cuerpo nunca lo dispara.
 //         Sin `avoid_people`, idéntico a 1.13.0. Con `avoid_people` y una figura que ninguna colocación libra, la elección
 //         y la escena son las de 1.12.0 (con la regla de la palabra sola de 1.13.0).
-export const COMPOSITOR_VERSION = '1.13.1';
+//   1.14.0 (2026-10-23) — EL TITULAR CABE EN EL ALTO, EN CUALQUIER PROPORCIÓN. Los tamaños del overlay salen del
+//         ANCHO y el escalón se elige por caracteres; en un lienzo apaisado (16:9, 1.91:1) un titular largo con
+//         bajada, anclado abajo, medía más que el alto disponible y se salía por arriba. `fitOverlayTextHeight` mide
+//         el alto del bloque con `measureOverlayText` y, si no cabe entre márgenes (o zona segura, y por encima de
+//         una franja inferior más gruesa que el margen), baja por los escalones de `faceFitLadder`; si ni al último
+//         cabe, compone al mínimo y emite `OVERLAY_TEXT_OVERFLOW`. Sin token nuevo: es geometría del eje. Si el
+//         bloque ya cabe, la escena sale idéntica a la de 1.13.1. `meta.text_height` sólo cuando hubo ajuste.
+export const COMPOSITOR_VERSION = '1.14.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -1487,6 +1494,68 @@ export function fitOverlayTextArea(args: {
   if (!chosen) markers.push(`OVERLAY_TEXT_AREA_EXCEEDED: ni al tamaño mínimo cabe en ${limit} % (queda en ${m.areaPct} %); se compone igual, el texto no se recorta`);
   return { style: { ...out, markers },
     report: { limit_pct: limit, area_pct_before: first.areaPct, area_pct: m.areaPct, adjusted: true, dropped_subheadline: !!(sub && final.drop), exceeded: !chosen, estimated_fonts: first.estimated } };
+}
+
+/**
+ * 1.14.0 — el hueco VERTICAL (px) donde puede vivir el bloque de texto del overlay: el alto del lienzo menos
+ * los rellenos de arriba y de abajo de `overlayTextBox` (margen o zona segura). Si la franja de identidad va
+ * en el borde inferior y es más gruesa que el relleno de abajo, el hueco se mide por encima de ella. PURO.
+ */
+export function overlayTextVerticalRoom(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number): number {
+  const box = overlayTextBox(style, width, height);
+  let bottom = box.bottom;
+  if (style.identity && style.identity.mode === 'edge_bottom') {
+    // El mismo grosor que dibuja `buildOverlayScene`: % del lado corto, al menos 1 px.
+    const thickness = Math.max(1, Math.round(Math.round((style.identity.widthPct / 100) * Math.min(width, height) * 100) / 100));
+    bottom = Math.max(bottom, thickness);
+  }
+  return Math.round((height - box.top - bottom) * 100) / 100;
+}
+
+/**
+ * 1.14.0 — EL BLOQUE DE TEXTO CABE EN EL ALTO, en cualquier proporción. Los tamaños del overlay se derivan del
+ * ANCHO (`buildOverlayScene`), y `fitFontSizePct` elige el escalón por número de caracteres: en un lienzo
+ * apaisado el mismo titular rinde las mismas líneas con letra más grande sobre menos alto, y un bloque anclado
+ * abajo podía salirse por arriba del lienzo (o al revés). `fitOverlayTextArea` mide área, no alto, y sólo rige
+ * con `max_text_area_pct`. Aquí se mide el ALTO del bloque con `measureOverlayText` —el mismo medidor y el mismo
+ * corte de línea que el límite de área— y se compara con `overlayTextVerticalRoom`.
+ *
+ * Si el bloque cabe —o no hay titular— devuelve EL MISMO estilo y ningún informe: la escena sale idéntica. Si no
+ * cabe, baja por los escalones de `faceFitLadder` (titular, luego bajada, luego sin bajada: el mismo orden que el
+ * límite de área) hasta el primero que cabe. Si ni al último cabe, compone al mínimo y emite
+ * `OVERLAY_TEXT_OVERFLOW`: nunca se recorta ni se reescribe el texto en silencio. PURO y determinista.
+ */
+export function fitOverlayTextHeight(args: {
+  style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
+  metrics?: Record<string, FontAdvance | null | undefined> | null;
+}): { style: ReturnType<typeof resolveOverlayStyle>; report: null | { room_px: number; height_px_before: number; height_px: number; adjusted: boolean; dropped_subheadline: boolean; exceeded: boolean; estimated_fonts: string[] } } {
+  const base = args.style;
+  if (!base.slots.headline) return { style: base, report: null };
+  const room = overlayTextVerticalRoom(base, args.width, args.height);
+  const first = measureOverlayText(base, args.width, args.height, args.metrics);
+  if (first.height <= room) return { style: base, report: null };
+  const ladder = faceFitLadder(base);
+  let chosen: (typeof ladder)[number] | null = null;
+  let m = first;
+  for (const step of ladder) {
+    m = measureOverlayText(step.style, args.width, args.height, args.metrics);
+    if (m.height <= room) { chosen = step; break; }
+  }
+  const final = chosen ?? ladder[ladder.length - 1] ?? { style: base, what: [] as string[] };
+  if (!chosen && final.style !== base) m = measureOverlayText(final.style, args.width, args.height, args.metrics);
+  const est = first.estimated.length ? ` (medida estimada: sin métricas de ${first.estimated.join(', ')})` : '';
+  const markers = [...base.markers];
+  if (final.what.length) {
+    markers.push(`OVERLAY_TEXT_HEIGHT_REDUCED: el bloque de texto medía ${first.height} px de alto y el lienzo ${args.width}×${args.height} deja ${room} px entre márgenes; ${final.what.join(' · ')} → ${m.height} px${est}`);
+  }
+  if (!chosen) {
+    markers.push(`OVERLAY_TEXT_OVERFLOW: el bloque de texto mide ${m.height} px de alto y el lienzo ${args.width}×${args.height} deja ${room} px entre márgenes; ni al escalón más chico cabe${est}. ` +
+      'Se compone al mínimo y el texto NO se reescribe: parte del bloque puede quedar fuera del lienzo; hay que acortar el titular o declarar un escalón menor.');
+  }
+  const sub = base.slots.subheadline;
+  return { style: { ...final.style, markers },
+    report: { room_px: room, height_px_before: first.height, height_px: m.height, adjusted: final.what.length > 0,
+      dropped_subheadline: !!sub && !final.style.slots.subheadline, exceeded: !chosen, estimated_fonts: first.estimated } };
 }
 
 /**
@@ -5338,7 +5407,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
     }
     const areaFit = fitOverlayTextArea({ style: oStyle, width: dims.width, height: dims.height, metrics: areaMetrics });
-    let finalStyle = areaFit.style;
+    // 1.14.0 — el bloque cabe en el ALTO del lienzo, en cualquier proporción. Si ya cabe, el MISMO estilo.
+    const heightFit = fitOverlayTextHeight({ style: areaFit.style, width: dims.width, height: dims.height, metrics: areaMetrics });
+    let finalStyle = heightFit.style;
 
     // 1.6.0 — el texto no tapa una cara. Sólo si la marca o el canal lo declaran y hay titular.
     // 1.6.3 — con `avoid_scene_text`, la MISMA llamada pide también los letreros de la escena.
@@ -5501,6 +5572,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       meta: {
         carousel_applied: false, warnings,
         ...(areaFit.report ? { text_area: areaFit.report } : {}),
+        // 1.13.0 — sólo si el bloque no cabía en el alto: qué se ajustó y si aun así excede.
+        ...(heightFit.report ? { text_height: heightFit.report } : {}),
         // 1.6.0 — la detección de caras: qué vio, dónde quedó el texto y el consumo del modelo (el carril lo asienta).
         ...(faceMeta ? { faces: faceMeta } : {}),
         // 1.6.2 — qué contraste se midió debajo del texto y si la sombra se aplicó.

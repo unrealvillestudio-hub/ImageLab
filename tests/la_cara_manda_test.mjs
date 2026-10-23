@@ -264,7 +264,7 @@ test('7a · el handler ya no reajusta una banda y la escena del overlay no la di
   assert.equal(SRC.includes('overlayBandRect'), false);
   assert.equal(/if \(style\.band\)/.test(SRC), false);
   assert.equal(SRC.includes('OVERLAY_BAND_FOR_PERSON'), false);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.13\.1'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.1|14\.0)'/);
 });
 test('7b · la elección de 1.12.0 es la de siempre: chooseOverlayAnchorCore y chooseCarouselPlacementCore', () => {
   assert.match(SRC, /const r12 = chooseOverlayAnchorCore\(\{ \.\.\.args, style: \{ \.\.\.style, layout: layoutSinCuerpo \}, people: null \}\);/);
@@ -280,7 +280,7 @@ test('8a · el bloque nuevo no nombra marcas, ciudades ni clientes', () => {
   const ini2 = SRC.indexOf('export function chooseCarouselPlacement(args: Parameters');
   const fin2 = SRC.indexOf('/**\n * ELIGE DÓNDE VA EL BLOQUE DE LA LÁMINA.');
   assert.ok(ini > 0 && fin > ini && ini2 > 0 && fin2 > ini2);
-  const bloque = SRC.slice(ini, fin) + SRC.slice(ini2, fin2) + SRC.slice(SRC.indexOf('//   1.13.1 (2026-10-22)'), SRC.indexOf("export const COMPOSITOR_VERSION = '1.13.1'"));
+  const bloque = SRC.slice(ini, fin) + SRC.slice(ini2, fin2) + SRC.slice(SRC.indexOf('//   1.13.1 (2026-10-22)'), SRC.indexOf("export const COMPOSITOR_VERSION = '"));
   for (const w of ['LucienSael', 'Lucien', 'NeuroneSCF', 'Neurone', 'ForumPHs', 'Unrealville', 'Patricia', 'Miami', 'Panam', 'Broward', 'Florida']) {
     assert.equal(bloque.includes(w), false, `nombra «${w}»`);
   }
