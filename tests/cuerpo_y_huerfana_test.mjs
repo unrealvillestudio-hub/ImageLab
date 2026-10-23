@@ -12,10 +12,13 @@
 //   2. Contrato de dato: `layout.avoid_people` / `carousel.avoid_people` mal escritos fallan nombrando; exigen
 //      `avoid_faces`; la lámina no admite último recurso propio.
 //   3. Overlay con figura: de pie al centro-derecha y al centro ⇒ el bloque se estrecha al lado libre; cuerpo a la
-//      izquierda con anclas de la izquierda ⇒ último recurso 'band' (sólo bajo el texto); con anclas de la derecha
-//      declaradas ⇒ se estrecha a la derecha; por debajo del mínimo no se estrecha; la zona segura manda; la fila
-//      pedida (`text_place`) manda y, si tapa, se dice sin banda.
-//   4. Lámina con figura: columna estrechada al lado libre; si no cabe, el último recurso de 1.11.0.
+//      izquierda con anclas de la izquierda ⇒ (1.13.1) la colocación de 1.12.0, que libra la cara, sin banda; con anclas
+//      de la derecha declaradas ⇒ se estrecha a la derecha; por debajo del mínimo no se estrecha; la zona segura manda;
+//      la fila pedida (`text_place`) manda y, si tapa, se dice sin banda.
+//   4. Lámina con figura: columna estrechada al lado libre; si no cabe, (1.13.1) la colocación de 1.12.0: el cuerpo no
+//      dispara el último recurso de 1.11.0.
+//   1.13.1 — la banda del overlay se retiró y el cuerpo sólo desempata entre colocaciones que libran la cara: 2a, 3c, 3d,
+//   3g, 4c y 6c se ajustaron a eso. El detalle y los casos medidos están en `la_cara_manda_test.mjs`.
 //   5. La palabra sola: los dos textos medidos, una viuda al final sin énfasis, la bajada, la lámina; sin métricas,
 //      nada cambia; el número de líneas no cambia.
 //   6. Cableado: la MISMA detección (figuras sólo con el token), el corte va después de la elección y viaja en `meta`.
@@ -107,17 +110,18 @@ test('2a · avoid_people mal escrito falla nombrando; apagado no existe', () => 
     [{ enabled: true, margin_pct: 40 }, /layout\.avoid_people\.margin_pct/],
     [{ enabled: true, min_width_pct: 10 }, /layout\.avoid_people\.min_width_pct/],
     [{ enabled: true, fallback: 'inset' }, /layout\.avoid_people\.fallback/],
-    [{ enabled: true, fallback: 'band' }, /layout\.avoid_people\.band\.color/],
-    [{ enabled: true, fallback: 'band', band: { color: 'oscuro' } }, /layout\.avoid_people\.band\.alpha/],
-    [{ enabled: true, fallback: 'band', band: { color: 'violeta', alpha: 0.5 } }, /band\.color='violeta'/],
   ];
   for (const [tok, re] of bad) {
     assert.throws(() => style({ avoid_people: tok }), (e) => e.label === 'COMPOSITOR_TOKENS_INCOMPLETE' && re.test(e.message), JSON.stringify(tok));
   }
   assert.equal('avoidPeople' in style({ avoid_people: { enabled: false } }).layout, false);
-  const ok = style({ avoid_people: BAND }).layout.avoidPeople;
-  assert.deepEqual(ok, { marginPct: 1, minWidthPct: 28, band: { color: 'rgba(16, 16, 16, 0.55)', padPct: 2 } });
-  assert.equal(style({ avoid_people: { enabled: true, fallback: 'band', band: { color: '#000000', alpha: 0.5 } } }).layout.avoidPeople.band.color, 'rgba(0, 0, 0, 0.5)', 'un hex vale en la capa global');
+  // 1.13.1 — 'band' es un alias retirado: se acepta (aun sin `band` o con un color que no existe), no dibuja y se dice.
+  assert.deepEqual(style({ avoid_people: PEOPLE }).layout.avoidPeople, { marginPct: 1, minWidthPct: 28 });
+  for (const tok of [BAND, { enabled: true, fallback: 'band' }, { enabled: true, fallback: 'band', band: { color: 'violeta', alpha: 0.5 } }]) {
+    const st = style({ avoid_people: tok });
+    assert.deepEqual(st.layout.avoidPeople, { marginPct: tok.margin_pct ?? 1, minWidthPct: tok.min_width_pct ?? null, bandRetired: true });
+    assert.ok(st.markers.some((m) => m.startsWith('OVERLAY_BAND_RETIRED')));
+  }
 });
 test('2b · avoid_people exige avoid_faces (comparte su detección), en el overlay y en la lámina', () => {
   assert.throws(() => style({ avoid_faces: undefined, avoid_people: PEOPLE }), (e) => /layout\.avoid_people pide layout\.avoid_faces/.test(e.message));
@@ -153,33 +157,34 @@ test('3b · de pie al centro: también se estrecha (columna angosta, nunca por d
   assert.ok(c.style.layout.maxWidthPct >= 28 && c.style.layout.maxWidthPct < 40, `ancho ${c.style.layout.maxWidthPct}`);
   assert.equal(M.overlayWordOverflow(c.style, W, H, null), false, 'ninguna palabra más ancha que la columna');
 });
-test('3c · por debajo del mínimo declarado no se estrecha', () => {
+test('3c · por debajo del mínimo declarado no se estrecha: (1.13.1) la colocación de 1.12.0, que libra la cara', () => {
   const s = style({ avoid_people: { ...PEOPLE, min_width_pct: 40 } }, TXT);
   const c = choose(s, DE_PIE_CENTRO);
   assert.equal(c.report.narrowed, null);
-  assert.ok(c.report.overlap_pct > 0);
-  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')));
-  assert.equal('band' in c.style, false, 'sin último recurso declarado, no hay banda');
+  assert.equal(c.report.overlap_pct, 0, 'la cara queda libre');
+  assert.equal(cruza(rectOf(c.style), px(DE_PIE_CENTRO.face)), false);
+  assert.ok(c.report.body_overlap_pct > 0);
+  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_BODY_UNAVOIDABLE')));
+  assert.equal(c.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')), false);
+  assert.equal('band' in c.style, false, 'no hay banda');
 });
-test('3d · cuerpo a la izquierda con anclas de la izquierda: último recurso band, sólo bajo el texto', () => {
+test('3d · cuerpo a la izquierda con anclas de la izquierda: (1.13.1) sin banda, la colocación de 1.12.0', () => {
   const s = style({ avoid_people: BAND }, TXT);
   const c = choose(s, CUERPO_IZQUIERDA);
-  assert.equal(c.report.fallback, 'band');
-  const b = c.style.band;
-  const r = rectOf(c.style);
-  assert.ok(b.x0 <= r.x0 && b.y0 <= r.y0 && b.x1 >= r.x1 && b.y1 >= r.y1, 'la banda cubre el texto');
-  assert.ok((b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * W * H, 'nunca la foto entera');
-  assert.equal(b.color, 'rgba(16, 16, 16, 0.55)');
-  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_BAND_FOR_PERSON')));
+  const s12 = style({}, TXT);
+  const c12 = M.chooseOverlayAnchor({ style: s12, width: W, height: H, faces: [CUERPO_IZQUIERDA.face] });
+  assert.equal(c.report.fallback, null);
+  assert.equal('band' in c.style, false);
+  assert.equal(c.style.layout.anchor, c12.style.layout.anchor);
+  assert.equal(c.style.layout.maxWidthPct, c12.style.layout.maxWidthPct);
+  assert.equal(c.style.slots.headline.sizePct, c12.style.slots.headline.sizePct);
+  assert.equal(cruza(rectOf(c.style), px(CUERPO_IZQUIERDA.face)), false, 'la cara queda libre');
+  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_BODY_UNAVOIDABLE')));
+  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_BAND_RETIRED')));
   const scene = JSON.stringify(M.buildOverlayScene({ style: c.style, width: W, height: H, backgroundSrc: 'data:,' }));
-  assert.ok(scene.includes('"backgroundColor":"rgba(16, 16, 16, 0.55)"'));
-  // La banda sigue al texto: si el corte cambia, se vuelve a medir; sin banda, el mismo objeto.
-  const angosto = { ...c.style, layout: { ...c.style.layout, maxWidthPct: 40 } };
-  const rb = M.refitOverlayBand(angosto, W, H, null);
-  assert.ok(rb.band.x1 < c.style.band.x1, 'la banda se estrecha con el texto');
-  assert.equal(M.refitOverlayBand(s, W, H, null), s);
-  const sin = JSON.stringify(M.buildOverlayScene({ style: s, width: W, height: H, backgroundSrc: 'data:,' }));
-  assert.equal(sin.includes('rgba(16, 16, 16, 0.55)'), false, 'sin banda elegida, la escena no la lleva');
+  const scene12 = JSON.stringify(M.buildOverlayScene({ style: c12.style, width: W, height: H, backgroundSrc: 'data:,' }));
+  assert.equal(scene, scene12, 'la escena es la de 1.12.0');
+  assert.equal(scene.includes('rgba(16, 16, 16, 0.55)'), false);
 });
 test('3e · cuerpo a la izquierda con anclas de la derecha declaradas: se estrecha a la derecha', () => {
   const s = style({ avoid_people: PEOPLE, avoid_faces: { enabled: true, margin_pct: 2, anchors: ['bottom_left', 'top_left', 'bottom_right', 'top_right'] } }, TXT);
@@ -200,8 +205,10 @@ test('3g · la fila pedida manda: si tapa, se compone igual, se dice y sin banda
   const GRUPO = { face: { x0: 0.45, y0: 0.1, x1: 0.55, y1: 0.2 }, body: { x0: 0.04, y0: 0.06, x1: 0.96, y1: 1 } };
   const c = choose(s, GRUPO, { textPlace: 'bottom' });
   assert.ok(c.style.layout.anchor.startsWith('bottom_'));
-  assert.ok(c.report.overlap_pct > 0);
-  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_TEXT_PLACE_COVERS')));
+  // 1.13.1 — la fila pedida libra la cara; el cuerpo, no: se compone igual en esa fila y se dice.
+  assert.equal(c.report.overlap_pct, 0);
+  assert.ok(c.report.body_overlap_pct > 0);
+  assert.ok(c.style.markers.some((m) => m.startsWith('OVERLAY_BODY_UNAVOIDABLE')));
   assert.equal('band' in c.style, false); assert.equal(c.report.fallback, null);
 });
 test('3h · un bloque estrechado prefiere un escalón más chico antes que dejar una palabra sola que no se acompaña', () => {
@@ -251,12 +258,15 @@ test('4b · con la figura y min_width_pct: la columna se estrecha al lado libre'
   const rect = M.carouselBlockRect(r.fit.chrome, null).rect;
   assert.ok(rect.x1 <= FIG_LAM.body.x0 * 1000, 'el bloque termina antes de la figura');
 });
-test('4c · sin columna posible: el último recurso de 1.11.0 (inset), nunca la foto entera oscurecida', () => {
+test('4c · sin columna posible: (1.13.1) la colocación de 1.12.0; el cuerpo no dispara el inset', () => {
   const ch = chromeOf(LAMINA);
   const avoid = M.resolveCarouselAvoid(ctTokens({ carousel: { avoid_faces: { enabled: true, fallback: ['inset'] }, avoid_people: { enabled: true, min_width_pct: 90 } } }));
+  const sin = M.resolveCarouselAvoid(ctTokens({ carousel: { avoid_faces: { enabled: true, fallback: ['inset'] } } }));
   const r = M.chooseCarouselPlacement({ chrome: ch, faces: [FIG_LAM.face], people: [FIG_LAM.body], avoid });
-  assert.equal(r.report.fallback, 'inset');
-  assert.ok(r.warnings[0].includes('una cara o una persona'));
+  const r12 = M.chooseCarouselPlacement({ chrome: ch, faces: [FIG_LAM.face], avoid: sin });
+  assert.equal(r.report.fallback, null);
+  assert.deepEqual(r.fit, r12.fit);
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_BODY_UNAVOIDABLE')));
 });
 
 console.log('\n── 5 · la palabra sola ──');
@@ -372,13 +382,13 @@ test('6b · detección fallida: se compone en el ancla declarada y se dice (lo d
 test('6c · el corte va después de la elección del ancla, y viaja en meta', () => {
   const iAnchor = SRC.indexOf('const ch = chooseOverlayAnchor(');
   const iOrphan = SRC.indexOf('const orphan = avoidOrphanLines(finalStyle, dims.width, dims.height, areaMetrics);');
-  assert.match(SRC, /finalStyle = refitOverlayBand\(orphan\.style, dims\.width, dims\.height, areaMetrics\);/);
+  assert.match(SRC, /const orphan = avoidOrphanLines\(finalStyle, dims\.width, dims\.height, areaMetrics\);\n\s*finalStyle = orphan\.style;/);
   const iScene = SRC.indexOf('const scene = buildOverlayScene({\n      style: finalStyle');
   assert.ok(iAnchor > 0 && iOrphan > iAnchor && iScene > iOrphan, `${iAnchor} < ${iOrphan} < ${iScene}`);
   assert.match(SRC, /\.\.\.\(orphan\.report\.length \? \{ orphan_lines: orphan\.report \} : \{\}\),/);
   assert.match(SRC, /fit = carouselAvoidOrphan\(fit, metrics\);\n\s*warnings\.push\(\.\.\.fit\.warnings\);/);
   assert.match(SRC, /\.\.\.\(wantPeople \? \{ people_boxes: fc\.people \} : \{\}\)/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1[34]\.0'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.[01]|14\.0)'/);
 });
 
 console.log('\n── 7 · marca N+1 ──');
