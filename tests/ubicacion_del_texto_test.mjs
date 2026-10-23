@@ -263,8 +263,8 @@ test('8b · la fila llega a las dos elecciones y vuelve en meta', () => {
   assert.match(SRC, /\.\.\.\(placeApplied\.applied \? \{ text_place: \{ \.\.\.placeApplied\.applied, anchor_used: finalStyle\.layout\.anchor \} \} : \{\}\),/);
   assert.match(SRC, /\.\.\.\(textPlaceIn \? \{ text_place: \{ requested: textPlaceIn, placement_used: fit\.chrome\.block\?\.place \?\? 'center',/);
 });
-test('8c · la versión sube a 1.12.0', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1[23]\.0'/);
+test('8c · la versión sube a 1.12.0 (o a una posterior)', () => {
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1[234]\.0'/);
 });
 
 console.log('\n── 9 · marca N+1 ──');

@@ -195,14 +195,32 @@ declare const process: { env: Record<string, string | undefined> };
 //         · 'auto' es la elección de siempre (la que no tapa cara ni producto); sin la política, el ancla declarada.
 //         La zona segura del canal (`safe_zone_pct`) se respeta siempre: la caja del texto sale de ella. Un velo en
 //         degradado que oscurece el borde contrario al texto pedido sigue al texto. Sin el campo, idéntico a 1.11.1.
-//   1.13.0 (2026-10-22) — EL TITULAR CABE EN EL ALTO, EN CUALQUIER PROPORCIÓN. Los tamaños del overlay salen del
+//   1.13.0 (2026-10-22) — EL TEXTO NO TAPA EL CUERPO DE LA PERSONA, Y NINGUNA PALABRA QUEDA SOLA EN SU LÍNEA (Sam,
+//         2026-10-22: «recomponer para que no tape el objetivo o el producto», y de una marca de
+//         autor: «también le veo muchos problemas»). Medido ese día en b95fd1c9, d9e97f57 y 733c033a recompuestas con 1.12.0: la cara queda libre, pero
+//         el bloque cae sobre el torso, las piernas o el brazo de la figura de pie, porque sólo se esquivaban cajas de cara
+//         y de producto. Y en d9e97f57 «…It told» / «her» / «she was right.»: una palabra sola justo antes del énfasis.
+//         · `layout.avoid_people` y `carousel.avoid_people` { enabled, margin_pct?, min_width_pct?, fallback?, band? }
+//           (overlay; la lámina usa su propio último recurso) — la MISMA llamada de detección pide también la figura
+//           humana completa (cabeza a pies, lo visible), y cuenta como una cara. Se prueban las anclas (overlay) o las
+//           colocaciones (lámina) de siempre; si ninguna libra la figura y la marca declara `min_width_pct`, el bloque
+//           se ESTRECHA al lado libre de la figura (nunca por debajo de ese ancho); si ni así, el último recurso
+//           declarado: en el overlay, 'band' (una banda bajo el texto, del color y alfa que la marca declare); en la
+//           lámina, su 'inset'/'band' de 1.11.0. Nunca se oscurece la foto entera. `text_place` sigue mandando sobre la
+//           fila: si la fila pedida tapa, se compone igual y se dice, sin último recurso.
+//         · LA PALABRA SOLA. El corte de líneas del overlay (titular y bajada) y del titular de la lámina nunca deja una
+//           sola palabra en la última línea de un tramo cuando lo que sigue empieza un énfasis, ni en la última línea del
+//           bloque: si la línea anterior tiene 3 palabras o más y cabe, una baja a acompañarla. Regla general, medida con
+//           las métricas de la fuente; sin métricas, no se toca. Cambia el corte, nunca el tamaño ni la posición.
+//         Sin `avoid_people`, la elección es la de 1.12.0; sin palabra sola, la escena es la de 1.12.0.
+//   1.14.0 (2026-10-23) — EL TITULAR CABE EN EL ALTO, EN CUALQUIER PROPORCIÓN. Los tamaños del overlay salen del
 //         ANCHO y el escalón se elige por caracteres; en un lienzo apaisado (16:9, 1.91:1) un titular largo con
 //         bajada, anclado abajo, medía más que el alto disponible y se salía por arriba. `fitOverlayTextHeight` mide
 //         el alto del bloque con `measureOverlayText` y, si no cabe entre márgenes (o zona segura, y por encima de
 //         una franja inferior más gruesa que el margen), baja por los escalones de `faceFitLadder`; si ni al último
 //         cabe, compone al mínimo y emite `OVERLAY_TEXT_OVERFLOW`. Sin token nuevo: es geometría del eje. Si el
-//         bloque ya cabe, la escena sale idéntica a la de 1.12.0. `meta.text_height` sólo cuando hubo ajuste.
-export const COMPOSITOR_VERSION = '1.13.0';
+//         bloque ya cabe, la escena sale idéntica a la de 1.13.0. `meta.text_height` sólo cuando hubo ajuste.
+export const COMPOSITOR_VERSION = '1.14.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -662,6 +680,47 @@ export function hexToRgba(hex: string, alpha = 1): string {
  * FAIL-LOUD ACUMULATIVO: junta TODO lo que falta y lo reporta junto (un solo viaje para el que
  * siembra el dato), y no compone. Un default de fuente o de color aquí anularía el brief entero.
  */
+// ── 1.13.0 · EL TEXTO NO TAPA EL CUERPO DE LA PERSONA ──────────────────────────────────────────────────────────
+// EJE (código): QUÉ se evita —la caja del texto no cruza la figura humana completa, con un margen— y CÓMO —las anclas o
+// colocaciones de siempre; si ninguna libra, el bloque se estrecha al lado libre de la figura; si ni así, el último
+// recurso declarado—. INSTANCIA (dato): si se aplica, el margen, el ancho mínimo y el último recurso, en
+// `layout.avoid_people` y `carousel.avoid_people`. El código no nombra marcas.
+export interface OverlayAvoidPeople {
+  marginPct: number;
+  // % del ANCHO de la imagen por debajo del cual el bloque no se estrecha. null ⇒ no se estrecha.
+  minWidthPct: number | null;
+  // Último recurso 'band' del overlay: color ya resuelto (rgba) y relleno alrededor del texto (% del lado corto).
+  band: null | { color: string; padPct: number };
+}
+// Ancho mínimo admitido para estrechar: por debajo, una columna de texto se vuelve una lista de palabras sueltas.
+const AVOID_PEOPLE_MIN_WIDTH = { lo: 20, hi: 95 };
+
+/** 1.13.0 — lee la forma común de `avoid_people` (overlay y lámina). Fail-loud acumulado, como los demás tokens. PURO.
+ *  `fallback` sólo existe en el overlay ('band'); la lámina usa el último recurso de `carousel.avoid_faces`. */
+export function parseAvoidPeople(tok: unknown, path: string, allowFallback: boolean): {
+  missing: string[]; value: null | { marginPct: number; minWidthPct: number | null; fallback: 'band' | null };
+} {
+  const missing: string[] = [];
+  const a = tok as Record<string, any>;
+  if (!isPlain(tok) || a.enabled !== true) {
+    missing.push(`${path} (objeto { enabled: true, margin_pct?: 0..20, min_width_pct?: ${AVOID_PEOPLE_MIN_WIDTH.lo}..${AVOID_PEOPLE_MIN_WIDTH.hi}${allowFallback ? ", fallback?: 'band', band?: { color, alpha, pad_pct? }" : ''} }; llegó ${JSON.stringify(tok)})`);
+    return { missing, value: null };
+  }
+  const marginPct = Number(a.margin_pct ?? 1);
+  if (!Number.isFinite(marginPct) || marginPct < 0 || marginPct > 20) missing.push(`${path}.margin_pct=${JSON.stringify(a.margin_pct)} (0 ≤ x ≤ 20)`);
+  const minWidthPct = a.min_width_pct == null ? null : Number(a.min_width_pct);
+  if (minWidthPct !== null && !(Number.isFinite(minWidthPct) && minWidthPct >= AVOID_PEOPLE_MIN_WIDTH.lo && minWidthPct <= AVOID_PEOPLE_MIN_WIDTH.hi)) {
+    missing.push(`${path}.min_width_pct=${JSON.stringify(a.min_width_pct)} (${AVOID_PEOPLE_MIN_WIDTH.lo} ≤ x ≤ ${AVOID_PEOPLE_MIN_WIDTH.hi}, % del ancho)`);
+  }
+  let fallback: 'band' | null = null;
+  if (a.fallback != null) {
+    if (!allowFallback) missing.push(`${path}.fallback: la lámina usa el último recurso de carousel.avoid_faces.fallback`);
+    else if (a.fallback !== 'band') missing.push(`${path}.fallback=${JSON.stringify(a.fallback)} (válido: 'band')`);
+    else fallback = 'band';
+  }
+  return { missing, value: missing.length ? null : { marginPct, minWidthPct, fallback } };
+}
+
 export function resolveOverlayStyle(args: {
   tokens: Record<string, any>;
   typography: Array<{ role: string; font_family: string; css_import?: string | null; fallback?: string | null }>;
@@ -679,8 +738,12 @@ export function resolveOverlayStyle(args: {
     avoidSceneText?: { marginPct: number; blurPct: number | null };
     // 1.11.0 — sólo existe si la marca o el canal lo declaran. Va con `avoidFaces`: comparte su detección.
     avoidProducts?: { marginPct: number };
+    // 1.13.0 — sólo existe si la marca o el canal lo declaran. Va con `avoidFaces`: comparte su detección.
+    avoidPeople?: OverlayAvoidPeople;
     emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number };
   };
+  // 1.13.0 — el último recurso 'band' de `avoid_people`: una banda bajo el texto (px del lienzo). Sólo existe si se usó.
+  band?: { x0: number; y0: number; x1: number; y1: number; color: string };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
   // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
   textEffect?: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string };
@@ -989,6 +1052,32 @@ export function resolveOverlayStyle(args: {
       avoidProducts = { marginPct };
     }
   }
+  // 1.13.0 — el texto tampoco tapa el CUERPO de una persona. Va con `avoid_faces`: la MISMA llamada de detección pide la
+  // figura humana completa, y cuenta como una cara. Ausente o apagado ⇒ no existe y la elección es la de 1.12.0.
+  let avoidPeople: OverlayAvoidPeople | null = null;
+  const aplTok = layoutTok.avoid_people as unknown;
+  if (aplTok != null && !(isPlain(aplTok) && (aplTok as Record<string, unknown>).enabled === false)) {
+    const r = parseAvoidPeople(aplTok, 'layout.avoid_people', true);
+    missing.push(...r.missing);
+    if (!r.missing.length && r.value) {
+      let band: OverlayAvoidPeople['band'] = null;
+      if (r.value.fallback === 'band') {
+        const b = (aplTok as Record<string, any>).band;
+        const colorTok = isPlain(b) ? String(b.color ?? '') : '';
+        const alpha = Number(isPlain(b) ? b.alpha : NaN);
+        const padPct = Number(isPlain(b) && b.pad_pct != null ? b.pad_pct : 2);
+        const pal = HEX_COLOR.test(colorTok) ? { hex: colorTok } : palBy.get(colorTok);
+        if (!pal) missing.push(`layout.avoid_people.band.color='${colorTok || '∅'}' (un rol de brand_palette o un hex #RRGGBB; obligatorio con fallback 'band')`);
+        if (!(Number.isFinite(alpha) && alpha > 0 && alpha <= 1)) missing.push(`layout.avoid_people.band.alpha (0 < x ≤ 1; obligatoria con fallback 'band'; llegó ${JSON.stringify(b)})`);
+        if (!(Number.isFinite(padPct) && padPct >= 0 && padPct <= 10)) missing.push(`layout.avoid_people.band.pad_pct=${JSON.stringify(b?.pad_pct)} (0 ≤ x ≤ 10, % del lado corto)`);
+        if (pal && Number.isFinite(alpha) && alpha > 0 && alpha <= 1 && Number.isFinite(padPct) && padPct >= 0 && padPct <= 10) {
+          band = { color: hexToRgba(String(pal.hex), alpha), padPct };
+        }
+      }
+      if (!avoidFaces) missing.push('layout.avoid_people pide layout.avoid_faces encendido: comparte su detección y sus anclas');
+      else avoidPeople = { marginPct: r.value.marginPct, minWidthPct: r.value.minWidthPct, band };
+    }
+  }
   // 1.6.3 — el énfasis se lee: umbral y colores alternativos, por rol de la marca.
   let emphasisContrast: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number } | null = null;
   if (layoutTok.emphasis_contrast != null) {
@@ -1033,6 +1122,7 @@ export function resolveOverlayStyle(args: {
       ...(avoidFaces ? { avoidFaces } : {}),
       ...(avoidSceneText ? { avoidSceneText } : {}),
       ...(avoidProducts ? { avoidProducts } : {}),
+      ...(avoidPeople ? { avoidPeople } : {}),
       ...(emphasisContrast ? { emphasisContrast } : {}),
     },
     ...(textEffect ? { textEffect } : {}),
@@ -1126,20 +1216,12 @@ export function overlayTextBox(style: ReturnType<typeof resolveOverlayStyle>, wi
 // Ancho medio de glifo (en em) cuando no hay métricas de la fuente: la medición queda ESTIMADA y se dice.
 const AREA_FALLBACK_EM = 0.6;
 
-/**
- * 1.5.0 — el tamaño del bloque de texto del overlay (titular, filete y bajada), con las MISMAS medidas que
- * `buildOverlayScene`: tamaños en % del ancho, corte de línea voraz por palabras dentro de la caja, cada
- * tramo con énfasis medido con su fuente y su tamaño, y cada línea tan alta como su letra más grande. PURO.
- * Mide la caja de LÍNEAS (con su interlineado), que es un poco mayor que la de los glifos: el límite queda
- * del lado seguro.
- */
-export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
-  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
-): { width: number; height: number; areaPct: number; estimated: string[] } {
+type OverlayFontLike = { family: string; weight: number; italic: boolean; transform: string; letterSpacingEm: number };
+/** El ancho (px) de un texto en una fuente del overlay, a un tamaño, con su tracking y su transformación. Sin métricas
+ *  de esa fuente, el ancho medio genérico, y la familia se anota en `estimated`. PURO (salvo `estimated`, que es suyo). */
+export function overlayWidthFn(metrics: Record<string, FontAdvance | null | undefined> | null | undefined, estimated: string[]) {
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const box = overlayTextBox(style, width, height);
-  const estimated: string[] = [];
-  const widthFn = (f: { family: string; weight: number; italic: boolean; transform: string; letterSpacingEm: number }, size: number) => {
+  return (f: OverlayFontLike, size: number) => {
     const m = metrics?.[fitFontKey(f)] ?? null;
     if (!m && !estimated.includes(f.family)) estimated.push(f.family);
     const ls = r2(f.letterSpacingEm * size);
@@ -1154,6 +1236,160 @@ export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>
       return w;
     };
   };
+}
+
+/** 1.13.0 — los átomos (palabras) de una ranura del overlay por tramo de línea impuesto, con su ancho (px) medido como
+ *  `measureOverlayText`. Un tramo sin cortes impuestos es la ranura entera. PURO. */
+export function overlaySlotAtoms(
+  s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, width: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined, estimated: string[],
+): Array<{ range: [number, number]; atoms: Array<{ a: number; b: number; w: number; keyword: boolean }> }> {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const wf = overlayWidthFn(metrics, estimated);
+  const size = r2((s.sizePct / 100) * width);
+  const base = wf(s, size);
+  const em = s.parts && s.emphasis ? s.emphasis : null;
+  const emw = em ? wf(em, r2(size * em.sizeScale)) : base;
+  const allParts = s.parts && em ? s.parts : [{ text: s.text, keyword: false }];
+  const ranges: Array<[number, number]> = s.lines ? s.lines : [[0, s.text.length]];
+  return ranges.map(([a, b]) => {
+    const atoms = headlineAtoms(partsInRange(allParts, a, b));
+    const words = [...s.text.slice(a, b).matchAll(/\S+/g)];
+    return { range: [a, b] as [number, number], atoms: atoms.map((atom, k) => ({
+      a: a + (words[k]?.index ?? 0), b: a + (words[k]?.index ?? 0) + (words[k]?.[0].length ?? 0),
+      w: atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0),
+      keyword: atom.some((p) => p.keyword),
+    })) };
+  });
+}
+
+/** 1.13.0 — ¿alguna palabra del overlay es más ancha que su caja? Se partiría o se saldría del bloque. PURO. */
+export function overlayWordOverflow(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): boolean {
+  const maxW = overlayTextBox(style, width, height).maxWidth;
+  for (const slot of SLOTS) {
+    const s = style.slots[slot];
+    if (!s) continue;
+    for (const g of overlaySlotAtoms(s, width, metrics, [])) if (g.atoms.some((x) => x.w > maxW + 0.5)) return true;
+  }
+  return false;
+}
+
+// ── 1.13.0 · NINGUNA PALABRA SOLA EN SU LÍNEA ──────────────────────────────────────────────────────────────────
+// EL CASO (2026-10-22, d9e97f57): «She told it the plan. It told her she was right.», con «she was right» resaltado. La
+// regla de 1.7.0 abre línea en el énfasis; el tramo anterior no cabe en una y satori lo envuelve palabra a palabra:
+// «…It told» / «her» / «she was right.». La palabra sola queda colgada justo antes del énfasis.
+// EJE (código, regla tipográfica de viuda/huérfana): el corte voraz de cada tramo de línea —el mismo de satori y de
+// `measureOverlayText`— no deja UNA palabra en la última línea del tramo cuando lo que sigue empieza un énfasis, ni en la
+// última línea del bloque. Si la línea anterior tiene `ORPHAN_MIN_PREV_WORDS` palabras o más y la pareja cabe, su
+// última palabra baja a acompañarla. Cambia el corte, nunca el tamaño, la caja ni el número de líneas. Cero marcas, cero
+// idiomas: las palabras son lo que separa el espacio.
+export const ORPHAN_MIN_PREV_WORDS = 3;
+
+/** El corte voraz de una fila de átomos de anchos dados (px) en `maxW`: índices por línea. El mismo criterio que
+ *  `measureOverlayText` (un átomo que no cabe abre línea, salvo que la línea esté vacía). PURO. */
+export function greedyAtomLines(widths: number[], maxW: number): number[][] {
+  const lines: number[][] = [];
+  let cur = 0;
+  for (let k = 0; k < widths.length; k++) {
+    if (lines.length && cur > 0 && cur + widths[k] > maxW + 0.01) { lines.push([k]); cur = widths[k]; }
+    else { if (!lines.length) lines.push([]); lines[lines.length - 1].push(k); cur += widths[k]; }
+  }
+  return lines;
+}
+
+/** El corte voraz SIN palabra sola al final: con `protect`, si la última línea tiene una palabra y la anterior
+ *  `ORPHAN_MIN_PREV_WORDS` o más, la última de la anterior baja, siempre que la pareja quepa con 1 px de holgura. PURO. */
+export function orphanFreeLines(widths: number[], maxW: number, protect: boolean): { lines: number[][]; moved: number | null } {
+  const lines = greedyAtomLines(widths, maxW);
+  if (!protect || lines.length < 2) return { lines, moved: null };
+  const last = lines[lines.length - 1];
+  const prev = lines[lines.length - 2];
+  if (last.length !== 1 || prev.length < ORPHAN_MIN_PREV_WORDS) return { lines, moved: null };
+  const k = prev[prev.length - 1];
+  if (widths[k] + widths[last[0]] > maxW - 1) return { lines, moved: null };
+  return { lines: [...lines.slice(0, -2), prev.slice(0, -1), [k, ...last]], moved: k };
+}
+
+/** 1.13.0 — cuántos tramos de línea del overlay terminan, aun con la regla de la palabra sola aplicada, en una línea de
+ *  UNA palabra que no se pudo acompañar (la anterior tiene menos de `ORPHAN_MIN_PREV_WORDS`, o la pareja no cabe). Sin
+ *  métricas de la fuente cuenta 0: no se sabe. PURO. */
+export function overlayLoneWords(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): number {
+  const maxW = overlayTextBox(style, width, height).maxWidth;
+  let n = 0;
+  for (const slot of SLOTS) {
+    const s = style.slots[slot];
+    if (!s) continue;
+    const estimated: string[] = [];
+    const groups = overlaySlotAtoms(s, width, metrics, estimated);
+    if (estimated.length) continue;
+    groups.forEach((g, i) => {
+      const next = groups[i + 1];
+      const protect = !next || !!next.atoms[0]?.keyword;
+      const r = orphanFreeLines(g.atoms.map((x) => x.w), maxW, protect);
+      if (protect && r.lines.length >= 2 && r.lines[r.lines.length - 1].length === 1) n++;
+    });
+  }
+  return n;
+}
+
+/**
+ * 1.13.0 — aplica la regla de la palabra sola al overlay ya decidido (tamaño, ancla y ancho finales). PURO. Para cada
+ * ranura y cada tramo de línea: si su corte voraz deja una palabra sola en la última línea y lo que sigue empieza un
+ * énfasis o es el fin de la ranura, impone los cortes de ese tramo (`lines`), con una palabra bajada. Sin palabra sola, o
+ * sin métricas de la fuente (el corte no se puede medir), devuelve EL MISMO estilo.
+ */
+export function avoidOrphanLines(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): { style: ReturnType<typeof resolveOverlayStyle>; report: Array<{ slot: string; word: string; moved: string }> } {
+  const maxW = overlayTextBox(style, width, height).maxWidth;
+  const report: Array<{ slot: string; word: string; moved: string }> = [];
+  let slots = style.slots;
+  for (const slot of SLOTS) {
+    const s = style.slots[slot];
+    if (!s) continue;
+    const estimated: string[] = [];
+    const groups = overlaySlotAtoms(s, width, metrics, estimated);
+    if (estimated.length) continue;
+    let changed = false;
+    const ranges: Array<[number, number]> = [];
+    groups.forEach((g, i) => {
+      const next = groups[i + 1];
+      const protect = !next || !!next.atoms[0]?.keyword;
+      const r = orphanFreeLines(g.atoms.map((x) => x.w), maxW, protect);
+      if (r.moved == null) { ranges.push(g.range); return; }
+      changed = true;
+      for (const ln of r.lines) ranges.push([g.atoms[ln[0]].a, g.atoms[ln[ln.length - 1]].b]);
+      const lastLine = r.lines[r.lines.length - 1];
+      const lone = g.atoms[lastLine[lastLine.length - 1]];
+      const mv = g.atoms[r.moved];
+      report.push({ slot, word: s.text.slice(lone.a, lone.b), moved: s.text.slice(mv.a, mv.b) });
+    });
+    if (changed) slots = { ...slots, [slot]: { ...s, lines: ranges } };
+  }
+  if (!report.length) return { style, report };
+  const label: Record<string, string> = { headline: 'titular', subheadline: 'bajada' };
+  return { style: { ...style, slots, markers: [...style.markers,
+    ...report.map((x) => `OVERLAY_ORPHAN_AVOIDED: «${x.word}» no queda sola en su línea (${label[x.slot] ?? x.slot}); baja «${x.moved}» a acompañarla`)] }, report };
+}
+
+/**
+ * 1.5.0 — el tamaño del bloque de texto del overlay (titular, filete y bajada), con las MISMAS medidas que
+ * `buildOverlayScene`: tamaños en % del ancho, corte de línea voraz por palabras dentro de la caja, cada
+ * tramo con énfasis medido con su fuente y su tamaño, y cada línea tan alta como su letra más grande. PURO.
+ * Mide la caja de LÍNEAS (con su interlineado), que es un poco mayor que la de los glifos: el límite queda
+ * del lado seguro.
+ */
+export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): { width: number; height: number; areaPct: number; estimated: string[] } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const box = overlayTextBox(style, width, height);
+  const estimated: string[] = [];
+  const widthFn = overlayWidthFn(metrics, estimated);
   let maxLine = 0;
   let total = 0;
   const slotBlock = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>) => {
@@ -1247,7 +1483,7 @@ export function fitOverlayTextArea(args: {
 }
 
 /**
- * 1.13.0 — el hueco VERTICAL (px) donde puede vivir el bloque de texto del overlay: el alto del lienzo menos
+ * 1.14.0 — el hueco VERTICAL (px) donde puede vivir el bloque de texto del overlay: el alto del lienzo menos
  * los rellenos de arriba y de abajo de `overlayTextBox` (margen o zona segura). Si la franja de identidad va
  * en el borde inferior y es más gruesa que el relleno de abajo, el hueco se mide por encima de ella. PURO.
  */
@@ -1263,7 +1499,7 @@ export function overlayTextVerticalRoom(style: ReturnType<typeof resolveOverlayS
 }
 
 /**
- * 1.13.0 — EL BLOQUE DE TEXTO CABE EN EL ALTO, en cualquier proporción. Los tamaños del overlay se derivan del
+ * 1.14.0 — EL BLOQUE DE TEXTO CABE EN EL ALTO, en cualquier proporción. Los tamaños del overlay se derivan del
  * ANCHO (`buildOverlayScene`), y `fitFontSizePct` elige el escalón por número de caracteres: en un lienzo
  * apaisado el mismo titular rinde las mismas líneas con letra más grande sobre menos alto, y un bloque anclado
  * abajo podía salirse por arriba del lienzo (o al revés). `fitOverlayTextArea` mide área, no alto, y sólo rige
@@ -1476,6 +1712,12 @@ export function buildOverlayScene(args: {
     });
   }
 
+  // 1.13.0 — el último recurso 'band' de `avoid_people`: sólo bajo el texto, nunca la foto entera. Sin él, nada cambia.
+  if (style.band) {
+    const b = style.band;
+    children.push({ type: 'div', props: { style: { position: 'absolute', left: b.x0, top: b.y0, width: Math.round((b.x1 - b.x0) * 100) / 100,
+      height: Math.round((b.y1 - b.y0) * 100) / 100, backgroundColor: b.color } } });
+  }
   const box = overlayTextBox(style, width, height);
   const textChildren: Array<Record<string, any>> = [];
   // 1.6.0 — sin token es undefined y ningún estilo cambia: la escena es la de 1.5.0, clave por clave.
@@ -1715,7 +1957,7 @@ const CAROUSEL_ELEMENT_COLOR: Record<string, string> = {
 // 1.11.0 — claves de `tokens.carousel` que son POLÍTICA (qué evita el bloque de texto), no cromo. Pueden vivir en la
 // capa global para todas las marcas; por sí solas no declaran un carrusel: una marca sin cromo propio sigue
 // componiendo como 1.2.0 (`CAROUSEL_NOT_DECLARED`), aunque la capa global encienda la política.
-export const CAROUSEL_POLICY_KEYS = new Set(['avoid_faces', 'avoid_products']);
+export const CAROUSEL_POLICY_KEYS = new Set(['avoid_faces', 'avoid_products', 'avoid_people']);
 
 /** ¿La fila resuelta declara el CROMO de carrusel? Las claves de política no cuentan. PURO. */
 export function carouselChromeDeclared(ct: unknown): boolean {
@@ -1958,6 +2200,9 @@ export function resolveCarouselChrome(args: {
   block?: CarouselBlock;
   inset?: { x0: number; y0: number; x1: number; y1: number };
   band?: { y0: number; y1: number; color: string };
+  // 1.13.0 — índices de los átomos del titular que ABREN línea a la fuerza (la palabra que baja para no dejar otra sola).
+  // Los pone SÓLO `carouselAvoidOrphan`; ausente ⇒ satori envuelve solo (1.12.0).
+  headlineBreaks?: number[];
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
@@ -2468,7 +2713,10 @@ export function buildCarouselScene(args: {
       type: 'div',
       props: {
         style: { display: 'flex', flexWrap: 'wrap', width: blockW, ...hf, color: c.headline, ...fx, ...(HE ? { alignItems: 'baseline' } : {}) },
-        children: headlineAtoms(chrome.headline).map((atom) => ({
+        children: headlineAtoms(chrome.headline).flatMap((atom, k) => [
+          // 1.13.0 — un corte a la fuerza es un hueco del ancho del bloque y alto cero: la fila se parte justo ahí.
+          ...(chrome.headlineBreaks?.includes(k) ? [{ type: 'div', props: { style: { display: 'flex', width: blockW, height: 0 } } }] : []),
+          {
           type: 'div',
           props: {
             style: { display: 'flex', flexDirection: 'row', ...(HE ? { alignItems: 'baseline' } : {}) },
@@ -2484,7 +2732,7 @@ export function buildCarouselScene(args: {
               },
             })),
           },
-        })),
+        }]),
       },
     });
   }
@@ -2788,6 +3036,57 @@ type FitMetrics = Record<string, FontAdvance | null | undefined>;
  * caja que satori dibuja). PURO. `estimated` = alguna fuente no tenía métricas y se usó el ancho medio
  * genérico.
  */
+/** Ancho (px) de un texto de la lámina en una familia, a un tamaño, con su tracking y su transformación. Sin métricas de
+ *  la familia, el ancho medio genérico, y se anota en `estimated`. PURO (salvo `estimated`, que es suyo). */
+export function carouselWidthFn(metrics: FitMetrics | null | undefined, estimated: string[]) {
+  return (k: CarouselType, size: number, letterSpacing: number, transform: string) => {
+    const m = metrics?.[fitFontKey(k)] ?? null;
+    if (!m && !estimated.includes(k.family)) estimated.push(k.family);
+    return (s: string) => {
+      const str = transform === 'uppercase' ? s.toUpperCase() : transform === 'lowercase' ? s.toLowerCase() : s;
+      let w = 0;
+      for (const ch of str) {
+        const cp = ch.codePointAt(0)!;
+        const em = m ? (m.advances.get(cp) ?? (cp === 0xa0 ? m.advances.get(0x20) : undefined) ?? m.avgEm) : FIT_FALLBACK_EM;
+        w += em * size + letterSpacing;
+      }
+      return w;
+    };
+  };
+}
+
+/**
+ * 1.13.0 — LA PALABRA SOLA, EN LA LÁMINA. PURO. El titular de la lámina se envuelve solo (átomos en una fila que se
+ * parte); si su corte voraz —medido como `measureCarouselLayout`, al ancho de su columna— deja UNA palabra en la última
+ * línea y la anterior tiene `ORPHAN_MIN_PREV_WORDS` o más, la última de la anterior abre línea a la fuerza
+ * (`chrome.headlineBreaks`). Mismo número de líneas, misma caja. Sin palabra sola, o sin métricas, EL MISMO ajuste.
+ */
+export function carouselAvoidOrphan<F extends { chrome: CarouselChrome; warnings: string[] }>(fit: F, metrics: FitMetrics | null | undefined): F {
+  const chrome = fit.chrome;
+  if (!chrome.headline.length) return fit;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const W = chrome.canvas.width;
+  const M = r2((chrome.marginPct / 100) * W);
+  const blockW = carouselBlockWidth(chrome, r2(W - 2 * M));
+  const T = chrome.type;
+  const estimated: string[] = [];
+  const wf = carouselWidthFn(metrics, estimated);
+  const hs = r2((T.headline.sizePct / 100) * W);
+  const wOf = wf(T.headline, hs, r2(T.headline.letterSpacingEm * hs), T.headline.transform);
+  const HE = chrome.headlineEmphasis;
+  const es = HE ? r2(hs * HE.sizeScale) : hs;
+  const eOf = HE ? wf(HE, es, r2(HE.letterSpacingEm * es), HE.transform) : wOf;
+  const atoms = headlineAtoms(chrome.headline);
+  const widths = atoms.map((atom) => Math.ceil(atom.reduce((acc, p) => acc + (HE && p.keyword ? eOf(p.text) : wOf(p.text)), 0)));
+  if (estimated.length) return fit;
+  const r = orphanFreeLines(widths, blockW, true);
+  if (r.moved == null) return fit;
+  const lone = atoms[atoms.length - 1].map((p) => p.text).join('').trim();
+  const moved = atoms[r.moved].map((p) => p.text).join('').trim();
+  return { ...fit, chrome: { ...chrome, headlineBreaks: [r.moved] },
+    warnings: [...fit.warnings, `CAROUSEL_ORPHAN_AVOIDED: «${lone}» no queda sola en su línea del titular; baja «${moved}» a acompañarla`] };
+}
+
 export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetrics | null | undefined): {
   top: number; mid: number; foot: number; available: number; gap: number; slack: number; estimated: string[];
   // 1.11.0 — ancho de la línea más larga del bloque central (px), y el ancho del que dispone (la columna, si la hay).
@@ -2812,20 +3111,7 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   let wide = false;
 
   // Ancho de un texto en una familia, a un tamaño, con su tracking y su transformación.
-  const widthFn = (k: CarouselType, size: number, letterSpacing: number, transform: string) => {
-    const m = metrics?.[fitFontKey(k)] ?? null;
-    if (!m && !estimated.includes(k.family)) estimated.push(k.family);
-    return (s: string) => {
-      const str = transform === 'uppercase' ? s.toUpperCase() : transform === 'lowercase' ? s.toLowerCase() : s;
-      let w = 0;
-      for (const ch of str) {
-        const cp = ch.codePointAt(0)!;
-        const em = m ? (m.advances.get(cp) ?? (cp === 0xa0 ? m.advances.get(0x20) : undefined) ?? m.avgEm) : FIT_FALLBACK_EM;
-        w += em * size + letterSpacing;
-      }
-      return w;
-    };
-  };
+  const widthFn = carouselWidthFn(metrics, estimated);
   // Líneas de un texto partido en palabras, a lo ancho disponible (corte voraz, como el de satori).
   // 1.11.0 — devuelve también el ancho de la línea más larga (para la caja del bloque).
   const linesW = (s: string, widthOf: (s: string) => number, maxW: number) => {
@@ -3155,7 +3441,7 @@ export function overlayTextRect(style: ReturnType<typeof resolveOverlayStyle>, w
 
 /** Las cajas de caras que devuelve el modelo (`{ faces: [{ box_2d: [ymin, xmin, ymax, xmax] }] }`, 0..1000) a
  *  0..1. Lo que no tiene forma de caja se descarta; nunca se inventa una. PURO. */
-export function parseFaceBoxes(text: string, key: 'faces' | 'signs' | 'products' = 'faces'): FaceBox[] {
+export function parseFaceBoxes(text: string, key: 'faces' | 'signs' | 'products' | 'people' = 'faces'): FaceBox[] {
   let data: any;
   try { data = JSON.parse(text); } catch { return []; }
   const list = Array.isArray(data?.[key]) ? data[key] : (key === 'faces' && Array.isArray(data)) ? data : [];
@@ -3209,6 +3495,8 @@ export function chooseOverlayAnchor(args: {
   products?: FaceBox[] | null;
   // 1.12.0 — la fila que pidió una persona (ya aplicada con `applyTextPlace`): si tapa algo, se compone igual y se dice.
   textPlace?: TextPlace | null;
+  // 1.13.0 — figuras humanas completas (0..1). Sólo cuentan con `layout.avoidPeople`, y cuentan como una cara.
+  people?: FaceBox[] | null;
 }): { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
   faces: number; anchor_declared: string; anchor_used: string; moved: boolean; overlap_pct: number;
   candidates: Array<{ anchor: string; overlap_pct: number }>; reduced: string[];
@@ -3216,6 +3504,9 @@ export function chooseOverlayAnchor(args: {
   signs?: number; sign_overlap_pct?: number; signs_under_text?: FaceBox[];
   // 1.11.0 — sólo con el token encendido.
   products?: number;
+  // 1.13.0 — sólo con `avoid_people` encendido: cuántas figuras, si el bloque se estrechó y el último recurso.
+  people?: number; narrowed?: null | { max_width_pct_declared: number; max_width_pct_used: number };
+  fallback?: null | 'band'; band?: { x0: number; y0: number; x1: number; y1: number };
 } } {
   const { style, width, height } = args;
   const af = style.layout.avoidFaces;
@@ -3230,11 +3521,19 @@ export function chooseOverlayAnchor(args: {
     const pp = (ap.marginPct / 100) * Math.min(width, height);
     for (const f of prodList) boxes.push({ x0: f.x0 * width - pp, y0: f.y0 * height - pp, x1: f.x1 * width + pp, y1: f.y1 * height + pp });
   }
-  const tapa = ap ? 'una cara o un producto' : 'una cara';
-  const libre = ap ? 'libre de caras y productos' : 'libre de caras';
+  // 1.13.0 — las figuras humanas completas se suman a las cajas que el texto no toca, con su propio margen.
+  const apl = style.layout.avoidPeople ?? null;
+  const peopleList = apl ? (args.people ?? []) : [];
+  const peopleBoxes: typeof boxes = [];
+  if (apl) {
+    const pp = (apl.marginPct / 100) * Math.min(width, height);
+    for (const f of peopleList) peopleBoxes.push({ x0: f.x0 * width - pp, y0: f.y0 * height - pp, x1: f.x1 * width + pp, y1: f.y1 * height + pp });
+    boxes.push(...peopleBoxes);
+  }
+  const tapa = apl ? (ap ? 'una cara, una persona o un producto' : 'una cara o una persona') : ap ? 'una cara o un producto' : 'una cara';
+  const libre = apl ? (ap ? 'libre de caras, personas y productos' : 'libre de caras y personas') : ap ? 'libre de caras y productos' : 'libre de caras';
   const cands = af.anchors.filter((a) => ANCHORS[a] && a !== (args.productAnchor ?? null));
-  const score = (st: ReturnType<typeof resolveOverlayStyle>) => cands.map((anchor) => {
-    const r = overlayTextRect(st, width, height, args.metrics, anchor);
+  const overlapOf = (r: { x0: number; y0: number; x1: number; y1: number }) => {
     const area = Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
     let inter = 0;
     for (const b of boxes) {
@@ -3242,13 +3541,60 @@ export function chooseOverlayAnchor(args: {
       const h = Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0);
       if (w > 0 && h > 0) inter += w * h;
     }
-    return { anchor, overlap_pct: Math.round((10000 * inter) / area) / 100 };
-  });
+    return Math.round((10000 * inter) / area) / 100;
+  };
+  const score = (st: ReturnType<typeof resolveOverlayStyle>) => cands.map((anchor) => ({
+    anchor, overlap_pct: overlapOf(overlayTextRect(st, width, height, args.metrics, anchor)),
+  }));
   const scored = score(style);
   if (!scored.length) return { style, report: null };
+  // 1.13.0 — ESTRECHAR AL LADO LIBRE. Sólo con `avoid_people.min_width_pct` y figuras detectadas, y sólo en un ancla de
+  // columna lateral: el bloque termina donde empieza la figura más cercana (con su margen), nunca por debajo del mínimo
+  // declarado ni por encima del ancho de siempre. Un bloque estrechado que se sale de su caja (más alto que el hueco) o
+  // que deja una palabra más ancha que la columna no cuenta como libre.
+  const narrowed = (st: ReturnType<typeof resolveOverlayStyle>, anchor: string): ReturnType<typeof resolveOverlayStyle> | null => {
+    if (!apl || apl.minWidthPct == null || !peopleBoxes.length) return null;
+    const ax = ANCHORS[anchor]?.x;
+    if (!ax || ax === 'center') return null;
+    const box = overlayTextBox(st, width, height);
+    const avail = ax === 'flex-start'
+      ? Math.min(...peopleBoxes.filter((b) => b.x1 > box.left).map((b) => b.x0)) - box.left
+      : (width - box.right) - Math.max(...peopleBoxes.filter((b) => b.x0 < width - box.right).map((b) => b.x1));
+    if (!Number.isFinite(avail) || avail >= box.maxWidth - 0.5) return null;
+    const pct = Math.floor((10000 * avail) / width) / 100;
+    if (pct < apl.minWidthPct) return null;
+    const ns = { ...st, layout: { ...st.layout, maxWidthPct: pct } };
+    const nb = overlayTextBox(ns, width, height);
+    const r = overlayTextRect(ns, width, height, args.metrics, anchor);
+    if (r.y0 < nb.top - 0.5 || r.y1 > height - nb.bottom + 0.5) return null;
+    if (overlayWordOverflow(ns, width, height, args.metrics)) return null;
+    return ns;
+  };
+  const probarEstrecho = (st: ReturnType<typeof resolveOverlayStyle>) => {
+    for (const anchor of cands) {
+      const ns = narrowed(st, anchor);
+      if (ns && overlapOf(overlayTextRect(ns, width, height, args.metrics, anchor)) === 0) return { c: { anchor, overlap_pct: 0 }, st: ns };
+    }
+    return null;
+  };
   let base = style;
   let what: string[] = [];
+  let narrowInfo: null | { max_width_pct_declared: number; max_width_pct_used: number } = null;
   let best = scored.find((c) => c.overlap_pct === 0) ?? null;
+  // 1.13.0 — un bloque estrechado se alarga, y en una columna angosta es fácil que la última línea quede con UNA palabra
+  // que no se puede acompañar («twelve» / «months.»). Se prefiere, en este orden: estrechado sin palabra sola al tamaño
+  // de siempre; un escalón más chico (a todo el ancho libre, o estrechado sin palabra sola); y sólo después, el primer
+  // estrechado aunque deje una palabra sola. Medido con `overlayLoneWords`; sin métricas cuenta 0 y nada cambia.
+  let narrowWithLone: null | { n: { c: { anchor: string; overlap_pct: number }; st: ReturnType<typeof resolveOverlayStyle> }; what: string[] } = null;
+  const tomarEstrecho = (n: { c: { anchor: string; overlap_pct: number }; st: ReturnType<typeof resolveOverlayStyle> }, w: string[]) => {
+    best = n.c; base = n.st; what = w;
+    narrowInfo = { max_width_pct_declared: style.layout.maxWidthPct, max_width_pct_used: n.st.layout.maxWidthPct };
+  };
+  if (!best && apl) {
+    const n = probarEstrecho(style);
+    if (n && overlayLoneWords(n.st, width, height, args.metrics) === 0) tomarEstrecho(n, []);
+    else if (n) narrowWithLone = { n, what: [] };
+  }
   if (!best) {
     // 1.6.1 — sin ancla libre al tamaño de siempre: el menor ajuste que la libera; si ninguno la libera, el MENOR
     // solape entre todas las combinaciones (ancla × escalón) y, a igual solape, el menor ajuste.
@@ -3257,9 +3603,14 @@ export function chooseOverlayAnchor(args: {
       const sc = score(step.style);
       const free = sc.find((c) => c.overlap_pct === 0);
       if (free) { best = free; base = step.style; what = step.what; break; }
+      // 1.13.0 — en cada escalón, también el bloque estrechado al lado libre de la figura.
+      const n = apl ? probarEstrecho(step.style) : null;
+      if (n && overlayLoneWords(n.st, width, height, args.metrics) === 0) { tomarEstrecho(n, step.what); break; }
+      if (n && !narrowWithLone) narrowWithLone = { n, what: step.what };
       const m = sc.reduce((a, c) => (c.overlap_pct < a.overlap_pct ? c : a), sc[0]);
       if (m && m.overlap_pct < low.c.overlap_pct) low = { c: m, st: step.style, what: step.what };
     }
+    if (!best && narrowWithLone) tomarEstrecho(narrowWithLone.n, narrowWithLone.what);
     if (!best) { best = low.c; base = low.st; what = low.what; }
   }
   // 1.6.3 — LETREROS. Las caras ya decidieron el tamaño (`base`) y el solape mínimo de caras (`best`). Entre las
@@ -3312,20 +3663,58 @@ export function chooseOverlayAnchor(args: {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto ${libre} ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
   markers.push(...signMarkers);
-  if ((args.textPlace === 'top' || args.textPlace === 'bottom') && best.overlap_pct > 0) {
-    markers.push(`OVERLAY_TEXT_PLACE_COVERS: se pidió el texto ${TEXT_PLACE_LABEL[args.textPlace]}; ninguna columna de esa fila lo deja ${libre}; se compone igual en ${best.anchor}, que tapa ${best.overlap_pct} %`);
+  const forcedRow = args.textPlace === 'top' || args.textPlace === 'bottom';
+  if (forcedRow && best.overlap_pct > 0) {
+    markers.push(`OVERLAY_TEXT_PLACE_COVERS: se pidió el texto ${TEXT_PLACE_LABEL[args.textPlace as 'top' | 'bottom']}; ninguna columna de esa fila lo deja ${libre}; se compone igual en ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
-  const out = best.anchor === declared && markers.length === style.markers.length ? style : {
+  if (narrowInfo) {
+    markers.push(`OVERLAY_TEXT_NARROWED_FOR_PERSON: a todo el ancho el texto tapaba ${tapa}; en ${best.anchor} se estrecha al lado libre de la figura (ancho ${narrowInfo.max_width_pct_declared}→${narrowInfo.max_width_pct_used} %)`);
+  }
+  let out = best.anchor === declared && markers.length === style.markers.length ? style : {
     ...base,
     layout: { ...base.layout, anchor: best.anchor, align: af.keepAlign ? base.layout.align : ANCHORS[best.anchor].align },
     markers,
   };
+  // 1.13.0 — ÚLTIMO RECURSO 'band': ninguna colocación libra la figura. Una banda del color y alfa que declara la marca,
+  // sólo bajo el texto, con su relleno: la foto entera nunca se oscurece. Con una fila pedida, no (taparía lo pedido).
+  let fallback: null | 'band' = null;
+  let bandOut: { x0: number; y0: number; x1: number; y1: number } | undefined;
+  if (apl?.band && best.overlap_pct > 0 && !forcedRow) {
+    bandOut = overlayBandRect(out, width, height, args.metrics)!;
+    fallback = 'band';
+    out = { ...out, band: { ...bandOut, color: apl.band.color },
+      markers: [...out.markers, `OVERLAY_BAND_FOR_PERSON: ninguna ancla (${cands.join(', ')}) deja el texto ${libre}, ni estrechado; en ${best.anchor} se pone una banda bajo el texto (sólo ahí; la foto no se oscurece)`] };
+  }
   return { style: out, report: {
     faces: args.faces.length, anchor_declared: declared, anchor_used: best.anchor, moved: best.anchor !== declared,
     overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
     ...(signList ? { signs: signList.length, sign_overlap_pct: signOverlap, signs_under_text: signsUnder } : {}),
     ...(ap ? { products: prodList.length } : {}),
+    ...(apl ? { people: peopleList.length, narrowed: narrowInfo, fallback, ...(bandOut ? { band: bandOut } : {}) } : {}),
   } };
+}
+
+/** 1.13.0 — la caja (px) de la banda del último recurso: la del texto en su ancla, con el relleno que declara la marca,
+ *  sin salir del lienzo. null si la marca no declara banda. PURO. */
+export function overlayBandRect(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  const b = style.layout.avoidPeople?.band;
+  if (!b || !style.slots.headline) return null;
+  const r = overlayTextRect(style, width, height, metrics, style.layout.anchor);
+  const pad = (b.padPct / 100) * Math.min(width, height);
+  const rr = (n: number) => Math.round(n * 100) / 100;
+  return { x0: rr(Math.max(0, r.x0 - pad)), y0: rr(Math.max(0, r.y0 - pad)), x1: rr(Math.min(width, r.x1 + pad)), y1: rr(Math.min(height, r.y1 + pad)) };
+}
+
+/** 1.13.0 — la banda sigue al texto: después de cambiar el corte (la palabra sola), la caja se vuelve a medir. Sin banda,
+ *  EL MISMO estilo. PURO. */
+export function refitOverlayBand(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
+): ReturnType<typeof resolveOverlayStyle> {
+  if (!style.band) return style;
+  const r = overlayBandRect(style, width, height, metrics);
+  return r ? { ...style, band: { ...r, color: style.band.color } } : style;
 }
 
 // ── 1.12.0 · LA UBICACIÓN DEL TEXTO LA PIDE UNA PERSONA ──────────────────────────────────────────
@@ -3560,6 +3949,9 @@ export interface CarouselAvoid {
   fallback: Array<'inset' | 'band'>; insetMinPct: number; bandAlpha: number | null;
   // 1.11.1 — el 'inset' alterna de lado por lámina (texto arriba en las impares, abajo en las pares).
   insetAlternate: boolean;
+  // 1.13.0 — figuras humanas completas. `minWidthPct`: % del ancho INTERIOR por debajo del cual la columna estrechada
+  // al lado libre no se usa; null ⇒ no se estrecha. Ausente ⇒ la lámina es la de 1.12.0.
+  people?: { marginPct: number; minWidthPct: number | null };
 }
 const CAROUSEL_PLACE_RE = /^(top|center|bottom)(?:_(left|right))?$/;
 const CAROUSEL_FALLBACKS = new Set(['inset', 'band']);
@@ -3585,7 +3977,12 @@ export function resolveCarouselAvoid(tokens: Record<string, any> | null | undefi
   const off = (v: unknown) => v == null || (isPlain(v) && (v as Record<string, unknown>).enabled === false);
   const af = ct.avoid_faces as unknown;
   const ap = ct.avoid_products as unknown;
+  const apl = ct.avoid_people as unknown;
   if (off(af)) {
+    if (!off(apl)) {
+      throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
+        'faltan datos de marca para componer la lámina de carrusel: carousel.avoid_people pide carousel.avoid_faces encendido: comparte su detección y sus colocaciones.');
+    }
     if (!off(ap)) {
       throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
         'faltan datos de marca para componer la lámina de carrusel: carousel.avoid_products pide carousel.avoid_faces encendido: comparte su detección y sus colocaciones.');
@@ -3644,11 +4041,19 @@ export function resolveCarouselAvoid(tokens: Record<string, any> | null | undefi
     else if (!Number.isFinite(pm) || pm < 0 || pm > 20) missing.push(`carousel.avoid_products.margin_pct=${p.margin_pct} (0 ≤ x ≤ 20)`);
     else products = { marginPct: pm };
   }
+  // 1.13.0 — la figura humana completa. Misma forma que en el overlay, sin último recurso propio (usa el de arriba).
+  let people: CarouselAvoid['people'] = undefined;
+  if (!off(apl)) {
+    const r = parseAvoidPeople(apl, 'carousel.avoid_people', false);
+    missing.push(...r.missing);
+    if (r.value) people = { marginPct: r.value.marginPct, minWidthPct: r.value.minWidthPct };
+  }
   if (missing.length) {
     throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE',
       `faltan datos de marca para componer la lámina de carrusel: ${missing.join(' · ')}.`);
   }
-  return { marginPct, products, placements, columnPcts, fallback: [...new Set(fbRaw)] as Array<'inset' | 'band'>, insetMinPct, bandAlpha, insetAlternate };
+  return { marginPct, products, placements, columnPcts, fallback: [...new Set(fbRaw)] as Array<'inset' | 'band'>, insetMinPct, bandAlpha, insetAlternate,
+    ...(people ? { people } : {}) };
 }
 
 /** Cajas medidas sobre la FOTO (0..1) → cajas sobre el LIENZO de la lámina (0..1), con el `objectFit: cover` con que la
@@ -3720,6 +4125,8 @@ function withAlphaRgb(color: string, alpha: number): string {
  */
 export function chooseCarouselPlacement(args: {
   chrome: CarouselChrome; metrics?: FitMetrics | null; faces: FaceBox[]; products?: FaceBox[] | null; avoid: CarouselAvoid;
+  /** 1.13.0 — figuras humanas completas (0..1 del LIENZO). Sólo cuentan con `avoid.people`, y cuentan como una cara. */
+  people?: FaceBox[] | null;
   /** 1.11.1 — el número de la lámina (1..N). Sólo lo usa el 'inset' con `inset_alternate`. */
   slideIndex?: number | null;
   /** 1.12.0 — la fila que pidió una persona. 'top'/'bottom': sólo esa fila y sus columnas declaradas, sin último
@@ -3733,6 +4140,8 @@ export function chooseCarouselPlacement(args: {
     fallback: null | 'inset' | 'band'; reason: string; headline_size_pct?: number;
     inset?: { x0: number; y0: number; x1: number; y1: number }; band?: { y0: number; y1: number };
     text_place?: 'top' | 'bottom';
+    // 1.13.0 — sólo con `carousel.avoid_people`.
+    people?: number; narrowed_column_pct?: { left: number | null; right: number | null };
   };
 } {
   const { chrome, avoid } = args;
@@ -3748,7 +4157,10 @@ export function chooseCarouselPlacement(args: {
   const faceBoxes = toPx(args.faces ?? [], avoid.marginPct);
   const prodList = avoid.products ? (args.products ?? []) : [];
   const prodBoxes = avoid.products ? toPx(prodList, avoid.products.marginPct) : [];
-  const allBoxes = [...faceBoxes, ...prodBoxes];
+  // 1.13.0 — la figura humana completa, con su margen. Sin `avoid.people`, ninguna caja más.
+  const peopleList = avoid.people ? (args.people ?? []) : [];
+  const peopleBoxes = avoid.people ? toPx(peopleList, avoid.people.marginPct) : [];
+  const allBoxes = [...faceBoxes, ...prodBoxes, ...peopleBoxes];
   const fitKey = (r: ReturnType<typeof fitCarouselContent>['report']) =>
     `${r.figure_scale}|${r.headline_size_pct}|${r.body_scale}|${r.steps_dropped}|${r.overflow}`;
   // Cada colocación con columna se prueba con cada ancho declarado, en su orden; las filas a todo el ancho, una vez.
@@ -3760,6 +4172,26 @@ export function chooseCarouselPlacement(args: {
   const slots: Slot[] = avoid.placements
     .filter((p) => (forced ? p.startsWith(`${forced}_`) : p !== 'center'))
     .flatMap((p) => (p.includes('_') ? avoid.columnPcts.map((col) => ({ code: p, col })) : [{ code: p, col: null }]));
+  // 1.13.0 — ESTRECHAR AL LADO LIBRE: con `avoid.people.minWidthPct` y figuras detectadas, una columna más por lado, del
+  // ancho que deja libre la figura más cercana (con su margen), en cada fila candidata. Nunca por debajo del mínimo
+  // declarado ni del 100 %. Van después de las colocaciones declaradas: primero lo que la marca eligió.
+  const innerW = r2(W - 2 * M);
+  const narrowCol: { left: number | null; right: number | null } = { left: null, right: null };
+  if (avoid.people?.minWidthPct != null && peopleBoxes.length) {
+    const left = Math.min(...peopleBoxes.filter((b) => b.x1 > M).map((b) => b.x0)) - M;
+    const right = (W - M) - Math.max(...peopleBoxes.filter((b) => b.x0 < W - M).map((b) => b.x1));
+    for (const [side, avail] of [['left', left], ['right', right]] as const) {
+      if (!Number.isFinite(avail)) continue;
+      const pct = Math.floor((1000 * avail) / innerW) / 10;
+      if (pct >= avoid.people.minWidthPct && pct < 100) narrowCol[side] = pct;
+    }
+    const rows = forced ? [forced] : CAROUSEL_DEFAULT_ROWS;
+    for (const side of ['left', 'right'] as const) {
+      const col = narrowCol[side];
+      if (col == null) continue;
+      for (const row of rows) if (!slots.some((x) => x.code === `${row}_${side}` && x.col === col)) slots.push({ code: `${row}_${side}`, col });
+    }
+  }
   const baseSlot: Slot | null = forced ? { code: forced, col: null } : null;
   const withBlockOf = (from: CarouselChrome, sl: Slot): CarouselChrome => {
     const mm = CAROUSEL_PLACE_RE.exec(sl.code)!;
@@ -3772,7 +4204,8 @@ export function chooseCarouselPlacement(args: {
     return { placement: sl?.code ?? 'center', column_pct: sl?.col ?? null, fit, rect, m, key: fitKey(fit.report),
       overlap_pct: rectOverlapPct(rect, allBoxes), face_overlap_pct: rectOverlapPct(rect, faceBoxes), product_overlap_pct: rectOverlapPct(rect, prodBoxes) };
   };
-  const what = avoid.products ? 'una cara o un producto' : 'una cara';
+  const what = avoid.people ? (avoid.products ? 'una cara, una persona o un producto' : 'una cara o una persona')
+    : avoid.products ? 'una cara o un producto' : 'una cara';
   const label = (c: { placement: string; column_pct: number | null }) => (c.column_pct != null ? `${c.placement} (columna ${c.column_pct} %)` : c.placement);
   const base = evalC(baseSlot);
   const cands = slots.map((sl) => evalC(sl));
@@ -3783,7 +4216,8 @@ export function chooseCarouselPlacement(args: {
     overlap_pct: fallback === 'inset' ? 0 : used.overlap_pct,
     candidates: all.map((c) => ({ placement: c.placement, column_pct: c.column_pct, overlap_pct: c.overlap_pct, face_overlap_pct: c.face_overlap_pct,
       product_overlap_pct: c.product_overlap_pct, reduced: c.key !== base.key, overflow: c.fit.report.overflow })),
-    fallback, reason, ...(forced ? { text_place: forced } : {}), ...extra,
+    fallback, reason, ...(forced ? { text_place: forced } : {}),
+    ...(avoid.people ? { people: peopleList.length, narrowed_column_pct: narrowCol } : {}), ...extra,
   });
   const where = forced ? `${TEXT_PLACE_LABEL[forced]}, donde se pidió,` : 'en el centro';
   if (base.overlap_pct === 0) {
@@ -4092,6 +4526,11 @@ const PRODUCTS_PROMPT =
   ' Also detect every product that is a protagonist of the scene: bottles, jars, tubes, boxes, packages, devices or any ' +
   'other object shown on purpose, held or displayed. Do not include furniture, walls, plants or background objects. ' +
   'Return each one in products as box_2d with the same format, tightly around the object. If there are none, return an empty products list.';
+// 1.13.0 — se suma sólo si la marca declara `avoid_people` (overlay o lámina): sin el token, la petición es la de 1.11.0.
+const PEOPLE_PROMPT =
+  ' Also detect every person visible in this image. Return each one in people as box_2d with the same format, around the ' +
+  'WHOLE visible figure: from the top of the head to the lowest visible part of the body (the feet if they are visible), ' +
+  'including arms, hands and clothing. If there are none, return an empty people list.';
 
 // ── ENDPOINT-VERTEX:BEGIN ── (2026-10-01) bloque PURO: de una ubicación a la URL base de Vertex.
 // Lo extrae `tests/endpoint_vertex_test.mjs` por estos sentinelas.
@@ -4538,19 +4977,21 @@ export async function ledgerRecordDirect(body: unknown, rows: LedgerRow[], ctx: 
 // ── LIBRO-DIRECTO:END ──
 
 type FaceCheck = {
-  faces: FaceBox[] | null; signs: FaceBox[] | null; products: FaceBox[] | null; model: string; model_source?: LabModel['source']; called: boolean; http_status: number | null;
+  faces: FaceBox[] | null; signs: FaceBox[] | null; products: FaceBox[] | null; people: FaceBox[] | null; model: string; model_source?: LabModel['source']; called: boolean; http_status: number | null;
   usage: { input_tokens: number; output_tokens: number } | null; error: string | null; duration_ms: number;
 };
 
 async function detectFaces(
   bytes: Uint8Array, mime: string,
-  opts: { signs?: boolean; products?: boolean; calibration?: { model: string; params: Record<string, unknown> | null } | null } = {},
+  opts: { signs?: boolean; products?: boolean; people?: boolean; calibration?: { model: string; params: Record<string, unknown> | null } | null } = {},
 ): Promise<FaceCheck> {
   const t0 = Date.now();
-  const out: FaceCheck = { faces: null, signs: null, products: null, model: 'UNKNOWN', called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
+  const out: FaceCheck = { faces: null, signs: null, products: null, people: null, model: 'UNKNOWN', called: false, http_status: null, usage: null, error: null, duration_ms: 0 };
   const boxList = { type: 'ARRAY', items: { type: 'OBJECT', required: ['box_2d'], properties: { box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } } } } };
   // Las listas que se piden: caras siempre; letreros (1.6.3) y productos (1.11.0) sólo si la marca los declara.
   const schemaKeys = ['faces', ...(opts.signs ? ['signs'] : []), ...(opts.products ? ['products'] : [])];
+  // 1.13.0 — las figuras humanas completas, sólo si la marca declara `avoid_people`: sin él, la petición es la de 1.11.0.
+  if (opts.people) schemaKeys.push('people');
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), FACES_TIMEOUT_MS);
   try {
@@ -4565,7 +5006,7 @@ async function detectFaces(
       method: 'POST', signal: controller.signal,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') + (opts.products ? PRODUCTS_PROMPT : '') }] }],
+        contents: [{ role: 'user', parts: [{ inlineData: { mimeType: mime, data: b64(bytes) } }, { text: FACES_PROMPT + (opts.signs ? SIGNS_PROMPT : '') + (opts.products ? PRODUCTS_PROMPT : '') + (opts.people ? PEOPLE_PROMPT : '') }] }],
         generationConfig: mergeGenerationConfig({
           temperature: 0, responseMimeType: 'application/json',
           responseSchema: { type: 'OBJECT', required: schemaKeys, properties: Object.fromEntries(schemaKeys.map((k) => [k, boxList])) },
@@ -4584,6 +5025,7 @@ async function detectFaces(
     out.faces = parseFaceBoxes(text);
     if (opts.signs) out.signs = parseFaceBoxes(text, 'signs');
     if (opts.products) out.products = parseFaceBoxes(text, 'products');
+    if (opts.people) out.people = parseFaceBoxes(text, 'people');
   } catch (err) {
     out.error = err instanceof Error && err.name === 'AbortError' ? `el detector superó ${FACES_TIMEOUT_MS / 1000} s`
       : (err instanceof Error ? err.message : String(err)).slice(0, 240);
@@ -4719,10 +5161,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       let slideFaceMeta: Record<string, unknown> | null = null;
       let avoidMeta: Record<string, unknown> | null = null;
       if (avoid && slideBytes && slideDims) {
-        const fc = await detectFaces(slideBytes, slideDims.mime, { products: !!avoid.products,
+        const fc = await detectFaces(slideBytes, slideDims.mime, { products: !!avoid.products, people: !!avoid.people,
           calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
         slideFaceMeta = { model: fc.model, model_source: fc.model_source ?? null, provider_called: fc.called, provider_http_status: fc.http_status,
-          usage: fc.usage, duration_ms: fc.duration_ms, boxes: fc.faces, ...(avoid.products ? { product_boxes: fc.products } : {}), error: fc.error };
+          usage: fc.usage, duration_ms: fc.duration_ms, boxes: fc.faces, ...(avoid.products ? { product_boxes: fc.products } : {}),
+          ...(avoid.people ? { people_boxes: fc.people } : {}), error: fc.error };
         // LIBRO-DIRECTO — como en el overlay: la llamada se asienta en cuanto se hizo. El carril (`ledger_by_caller`) la
         // asienta él con `logComposeFaces`, que lee este mismo `meta.faces`.
         if (fc.called) {
@@ -4738,7 +5181,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           const { width: cw, height: ch } = area.chrome.canvas;
           const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid, slideIndex: carouselIn!.index, textPlace: textPlaceIn,
             faces: coverMapBoxes(fc.faces, slideDims.width, slideDims.height, cw, ch),
-            products: coverMapBoxes(fc.products ?? [], slideDims.width, slideDims.height, cw, ch) });
+            products: coverMapBoxes(fc.products ?? [], slideDims.width, slideDims.height, cw, ch),
+            people: coverMapBoxes(fc.people ?? [], slideDims.width, slideDims.height, cw, ch) });
           fit = pick.fit;
           warnings.push(...pick.warnings);
           avoidMeta = pick.report;
@@ -4747,7 +5191,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           if (ins) {
             try {
               const cr = insetCropRect(slideDims.width, slideDims.height, ins.x1 - ins.x0, ins.y1 - ins.y0,
-                [...fc.faces, ...(avoid.products ? (fc.products ?? []) : [])]);
+                [...fc.faces, ...(avoid.products ? (fc.products ?? []) : []), ...(avoid.people ? (fc.people ?? []) : [])]);
               const cropped = await sharp(Buffer.from(slideBytes)).extract(cr).png().toBuffer();
               backgroundSrc = `data:image/png;base64,${b64(new Uint8Array(cropped))}`;
               avoidMeta = { ...avoidMeta, inset_crop: cr };
@@ -4769,6 +5213,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           warnings.push('CAROUSEL_TEXT_PLACE_AUTO_WITHOUT_POLICY: se pidió que el texto no tape cara ni producto, pero la marca no declara carousel.avoid_faces; se compone en el centro de la maqueta');
         }
       }
+      // 1.13.0 — ninguna palabra sola al final del titular, con la colocación y el tamaño ya decididos.
+      fit = carouselAvoidOrphan(fit, metrics);
       warnings.push(...fit.warnings);
       const scene = buildCarouselScene({ chrome: fit.chrome, style, backgroundSrc });
       const { width, height } = chrome.canvas;
@@ -4898,7 +5344,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
     }
     const areaFit = fitOverlayTextArea({ style: oStyle, width: dims.width, height: dims.height, metrics: areaMetrics });
-    // 1.13.0 — el bloque cabe en el ALTO del lienzo, en cualquier proporción. Si ya cabe, el MISMO estilo.
+    // 1.14.0 — el bloque cabe en el ALTO del lienzo, en cualquier proporción. Si ya cabe, el MISMO estilo.
     const heightFit = fitOverlayTextHeight({ style: areaFit.style, width: dims.width, height: dims.height, metrics: areaMetrics });
     let finalStyle = heightFit.style;
 
@@ -4910,11 +5356,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const wantSigns = !!finalStyle.layout.avoidSceneText;
       // 1.11.0 — con `avoid_products`, la MISMA llamada pide también los productos de la escena.
       const wantProducts = !!finalStyle.layout.avoidProducts;
-      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns, products: wantProducts,
+      // 1.13.0 — con `avoid_people`, la MISMA llamada pide también las figuras humanas completas.
+      const wantPeople = !!finalStyle.layout.avoidPeople;
+      const fc = await detectFaces(cleanBytes, dims.mime, { signs: wantSigns, products: wantProducts, people: wantPeople,
         calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
       faceMeta = { model: fc.model, model_source: fc.model_source ?? null, provider_called: fc.called, provider_http_status: fc.http_status, usage: fc.usage,
         duration_ms: fc.duration_ms, boxes: fc.faces, ...(wantSigns ? { sign_boxes: fc.signs } : {}),
-        ...(wantProducts ? { product_boxes: fc.products } : {}), error: fc.error };
+        ...(wantProducts ? { product_boxes: fc.products } : {}), ...(wantPeople ? { people_boxes: fc.people } : {}), error: fc.error };
       // LIBRO-DIRECTO — la llamada al detector se asienta AQUÍ, en cuanto se hizo: si la composición
       // falla después, el gasto ya existió. Clase 'estructura', como la asienta el carril.
       if (fc.called) {
@@ -4928,7 +5376,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
-          faces: fc.faces, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs, products: fc.products,
+          faces: fc.faces, people: fc.people, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs, products: fc.products,
           textPlace: textPlaceIn });
         finalStyle = ch.style;
         faceMeta = { ...faceMeta, ...(ch.report ?? {}) };
@@ -4938,6 +5386,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           `OVERLAY_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; se compone en el ancla declarada (${finalStyle.layout.anchor})`] };
       }
     }
+
+    // 1.13.0 — NINGUNA PALABRA SOLA EN SU LÍNEA: con el tamaño, el ancla y el ancho ya decididos. Sin palabra sola, el
+    // estilo es el mismo y la escena la de 1.12.0.
+    const orphan = avoidOrphanLines(finalStyle, dims.width, dims.height, areaMetrics);
+    finalStyle = refitOverlayBand(orphan.style, dims.width, dims.height, areaMetrics);
 
     // 1.6.3 — si el texto igual cae sobre un letrero y la marca declara `blur_pct`, ese letrero se desenfoca.
     let bgBytes: Uint8Array = cleanBytes;
@@ -5069,6 +5522,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(identityRoleIn ? { identity_role: { requested: identityRoleIn, applied: identityApplied.applied } } : {}),
         // 1.12.0 — la fila pedida, el ancla que forzó y dónde quedó el texto (sólo si llegó `text_place`).
         ...(placeApplied.applied ? { text_place: { ...placeApplied.applied, anchor_used: finalStyle.layout.anchor } } : {}),
+        // 1.13.0 — qué palabra sola se evitó y cuál bajó a acompañarla (sólo si hubo alguna).
+        ...(orphan.report.length ? { orphan_lines: orphan.report } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
