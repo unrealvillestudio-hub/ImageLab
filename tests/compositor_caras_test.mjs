@@ -51,9 +51,13 @@ const TEXT = { headline: 'El daño de hoy empezó hace meses y recién se ve.', 
 const style = (layout, extra) => M.resolveOverlayStyle({ tokens: tokens(layout, extra), typography: TYPO, palette: PAL, text: TEXT });
 const W = 768, H = 1344;
 
-test('1 · candidatas por defecto: la declarada y su columna', () => {
-  assert.deepEqual(M.faceAnchorCandidates('bottom_left'), ['bottom_left', 'top_left', 'middle_left']);
-  assert.deepEqual(M.faceAnchorCandidates('top_center'), ['top_center', 'bottom_center', 'center']);
+// 1.15.0 — un ancla de franja prueba primero toda su franja. ⛔ NO OPERATIVO — asertos anteriores (la declarada y su
+// columna): bottom_left → ['bottom_left', 'top_left', 'middle_left']; top_center → ['top_center', 'bottom_center', 'center'].
+test('1 · candidatas por defecto: toda la franja, la franja opuesta y por último el medio; el medio conserva su columna', () => {
+  assert.deepEqual(M.faceAnchorCandidates('bottom_left'),
+    ['bottom_left', 'bottom_right', 'bottom_center', 'top_left', 'top_right', 'top_center', 'middle_left', 'middle_right', 'center']);
+  assert.deepEqual(M.faceAnchorCandidates('top_center'),
+    ['top_center', 'top_left', 'top_right', 'bottom_center', 'bottom_left', 'bottom_right', 'center', 'middle_left', 'middle_right']);
   assert.deepEqual(M.faceAnchorCandidates('middle_right'), ['middle_right', 'top_right', 'bottom_right']);
   assert.deepEqual(M.faceAnchorCandidates('nada'), []);
 });
@@ -64,7 +68,7 @@ test('2 · los tokens son dato validado; ausentes o apagados no existen', () => 
   assert.equal('textEffect' in base, false);
   assert.equal('avoidFaces' in style({ avoid_faces: { enabled: false } }).layout, false);
   const on = style({ avoid_faces: { enabled: true } });
-  assert.deepEqual(on.layout.avoidFaces, { anchors: ['bottom_left', 'top_left', 'middle_left'], marginPct: 2, keepAlign: false });
+  assert.deepEqual(on.layout.avoidFaces, { anchors: M.faceAnchorCandidates('bottom_left'), marginPct: 2, keepAlign: false });
   assert.equal(style({ align: 'left', avoid_faces: { enabled: true, anchors: ['top_left'], margin_pct: 3 } }).layout.avoidFaces.keepAlign, true);
   assert.throws(() => style({ avoid_faces: { enabled: true, anchors: ['arriba'] } }), /COMPOSITOR_TOKENS_INCOMPLETE|avoid_faces\.anchors/);
   assert.throws(() => style({ avoid_faces: true }), /layout\.avoid_faces/);
@@ -75,8 +79,10 @@ test('2 · los tokens son dato validado; ausentes o apagados no existen', () => 
   assert.throws(() => style({ text_effect: { kind: 'shadow', color: 'oscuro', alpha: 0.3, blur_pct: 9, offset_pct: 0 } }), /layout\.text_effect/);
 });
 
+// 1.15.0 — 3a, 3c, 3d y 9b fijan las candidatas de antes (la columna) para seguir probando lo que prueban; el orden
+// por defecto nuevo (la franja primero) lo prueba 3f.
 test('3a · una cara donde cae el texto ⇒ primera candidata libre', () => {
-  const s = style({ avoid_faces: { enabled: true } });
+  const s = style({ avoid_faces: { enabled: true, anchors: ['top_left', 'middle_left'] } });
   const r = M.overlayTextRect(s, W, H, null, 'bottom_left');
   // Una cara justo sobre el bloque declarado.
   const face = { x0: r.x0 / W, y0: r.y0 / H, x1: (r.x0 + 120) / W, y1: (r.y0 + 120) / H };
@@ -99,8 +105,19 @@ test('3b · la declarada libre ⇒ el MISMO objeto; sin token ⇒ el mismo objet
   assert.equal(r.style, sin); assert.equal(r.report, null);
 });
 
+test('3f · 1.15.0 · con el orden por defecto, una cara en el ancla de abajo lleva el texto al otro lado de LA MISMA franja', () => {
+  // Lienzo apaisado y bloque angosto: los dos lados de la franja no se pisan.
+  const WW = 1344, HH = 768;
+  const s = style({ max_width_pct: 40, avoid_faces: { enabled: true } });
+  const r = M.overlayTextRect(s, WW, HH, null, 'bottom_left');
+  const cara = { x0: r.x0 / WW, y0: (r.y0 - 40) / HH, x1: (r.x0 + 160) / WW, y1: (r.y0 + 120) / HH };
+  const ch = M.chooseOverlayAnchor({ style: s, width: WW, height: HH, faces: [cara] });
+  assert.equal(ch.report.anchor_used, 'bottom_right', 'se queda en la franja de abajo');
+  assert.ok(!['top_left', 'middle_left'].includes(ch.style.layout.anchor), 'no sube por la columna');
+});
+
 test('3c · ninguna libre ⇒ la de menor solape, y se dice; el ancla del producto no es candidata', () => {
-  const s = style({ avoid_faces: { enabled: true } });
+  const s = style({ avoid_faces: { enabled: true, anchors: ['top_left', 'middle_left'] } });
   const ch = M.chooseOverlayAnchor({ style: s, width: W, height: H, faces: [{ x0: 0, y0: 0, x1: 1, y1: 1 }] });
   assert.ok(ch.report.overlap_pct > 0);
   assert.ok(ch.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')));
@@ -111,7 +128,7 @@ test('3c · ninguna libre ⇒ la de menor solape, y se dice; el ancla del produc
 });
 
 test('3d · ninguna libre al tamaño de siempre ⇒ el menor ajuste que la libera (escalones, luego sin bajada)', () => {
-  const s = style({ avoid_faces: { enabled: true } });
+  const s = style({ avoid_faces: { enabled: true, anchors: ['top_left', 'middle_left'] } });
   const full = M.overlayTextRect(s, W, H, null, 'bottom_left');
   // La cara toca SÓLO la parte alta del bloque declarado, y las otras anclas están tapadas por otra cara.
   const caraArriba = { x0: full.x0 / W, y0: (full.y0 - 200) / H, x1: (full.x0 + 100) / W, y1: (full.y0 + 25) / H };
@@ -144,7 +161,7 @@ test('3e · 1.6.1 · sin ancla libre en ningún escalón ⇒ el menor solape ent
 test('7 · 1.6.1 · se pide el rostro (no la cabeza) y la respuesta conserva las cajas', () => {
   assert.match(SRC, /tightly around the FACE ONLY/);
   assert.match(SRC, /boxes: fc\.faces/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(6\.[1234]|7\.0|8\.0|9\.0|10\.0|11\.[01]|12\.0|13\.[01]|14\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(6\.[1234]|7\.0|8\.0|9\.0|10\.0|11\.[01]|12\.0|13\.[01]|14\.0|15\.0)'/);
 });
 
 test('4 · la sombra llega al titular, a la bajada y a los tramos con énfasis; sin token, ninguna', () => {
@@ -256,7 +273,7 @@ test('9a · 1.6.3 · avoid_scene_text y emphasis_contrast son dato validado; aus
 });
 
 test('9b · 1.6.3 · las caras deciden; entre anclas igual de libres gana la que no tapa el letrero', () => {
-  const st = style({ avoid_faces: { enabled: true, margin_pct: 0 }, avoid_scene_text: { enabled: true, margin_pct: 0, blur_pct: 0.5 } });
+  const st = style({ avoid_faces: { enabled: true, margin_pct: 0, anchors: ['top_left', 'middle_left'] }, avoid_scene_text: { enabled: true, margin_pct: 0, blur_pct: 0.5 } });
   const rect = (a) => M.overlayTextRect(st, W, H, null, a);
   const r = rect('bottom_left');
   const sign = { x0: r.x0 / W, y0: r.y0 / H, x1: (r.x0 + 40) / W, y1: (r.y0 + 40) / H };   // letrero bajo el ancla declarada

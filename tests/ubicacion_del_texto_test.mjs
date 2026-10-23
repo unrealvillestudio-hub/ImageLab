@@ -85,7 +85,9 @@ test('2 · sin text_place el estilo es EL MISMO objeto y la elección de caras n
   const a = M.chooseOverlayAnchor({ style: s, width: W, height: H, faces: [face] });
   const b = M.chooseOverlayAnchor({ style: s, width: W, height: H, faces: [face], textPlace: null });
   assert.deepEqual(b, a);
-  assert.equal(a.style.layout.anchor, 'top_left', 'la elección de 1.6.x: otra fila de la misma columna');
+  // 1.15.0 — la franja primero (`faceAnchorCandidates`). ⛔ NO OPERATIVO — aserto anterior: anchor === 'top_left' («otra fila de la misma columna»).
+  assert.equal(a.style.layout.anchor, a.report.candidates.find((c) => c.overlap_pct === 0)?.anchor ?? a.style.layout.anchor, 'la primera candidata libre, en el orden de la franja');
+  assert.deepEqual(a.report.candidates.map((c) => c.anchor).slice(0, 3), ['bottom_left', 'bottom_right', 'bottom_center'], 'primero toda la franja');
 });
 
 console.log('\n── 3 · overlay: la fila pedida ──');
@@ -264,7 +266,7 @@ test('8b · la fila llega a las dos elecciones y vuelve en meta', () => {
   assert.match(SRC, /\.\.\.\(textPlaceIn \? \{ text_place: \{ requested: textPlaceIn, placement_used: fit\.chrome\.block\?\.place \?\? 'center',/);
 });
 test('8c · la versión sube a 1.12.0 (o a una posterior)', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1(2\.0|3\.[01]|4\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1(2\.0|3\.[01]|4\.0|5\.0)'/);
 });
 
 console.log('\n── 9 · marca N+1 ──');

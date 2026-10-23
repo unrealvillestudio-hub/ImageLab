@@ -241,7 +241,15 @@ declare const process: { env: Record<string, string | undefined> };
 //         una franja inferior más gruesa que el margen), baja por los escalones de `faceFitLadder`; si ni al último
 //         cabe, compone al mínimo y emite `OVERLAY_TEXT_OVERFLOW`. Sin token nuevo: es geometría del eje. Si el
 //         bloque ya cabe, la escena sale idéntica a la de 1.13.1. `meta.text_height` sólo cuando hubo ajuste.
-export const COMPOSITOR_VERSION = '1.14.0';
+//   1.15.0 (2026-10-23) — EL TEXTO SE QUEDA EN SU FRANJA (Sam, 2026-10-23: «hay una regla sobre la ubicación de los
+//         textos embebidos… aplica para todas las plataformas, es un básico de la publicidad», y «por qué unas veces sí
+//         y otras no… investígalo y corrígelo»). Medido ese día en 8486b569: con el ancla `bottom_left` tapando una
+//         cara, las candidatas por defecto (`faceAnchorCandidates`) eran SÓLO su columna —`top_left`, `middle_left`—, y
+//         el titular subió a media altura, sobre la barbilla, con `bottom_right` libre. Ahora, con un ancla de franja
+//         (arriba o abajo), se prueba primero TODA la franja (su lado, el contrario y el centro), después la franja
+//         opuesta y por último el medio. Un ancla del medio conserva su columna. Con la declarada libre, la escena es
+//         la de 1.14.0.
+export const COMPOSITOR_VERSION = '1.15.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -3428,9 +3436,18 @@ export interface FaceBox { x0: number; y0: number; x1: number; y1: number }
 export function faceAnchorCandidates(anchor: string): string[] {
   const a = ANCHORS[anchor];
   if (!a) return [];
-  const col = Object.entries(ANCHORS).filter(([, v]) => v.x === a.x).map(([k, v]) => ({ k, y: v.y }));
-  const order = a.y === 'flex-end' ? ['flex-start', 'center'] : a.y === 'flex-start' ? ['flex-end', 'center'] : ['flex-start', 'flex-end'];
-  return [anchor, ...order.map((y) => col.find((c) => c.y === y)?.k).filter((k): k is string => !!k)];
+  const keyOf = (x: string, y: string) => Object.entries(ANCHORS).find(([, v]) => v.x === x && v.y === y)?.[0] ?? null;
+  // 1.15.0 — un ancla del medio no tiene franja: conserva su columna, como antes.
+  if (a.y === 'center') {
+    return [anchor, ...['flex-start', 'flex-end'].map((y) => keyOf(a.x, y)).filter((k): k is string => !!k)];
+  }
+  // Un ancla de franja: toda su franja (su lado, el contrario, el centro), después la franja opuesta y por último el medio.
+  // ⛔ NO OPERATIVO — orden anterior (1.6.0–1.14.0): la declarada y su columna (`bottom_left` → `top_left`, `middle_left`).
+  const rows = a.y === 'flex-end' ? ['flex-end', 'flex-start', 'center'] : ['flex-start', 'flex-end', 'center'];
+  const cols = a.x === 'flex-start' ? ['flex-start', 'flex-end', 'center'] : a.x === 'flex-end' ? ['flex-end', 'flex-start', 'center'] : ['center', 'flex-start', 'flex-end'];
+  const out: string[] = [];
+  for (const y of rows) for (const x of cols) { const k = keyOf(x, y); if (k && !out.includes(k)) out.push(k); }
+  return out;
 }
 
 /** La caja (px) del bloque de texto con un ancla dada: las mismas medidas que `measureOverlayText` y los mismos

@@ -169,9 +169,11 @@ test('3c · por debajo del mínimo declarado no se estrecha: (1.13.1) la colocac
   assert.equal('band' in c.style, false, 'no hay banda');
 });
 test('3d · cuerpo a la izquierda con anclas de la izquierda: (1.13.1) sin banda, la colocación de 1.12.0', () => {
-  const s = style({ avoid_people: BAND }, TXT);
+  // 1.15.0 — las anclas de la izquierda se declaran: el orden por defecto ya prueba toda la franja (`faceAnchorCandidates`).
+  const IZQ = { enabled: true, margin_pct: 2, anchors: ['top_left', 'middle_left'] };
+  const s = style({ avoid_people: BAND, avoid_faces: IZQ }, TXT);
   const c = choose(s, CUERPO_IZQUIERDA);
-  const s12 = style({}, TXT);
+  const s12 = style({ avoid_faces: IZQ }, TXT);
   const c12 = M.chooseOverlayAnchor({ style: s12, width: W, height: H, faces: [CUERPO_IZQUIERDA.face] });
   assert.equal(c.report.fallback, null);
   assert.equal('band' in c.style, false);
@@ -388,7 +390,7 @@ test('6c · el corte va después de la elección del ancla, y viaja en meta', ()
   assert.match(SRC, /\.\.\.\(orphan\.report\.length \? \{ orphan_lines: orphan\.report \} : \{\}\),/);
   assert.match(SRC, /fit = carouselAvoidOrphan\(fit, metrics\);\n\s*warnings\.push\(\.\.\.fit\.warnings\);/);
   assert.match(SRC, /\.\.\.\(wantPeople \? \{ people_boxes: fc\.people \} : \{\}\)/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.[01]|14\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.[01]|14\.0|15\.0)'/);
 });
 
 console.log('\n── 7 · marca N+1 ──');
