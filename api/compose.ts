@@ -213,7 +213,28 @@ declare const process: { env: Record<string, string | undefined> };
 //           bloque: si la línea anterior tiene 3 palabras o más y cabe, una baja a acompañarla. Regla general, medida con
 //           las métricas de la fuente; sin métricas, no se toca. Cambia el corte, nunca el tamaño ni la posición.
 //         Sin `avoid_people`, la elección es la de 1.12.0; sin palabra sola, la escena es la de 1.12.0.
-export const COMPOSITOR_VERSION = '1.13.0';
+//   1.13.1 (2026-10-22) — LA CARA MANDA; EL CUERPO SÓLO DESEMPATA. Medido ese día con 1.13.0 y `avoid_people`
+//         encendido en la capa global (12 piezas): la marca de autor (figura de pie a un lado) salió bien, pero en 7 de
+//         8 piezas de una persona centrada, de cintura arriba, que ocupa casi todo el alto, salió la banda gris en el
+//         ancla declarada, en varias sobre la cabeza o la cara. Causa: la figura entera se sumaba a las MISMAS cajas que
+//         la cara; cuando ninguna colocación libraba la figura, el último recurso (la de menor solape conjunto, y luego
+//         la banda) se elegía sin volver a exigir que se librara la cara. La política de caras quedó subordinada a la del
+//         cuerpo, y es al revés. Jerarquía estricta, en el overlay y en la lámina:
+//         1. Nunca se tapa una cara (ni un producto, si la marca lo pide): la elección de 1.12.0 es la restricción dura.
+//         2. Entre las colocaciones que la libran se prefiere la que libra también el cuerpo (primero, estrechar al lado
+//            libre con `min_width_pct`), con la búsqueda de 1.13.0.
+//         3. Si ninguna libra el cuerpo, se queda EXACTAMENTE la de 1.12.0, sin banda ni 'inset' por el cuerpo, y se dice
+//            (`OVERLAY_BODY_UNAVOIDABLE`, `CAROUSEL_BODY_UNAVOIDABLE`, `body_overlap_pct` en `meta`).
+//         · LA BANDA DEL OVERLAY SE RETIRA. Sam rechazó oscurecer la foto (15-oct) y la banda gris se ve pobre; con la
+//           jerarquía no queda ningún caso en que haga falta: donde se usaba, ahora va la colocación de 1.12.0, que libra
+//           la cara. `layout.avoid_people.fallback: 'band'` (y su `band`) es un ALIAS RETIRADO: se acepta para que una
+//           fila escrita con la forma de 1.13.0 no tumbe la composición, no dibuja nada y se dice
+//           (`OVERLAY_BAND_RETIRED`). La forma vigente es { enabled, margin_pct?, min_width_pct? }.
+//         · El último recurso de la LÁMINA ('inset' / 'band' de `carousel.avoid_faces`, 1.11.0) sigue igual y sólo para
+//           caras y productos: el cuerpo nunca lo dispara.
+//         Sin `avoid_people`, idéntico a 1.13.0. Con `avoid_people` y una figura que ninguna colocación libra, la elección
+//         y la escena son las de 1.12.0 (con la regla de la palabra sola de 1.13.0).
+export const COMPOSITOR_VERSION = '1.13.1';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -682,21 +703,22 @@ export interface OverlayAvoidPeople {
   marginPct: number;
   // % del ANCHO de la imagen por debajo del cual el bloque no se estrecha. null ⇒ no se estrecha.
   minWidthPct: number | null;
-  // Último recurso 'band' del overlay: color ya resuelto (rgba) y relleno alrededor del texto (% del lado corto).
-  band: null | { color: string; padPct: number };
+  // 1.13.1 — la fila trae el último recurso 'band' de 1.13.0, RETIRADO: no dibuja nada y se dice. Ausente si no lo trae.
+  bandRetired?: true;
 }
 // Ancho mínimo admitido para estrechar: por debajo, una columna de texto se vuelve una lista de palabras sueltas.
 const AVOID_PEOPLE_MIN_WIDTH = { lo: 20, hi: 95 };
 
 /** 1.13.0 — lee la forma común de `avoid_people` (overlay y lámina). Fail-loud acumulado, como los demás tokens. PURO.
- *  `fallback` sólo existe en el overlay ('band'); la lámina usa el último recurso de `carousel.avoid_faces`. */
+ *  `fallback` sólo existe en el overlay ('band'); la lámina usa el último recurso de `carousel.avoid_faces`.
+ *  1.13.1 — en el overlay, 'band' es un ALIAS RETIRADO: se lee para decirlo, y nada más. */
 export function parseAvoidPeople(tok: unknown, path: string, allowFallback: boolean): {
   missing: string[]; value: null | { marginPct: number; minWidthPct: number | null; fallback: 'band' | null };
 } {
   const missing: string[] = [];
   const a = tok as Record<string, any>;
   if (!isPlain(tok) || a.enabled !== true) {
-    missing.push(`${path} (objeto { enabled: true, margin_pct?: 0..20, min_width_pct?: ${AVOID_PEOPLE_MIN_WIDTH.lo}..${AVOID_PEOPLE_MIN_WIDTH.hi}${allowFallback ? ", fallback?: 'band', band?: { color, alpha, pad_pct? }" : ''} }; llegó ${JSON.stringify(tok)})`);
+    missing.push(`${path} (objeto { enabled: true, margin_pct?: 0..20, min_width_pct?: ${AVOID_PEOPLE_MIN_WIDTH.lo}..${AVOID_PEOPLE_MIN_WIDTH.hi}${allowFallback ? ", fallback?: 'band' (retirado en 1.13.1: no dibuja nada)" : ''} }; llegó ${JSON.stringify(tok)})`);
     return { missing, value: null };
   }
   const marginPct = Number(a.margin_pct ?? 1);
@@ -735,8 +757,6 @@ export function resolveOverlayStyle(args: {
     avoidPeople?: OverlayAvoidPeople;
     emphasisContrast?: { minContrast: number; fallbacks: Array<{ role: string; hex: string }>; minContrastVsText?: number };
   };
-  // 1.13.0 — el último recurso 'band' de `avoid_people`: una banda bajo el texto (px del lienzo). Sólo existe si se usó.
-  band?: { x0: number; y0: number; x1: number; y1: number; color: string };
   // 1.6.0 — sombra por glifo del overlay. Sólo existe si la marca la declara.
   // 1.6.2 — `when: 'low_contrast'` ⇒ sólo se aplica si la medición del fondo lo pide (`decideTextEffect`).
   textEffect?: { color: string; blurPct: number; offsetPct: number; when?: 'always' | 'low_contrast'; minContrast?: number; shadowHex?: string };
@@ -1053,22 +1073,16 @@ export function resolveOverlayStyle(args: {
     const r = parseAvoidPeople(aplTok, 'layout.avoid_people', true);
     missing.push(...r.missing);
     if (!r.missing.length && r.value) {
-      let band: OverlayAvoidPeople['band'] = null;
-      if (r.value.fallback === 'band') {
-        const b = (aplTok as Record<string, any>).band;
-        const colorTok = isPlain(b) ? String(b.color ?? '') : '';
-        const alpha = Number(isPlain(b) ? b.alpha : NaN);
-        const padPct = Number(isPlain(b) && b.pad_pct != null ? b.pad_pct : 2);
-        const pal = HEX_COLOR.test(colorTok) ? { hex: colorTok } : palBy.get(colorTok);
-        if (!pal) missing.push(`layout.avoid_people.band.color='${colorTok || '∅'}' (un rol de brand_palette o un hex #RRGGBB; obligatorio con fallback 'band')`);
-        if (!(Number.isFinite(alpha) && alpha > 0 && alpha <= 1)) missing.push(`layout.avoid_people.band.alpha (0 < x ≤ 1; obligatoria con fallback 'band'; llegó ${JSON.stringify(b)})`);
-        if (!(Number.isFinite(padPct) && padPct >= 0 && padPct <= 10)) missing.push(`layout.avoid_people.band.pad_pct=${JSON.stringify(b?.pad_pct)} (0 ≤ x ≤ 10, % del lado corto)`);
-        if (pal && Number.isFinite(alpha) && alpha > 0 && alpha <= 1 && Number.isFinite(padPct) && padPct >= 0 && padPct <= 10) {
-          band = { color: hexToRgba(String(pal.hex), alpha), padPct };
+      // 1.13.1 — LA BANDA SE RETIRA (Sam rechazó oscurecer la foto el 15-oct; medida el 22-oct, cayó sobre la cara en
+      // 7 de 8 piezas de una persona centrada). `fallback: 'band'` y su `band` se aceptan como ALIAS RETIRADO —una fila
+      // escrita con la forma de 1.13.0 no tumba la composición—, no se validan, no dibujan nada y se dice.
+      if (!avoidFaces) missing.push('layout.avoid_people pide layout.avoid_faces encendido: comparte su detección y sus anclas');
+      else {
+        avoidPeople = { marginPct: r.value.marginPct, minWidthPct: r.value.minWidthPct, ...(r.value.fallback === 'band' ? { bandRetired: true as const } : {}) };
+        if (r.value.fallback === 'band') {
+          markers.push("OVERLAY_BAND_RETIRED: layout.avoid_people.fallback='band' se retiró en 1.13.1; si ninguna colocación libra el cuerpo, el texto va donde libra la cara (la elección de 1.12.0), sin banda");
         }
       }
-      if (!avoidFaces) missing.push('layout.avoid_people pide layout.avoid_faces encendido: comparte su detección y sus anclas');
-      else avoidPeople = { marginPct: r.value.marginPct, minWidthPct: r.value.minWidthPct, band };
     }
   }
   // 1.6.3 — el énfasis se lee: umbral y colores alternativos, por rol de la marca.
@@ -1643,12 +1657,7 @@ export function buildOverlayScene(args: {
     });
   }
 
-  // 1.13.0 — el último recurso 'band' de `avoid_people`: sólo bajo el texto, nunca la foto entera. Sin él, nada cambia.
-  if (style.band) {
-    const b = style.band;
-    children.push({ type: 'div', props: { style: { position: 'absolute', left: b.x0, top: b.y0, width: Math.round((b.x1 - b.x0) * 100) / 100,
-      height: Math.round((b.y1 - b.y0) * 100) / 100, backgroundColor: b.color } } });
-  }
+  // 1.13.1 — la banda de 1.13.0 se retiró: la escena del overlay no dibuja nada bajo el texto (es la de 1.12.0).
   const box = overlayTextBox(style, width, height);
   const textChildren: Array<Record<string, any>> = [];
   // 1.6.0 — sin token es undefined y ningún estilo cambia: la escena es la de 1.5.0, clave por clave.
@@ -3413,11 +3422,8 @@ function faceFitLadder(base: ReturnType<typeof resolveOverlayStyle>): Array<{ st
   return out;
 }
 
-/** Elige el ancla del bloque de texto que no tapa ninguna cara. Sin `avoidFaces` o sin titular devuelve EL MISMO
- *  estilo. Orden: (1) la primera candidata libre al tamaño de siempre; (2) si ninguna, la que queda libre con el
- *  MENOR ajuste (escalones de `faceFitLadder`); (3) si ni así, la de menor solape al tamaño de siempre, y se dice.
- *  El ancla de la capa de producto (si se pega) no es candidata: las dos capas se taparían. PURO. */
-export function chooseOverlayAnchor(args: {
+/** El tipo de lo que recibe y devuelve la elección del ancla del overlay. */
+type OverlayAnchorArgs = {
   style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
   metrics?: Record<string, FontAdvance | null | undefined> | null; faces: FaceBox[]; productAnchor?: string | null;
   // 1.6.3 — letreros de la escena (0..1). Sólo cuentan con `layout.avoidSceneText`; nunca deciden el tamaño.
@@ -3426,19 +3432,72 @@ export function chooseOverlayAnchor(args: {
   products?: FaceBox[] | null;
   // 1.12.0 — la fila que pidió una persona (ya aplicada con `applyTextPlace`): si tapa algo, se compone igual y se dice.
   textPlace?: TextPlace | null;
-  // 1.13.0 — figuras humanas completas (0..1). Sólo cuentan con `layout.avoidPeople`, y cuentan como una cara.
+  // 1.13.0 — figuras humanas completas (0..1). Sólo cuentan con `layout.avoidPeople`; desde 1.13.1, sólo desempatan.
   people?: FaceBox[] | null;
-}): { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
+};
+type OverlayAnchorResult = { style: ReturnType<typeof resolveOverlayStyle>; report: null | {
   faces: number; anchor_declared: string; anchor_used: string; moved: boolean; overlap_pct: number;
   candidates: Array<{ anchor: string; overlap_pct: number }>; reduced: string[];
   // 1.6.3 — sólo con letreros detectados y el token encendido.
   signs?: number; sign_overlap_pct?: number; signs_under_text?: FaceBox[];
   // 1.11.0 — sólo con el token encendido.
   products?: number;
-  // 1.13.0 — sólo con `avoid_people` encendido: cuántas figuras, si el bloque se estrechó y el último recurso.
+  // 1.13.0 — sólo con `avoid_people` encendido: cuántas figuras y si el bloque se estrechó. `fallback` queda siempre
+  // en null desde 1.13.1 (la banda se retiró); `body_overlap_pct`: cuánto de la caja del texto cae sobre las figuras.
   people?: number; narrowed?: null | { max_width_pct_declared: number; max_width_pct_used: number };
-  fallback?: null | 'band'; band?: { x0: number; y0: number; x1: number; y1: number };
-} } {
+  fallback?: null; body_overlap_pct?: number;
+} };
+
+/**
+ * 1.13.1 — LA CARA MANDA; EL CUERPO SÓLO DESEMPATA. Elige el ancla del bloque de texto del overlay. PURO.
+ *   1. Sin `avoidPeople` (o sin `avoidFaces`, o sin titular): la elección de 1.12.0 (`chooseOverlayAnchorCore`), tal cual.
+ *   2. Con `avoidPeople` y figuras: la búsqueda de 1.13.0 con la figura sumada a las cajas (anclas, estrechar al lado
+ *      libre, escalones). Sólo se acepta si deja el texto LIBRE DE TODO —cara, producto y cuerpo—: eso ya libra la cara.
+ *   3. Si no, la elección de 1.12.0 (que es la que libra la cara, o la que menos la tapa si ninguna puede), EXACTAMENTE:
+ *      mismo ancla, mismo tamaño, mismo ancho. Sin banda. Se dice (`OVERLAY_BODY_UNAVOIDABLE`) y `meta` lleva cuánto
+ *      del texto cae sobre el cuerpo.
+ * Antes (1.13.0) el último recurso se elegía con la figura y la cara mezcladas en el mismo solape: una figura que ocupa
+ * casi todo el alto hacía que la de «menor solape» fuera cualquiera, aunque tapara la cara, y luego iba la banda.
+ */
+export function chooseOverlayAnchor(args: OverlayAnchorArgs): OverlayAnchorResult {
+  const { style, width, height } = args;
+  const apl = style.layout.avoidPeople ?? null;
+  if (!apl || !style.layout.avoidFaces || !style.slots.headline) return chooseOverlayAnchorCore(args);
+  const people = args.people ?? [];
+  if (people.length) {
+    const conCuerpo = chooseOverlayAnchorCore(args);
+    if (conCuerpo.report && conCuerpo.report.overlap_pct === 0) return conCuerpo;
+  }
+  // Ninguna colocación libra el cuerpo (o no se detectó ninguno): la de 1.12.0, calculada SIN la figura.
+  const { avoidPeople: _cuerpo, ...layoutSinCuerpo } = style.layout;
+  const r12 = chooseOverlayAnchorCore({ ...args, style: { ...style, layout: layoutSinCuerpo }, people: null });
+  if (!r12.report) return r12;
+  const pp = (apl.marginPct / 100) * Math.min(width, height);
+  const r = overlayTextRect(r12.style, width, height, args.metrics, r12.style.layout.anchor);
+  const area = Math.max(1, (r.x1 - r.x0) * (r.y1 - r.y0));
+  let inter = 0;
+  for (const f of people) {
+    const w = Math.min(r.x1, f.x1 * width + pp) - Math.max(r.x0, f.x0 * width - pp);
+    const h = Math.min(r.y1, f.y1 * height + pp) - Math.max(r.y0, f.y0 * height - pp);
+    if (w > 0 && h > 0) inter += w * h;
+  }
+  const body = Math.round((10000 * Math.min(inter, area)) / area) / 100;
+  const markers = body > 0
+    ? [...r12.style.markers, `OVERLAY_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${style.layout.avoidProducts ? ' o un producto' : ''}, ni estrechado al lado libre; se compone donde libra la cara (${r12.style.layout.anchor}, la elección de 1.12.0), sin banda: el texto cae sobre ${body} % de la figura`]
+    : r12.style.markers;
+  return {
+    style: { ...r12.style, layout: { ...r12.style.layout, avoidPeople: apl }, markers },
+    report: { ...r12.report, people: people.length, narrowed: null, fallback: null, body_overlap_pct: body },
+  };
+}
+
+/** La elección de siempre (1.6.x–1.13.0) con las cajas que le llegan: elige el ancla del bloque de texto que no tapa
+ *  ninguna caja. Sin `avoidFaces` o sin titular devuelve EL MISMO estilo. Orden: (1) la primera candidata libre al
+ *  tamaño de siempre; (2) si ninguna, la que queda libre con el MENOR ajuste (escalones de `faceFitLadder`); (3) si ni
+ *  así, la de menor solape al tamaño de siempre, y se dice. El ancla de la capa de producto (si se pega) no es
+ *  candidata: las dos capas se taparían. Con `avoidPeople`, la figura cuenta como una caja más; quien decide si esa
+ *  elección vale es `chooseOverlayAnchor` (1.13.1). PURO. */
+function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
   const { style, width, height } = args;
   const af = style.layout.avoidFaces;
   if (!af || !style.slots.headline) return { style, report: null };
@@ -3601,51 +3660,20 @@ export function chooseOverlayAnchor(args: {
   if (narrowInfo) {
     markers.push(`OVERLAY_TEXT_NARROWED_FOR_PERSON: a todo el ancho el texto tapaba ${tapa}; en ${best.anchor} se estrecha al lado libre de la figura (ancho ${narrowInfo.max_width_pct_declared}→${narrowInfo.max_width_pct_used} %)`);
   }
-  let out = best.anchor === declared && markers.length === style.markers.length ? style : {
+  const out = best.anchor === declared && markers.length === style.markers.length ? style : {
     ...base,
     layout: { ...base.layout, anchor: best.anchor, align: af.keepAlign ? base.layout.align : ANCHORS[best.anchor].align },
     markers,
   };
-  // 1.13.0 — ÚLTIMO RECURSO 'band': ninguna colocación libra la figura. Una banda del color y alfa que declara la marca,
-  // sólo bajo el texto, con su relleno: la foto entera nunca se oscurece. Con una fila pedida, no (taparía lo pedido).
-  let fallback: null | 'band' = null;
-  let bandOut: { x0: number; y0: number; x1: number; y1: number } | undefined;
-  if (apl?.band && best.overlap_pct > 0 && !forcedRow) {
-    bandOut = overlayBandRect(out, width, height, args.metrics)!;
-    fallback = 'band';
-    out = { ...out, band: { ...bandOut, color: apl.band.color },
-      markers: [...out.markers, `OVERLAY_BAND_FOR_PERSON: ninguna ancla (${cands.join(', ')}) deja el texto ${libre}, ni estrechado; en ${best.anchor} se pone una banda bajo el texto (sólo ahí; la foto no se oscurece)`] };
-  }
+  // 1.13.1 — aquí iba el último recurso 'band' de 1.13.0, RETIRADO: si esta elección no libra el cuerpo, quien la llamó
+  // (`chooseOverlayAnchor`) la descarta y se queda con la de 1.12.0.
   return { style: out, report: {
     faces: args.faces.length, anchor_declared: declared, anchor_used: best.anchor, moved: best.anchor !== declared,
     overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
     ...(signList ? { signs: signList.length, sign_overlap_pct: signOverlap, signs_under_text: signsUnder } : {}),
     ...(ap ? { products: prodList.length } : {}),
-    ...(apl ? { people: peopleList.length, narrowed: narrowInfo, fallback, ...(bandOut ? { band: bandOut } : {}) } : {}),
+    ...(apl ? { people: peopleList.length, narrowed: narrowInfo, fallback: null, body_overlap_pct: 0 } : {}),
   } };
-}
-
-/** 1.13.0 — la caja (px) de la banda del último recurso: la del texto en su ancla, con el relleno que declara la marca,
- *  sin salir del lienzo. null si la marca no declara banda. PURO. */
-export function overlayBandRect(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
-  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
-): { x0: number; y0: number; x1: number; y1: number } | null {
-  const b = style.layout.avoidPeople?.band;
-  if (!b || !style.slots.headline) return null;
-  const r = overlayTextRect(style, width, height, metrics, style.layout.anchor);
-  const pad = (b.padPct / 100) * Math.min(width, height);
-  const rr = (n: number) => Math.round(n * 100) / 100;
-  return { x0: rr(Math.max(0, r.x0 - pad)), y0: rr(Math.max(0, r.y0 - pad)), x1: rr(Math.min(width, r.x1 + pad)), y1: rr(Math.min(height, r.y1 + pad)) };
-}
-
-/** 1.13.0 — la banda sigue al texto: después de cambiar el corte (la palabra sola), la caja se vuelve a medir. Sin banda,
- *  EL MISMO estilo. PURO. */
-export function refitOverlayBand(style: ReturnType<typeof resolveOverlayStyle>, width: number, height: number,
-  metrics: Record<string, FontAdvance | null | undefined> | null | undefined,
-): ReturnType<typeof resolveOverlayStyle> {
-  if (!style.band) return style;
-  const r = overlayBandRect(style, width, height, metrics);
-  return r ? { ...style, band: { ...r, color: style.band.color } } : style;
 }
 
 // ── 1.12.0 · LA UBICACIÓN DEL TEXTO LA PIDE UNA PERSONA ──────────────────────────────────────────
@@ -4043,6 +4071,41 @@ function withAlphaRgb(color: string, alpha: number): string {
 }
 
 /**
+ * 1.13.1 — LA CARA MANDA; EL CUERPO SÓLO DESEMPATA, EN LA LÁMINA. PURO y determinista. Misma jerarquía que el overlay:
+ *   1. Sin `avoid.people`: la elección de 1.12.0 (`chooseCarouselPlacementCore`), tal cual.
+ *   2. Con `avoid.people` y figuras: la búsqueda de 1.13.0 con la figura sumada a las cajas (colocaciones, columnas
+ *      estrechadas al lado libre, escalones). Sólo se acepta si deja el bloque LIBRE DE TODO, sin último recurso.
+ *   3. Si no, la elección de 1.12.0 calculada SIN la figura, EXACTAMENTE. Su último recurso ('inset' / 'band' de
+ *      `carousel.avoid_faces`) sólo aparece si ninguna colocación libra una CARA o un producto, como en 1.11.0: el cuerpo
+ *      nunca lo dispara. Se dice (`CAROUSEL_BODY_UNAVOIDABLE`) y `meta` lleva cuánto del bloque cae sobre el cuerpo.
+ */
+export function chooseCarouselPlacement(args: Parameters<typeof chooseCarouselPlacementCore>[0]): ReturnType<typeof chooseCarouselPlacementCore> {
+  const ppl = args.avoid.people;
+  if (!ppl) return chooseCarouselPlacementCore(args);
+  const people = args.people ?? [];
+  let narrowed: { left: number | null; right: number | null } = { left: null, right: null };
+  if (people.length) {
+    const conCuerpo = chooseCarouselPlacementCore(args);
+    if (conCuerpo.report.fallback === null && conCuerpo.report.overlap_pct === 0) return { ...conCuerpo, report: { ...conCuerpo.report, body_overlap_pct: 0 } };
+    narrowed = conCuerpo.report.narrowed_column_pct ?? narrowed;
+  }
+  const { people: _cuerpo, ...avoidSinCuerpo } = args.avoid;
+  const r12 = chooseCarouselPlacementCore({ ...args, avoid: avoidSinCuerpo, people: null });
+  // Con 'inset' el texto va sobre la superficie de la marca, no sobre la foto: no tapa ningún cuerpo.
+  let body = 0;
+  if (people.length && r12.report.fallback !== 'inset') {
+    const W = r12.fit.chrome.canvas.width, H = r12.fit.chrome.canvas.height;
+    const p = (ppl.marginPct / 100) * Math.min(W, H);
+    const rect = carouselBlockRect(r12.fit.chrome, args.metrics ?? null).rect;
+    body = rectOverlapPct(rect, people.map((f) => ({ x0: f.x0 * W - p, y0: f.y0 * H - p, x1: f.x1 * W + p, y1: f.y1 * H + p })));
+  }
+  const warnings = body > 0
+    ? [...r12.warnings, `CAROUSEL_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${args.avoid.products ? ' o un producto' : ''}, ni en una columna estrechada; se compone donde libra la cara (${r12.report.placement_used}${r12.report.column_pct != null ? `, columna ${r12.report.column_pct} %` : ''}, la elección de 1.12.0), sin último recurso por el cuerpo: el texto cae sobre ${body} % de la figura`]
+    : r12.warnings;
+  return { fit: r12.fit, warnings, report: { ...r12.report, people: people.length, narrowed_column_pct: narrowed, body_overlap_pct: body } };
+}
+
+/**
  * ELIGE DÓNDE VA EL BLOQUE DE LA LÁMINA. PURO y determinista. Recibe el cromo ANTES del ajuste vertical y devuelve el
  * ajuste (`fitCarouselContent`) de la colocación elegida, para que el llamador lo use en vez de ajustar por su cuenta.
  *   1. El centro de la maqueta (lo de siempre). Libre ⇒ devuelve EXACTAMENTE el ajuste de 1.10.0: la escena no cambia.
@@ -4054,7 +4117,7 @@ function withAlphaRgb(color: string, alpha: number): string {
  *      hueco que queda, si mide al menos `inset_min_pct` del alto) o 'band' (la colocación que menos tapa, con una
  *      banda de superficie bajo el texto). Sin último recurso aplicable: la que menos tapa, y se dice.
  */
-export function chooseCarouselPlacement(args: {
+function chooseCarouselPlacementCore(args: {
   chrome: CarouselChrome; metrics?: FitMetrics | null; faces: FaceBox[]; products?: FaceBox[] | null; avoid: CarouselAvoid;
   /** 1.13.0 — figuras humanas completas (0..1 del LIENZO). Sólo cuentan con `avoid.people`, y cuentan como una cara. */
   people?: FaceBox[] | null;
@@ -4071,8 +4134,8 @@ export function chooseCarouselPlacement(args: {
     fallback: null | 'inset' | 'band'; reason: string; headline_size_pct?: number;
     inset?: { x0: number; y0: number; x1: number; y1: number }; band?: { y0: number; y1: number };
     text_place?: 'top' | 'bottom';
-    // 1.13.0 — sólo con `carousel.avoid_people`.
-    people?: number; narrowed_column_pct?: { left: number | null; right: number | null };
+    // 1.13.0 — sólo con `carousel.avoid_people`. 1.13.1 — `body_overlap_pct`: cuánto del bloque cae sobre las figuras.
+    people?: number; narrowed_column_pct?: { left: number | null; right: number | null }; body_overlap_pct?: number;
   };
 } {
   const { chrome, avoid } = args;
@@ -5319,7 +5382,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // 1.13.0 — NINGUNA PALABRA SOLA EN SU LÍNEA: con el tamaño, el ancla y el ancho ya decididos. Sin palabra sola, el
     // estilo es el mismo y la escena la de 1.12.0.
     const orphan = avoidOrphanLines(finalStyle, dims.width, dims.height, areaMetrics);
-    finalStyle = refitOverlayBand(orphan.style, dims.width, dims.height, areaMetrics);
+    finalStyle = orphan.style;
 
     // 1.6.3 — si el texto igual cae sobre un letrero y la marca declara `blur_pct`, ese letrero se desenfoca.
     let bgBytes: Uint8Array = cleanBytes;
