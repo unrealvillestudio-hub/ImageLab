@@ -336,8 +336,22 @@ ok('same_scene: en los otros modos la nota no viaja (la petición es la de antes
     assert.ok(!M.buildBuilderUserMessage({ basePrompt: 'B', copyFull: 'cuerpo', mode }).includes(M.SAME_SCENE_BUILDER_NOTE), String(mode));
   }
 });
-ok('same_scene: las cláusulas del motor son las de repintar (encuadre, franja, identidad), no las de editar', () => {
-  assert.deepEqual(engine({ mode: 'same_scene' }), engine({ mode: 'regenerate_full' }));
+// 2026-10-23 — cambia la decisión del 2026-10-20: en 'same_scene' el encuadre y la mirada son los de la imagen actual.
+// ⛔ NO OPERATIVO — aserto anterior: `assert.deepEqual(engine({ mode: 'same_scene' }), engine({ mode: 'regenerate_full' }));`
+ok('same_scene: las cláusulas del motor son las de repintar MENOS el encuadre y la mirada (los de la imagen actual)', () => {
+  const same = engine({ mode: 'same_scene', framing: 'scene', gaze: 'camera' });
+  const full = engine({ mode: 'regenerate_full', framing: 'scene', gaze: 'camera' });
+  const framing = M.framingClause('scene', 1);
+  const gaze = M.gazeClause('camera', 1);
+  assert.ok(full.includes(framing) && full.includes(gaze), 'al repintar, encuadre y mirada viajan');
+  assert.ok(!same.includes(framing), 'en same_scene no viaja el encuadre');
+  assert.ok(!same.includes(gaze), 'en same_scene no viaja la mirada');
+  assert.deepEqual(same, full.filter((c) => c !== framing && c !== gaze), 'el resto, idéntico (franja, identidad, producto)');
+  assert.ok(same.includes('TEXTZONE'), 'la franja de texto sí viaja');
+});
+ok('same_scene: la nota conserva la luz, sus fuentes y cada acción con su objeto, y admite sólo el cambio de cuadro que pide la base', () => {
+  for (const w of ['how dark or bright', 'every light source', 'looks at, points at, holds or lights up', 'the current image wins', 'area kept free for text'])
+    assert.ok(M.SAME_SCENE_BUILDER_NOTE.includes(w), w);
 });
 ok('same_scene: el handler exige la imagen actual y el constructor, y la imagen va sólo al constructor', () => {
   assert.match(source, /mode === 'edit_from_current' \|\| mode === 'same_scene'\) && !params\.source_image_url/);
