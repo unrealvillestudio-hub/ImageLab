@@ -1164,10 +1164,26 @@ export type GenerationMode = 'edit_from_current' | 'regenerate_full' | 'same_sce
 
 /** Lo que el constructor recibe además en 'same_scene': cómo leer la imagen adjunta y los nombres de los lugares de
  *  la escena con los que una persona pide el cambio (Sam, 2026-10-19: «Ref1, Ref2, host y fondo»). PURA, del EJE. */
+//
+// 2026-10-23 — LA LUZ, LA MIRADA Y LA ACCIÓN SON PARTE DE LA ESCENA (Sam, 2026-10-23, sobre la portada de 8486b569: «el
+// técnico está alumbrando con una linterna hacia un lado e Irja mirando hacia otro… en una escena iluminada»). Medido ese
+// día: la escena de la fuente (cuarto de calderas en penumbra, los dos mirando la caldera que alumbra la linterna) salió
+// iluminada y con las miradas sueltas, porque la línea de luz del preset y las cláusulas genéricas de mirada y encuadre
+// mandaban sobre la imagen actual. Ahora la nota dice que la luz, cada fuente de luz y cada acción con su objeto se
+// conservan y que, si el BASE PROMPT contradice la imagen, gana la imagen; el único otro cambio admitido es el que el BASE
+// PROMPT pide al cuadro (la franja libre para el texto). Las cláusulas de mirada y encuadre no viajan en 'same_scene'
+// (`engineClausesFor`).
+// ⛔ NO OPERATIVO — redacción anterior del arranque, se conserva por trazabilidad: «… the same place and props, camera
+// position, angle, lens and framing, light and colour, and every person in the same position, pose and clothing — and
+// change ONLY what the HUMAN DIRECTIVES ask. The current image will NOT be given …»
 export const SAME_SCENE_BUILDER_NOTE =
   'CURRENT IMAGE (attached): this is the photograph as it is now. Write the prompt so that it reproduces THIS SAME SCENE shot for shot — ' +
   'the same place and props, camera position, angle, lens and framing, light and colour, and every person in the same position, pose and ' +
-  'clothing — and change ONLY what the HUMAN DIRECTIVES ask. The current image will NOT be given to the image model: everything that must ' +
+  'clothing — and change ONLY what the HUMAN DIRECTIVES ask. Keep how dark or bright the place is and every light source in it, and keep ' +
+  'every action with its object: what each person looks at, points at, holds or lights up stays exactly as in the current image. Where a ' +
+  'lighting or style line in the BASE PROMPT contradicts the current image, the current image wins. The only other change allowed is the one ' +
+  'the BASE PROMPT asks of the frame, such as an area kept free for text: then move the camera or reframe just enough to keep faces, hands ' +
+  'and products out of that area, with the same place, people, light and action. The current image will NOT be given to the image model: everything that must ' +
   'stay has to be written in your prompt. Names for the places in the scene that a directive may use: "Ref1" is the most prominent ' +
   'person in the current image, "Ref2" the second most prominent, "Host" the person presenting or hosting (for example at the microphone), ' +
   '"Fondo" or "background" is the setting behind them. When a directive puts a named person of this brand in one of those places, that ' +
@@ -2020,10 +2036,13 @@ export function engineClausesFor(args: {
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
+  // 2026-10-23 — en 'same_scene' el encuadre y la mirada son los de la imagen actual (los describe el constructor, ver
+  // `SAME_SCENE_BUILDER_NOTE`): las cláusulas genéricas los contradecían. La franja, la identidad y el resto, como al repintar.
+  const same = args.mode === 'same_scene';
   const protagonist = String(args.protagonist ?? '').trim();
   const anchored = (args.anchored ?? []).map((a) => String(a ?? '').trim()).filter(Boolean);
   return [noTextClause(args.allowedSceneText), DISTINCT_SUBJECTS_CLAUSE, SINGLE_FRAME_CLAUSE, lightingCoherenceClause(n),
-    ...(edit ? [] : [framingClause(args.framing, n), ...(args.textZone ? [args.textZone] : []),
+    ...(edit ? [] : [...(same ? [] : [framingClause(args.framing, n)]), ...(args.textZone ? [args.textZone] : []),
       ...(n > 0 ? [personaIdentityOnlyClause(n)] : []), ...(args.placement ? [args.placement] : [])]),
     // También al editar: la identidad de la protagonista es lo que más se pierde al regenerar.
     ...(protagonist ? [sceneProtagonistClause(protagonist)] : []),
@@ -2032,7 +2051,7 @@ export function engineClausesFor(args: {
     // Al editar no: la ropa de la imagen actual se conserva.
     ...(edit ? [] : (args.outfitAvoid ?? []).filter((o) => o?.name?.trim() && o?.outfit?.trim())
       .map((o) => personaReferenceOutfitClause(o.name, o.outfit))),
-    ...(n > 0 ? [gazeClause(args.gaze, n)] : []),
+    ...(n > 0 && !same ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
     ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : []),
     // Al editar no: la escena ya existe y editar no es reubicar.
