@@ -445,7 +445,9 @@ test('7b · detección fallida ⇒ el ajuste de siempre y se dice; sin política
   assert.match(h, /if \(avoid && slideBytes && slideDims\) \{/);
   // 1.12.0 — sin `text_place`, `fitCarouselAtPlace` ES `fitCarouselContent` (lo prueba ubicacion_del_texto_test.mjs).
   assert.match(h, /CAROUSEL_FACE_CHECK_UNAVAILABLE: \$\{fc\.error \?\? 'sin respuesta'\}; \$\{rowIn \? `se compone en la fila pedida \(\$\{rowIn\}\)` : 'se compone en el centro de la maqueta, como siempre'\}/);
-  assert.equal((h.match(/fit = fitCarouselAtPlace\(\{ chrome: area\.chrome, metrics, textPlace: textPlaceIn \}\);/g) ?? []).length, 2, 'detección fallida y sin política: el ajuste de siempre');
+  // 1.17.0 — las dos llamadas llevan además la columna pedida; sin ella, `fitCarouselAtPlace` sigue siendo el ajuste de siempre
+  // (lo prueba columna_del_texto_test.mjs).
+  assert.equal((h.match(/fit = fitCarouselAtPlace\(\{ chrome: area\.chrome, metrics, textPlace: textPlaceIn, textColumn: textColumnIn, columnPct: avoid\??\.columnPcts\[0\] \?\? null \}\);/g) ?? []).length, 2, 'detección fallida y sin política: el ajuste de siempre');
   assert.match(h, /coverMapBoxes\(fc\.faces, slideDims\.width, slideDims\.height, cw, ch\)/);
   assert.match(h, /await ledgerRecordDirect\(body, \[ledgerCallRow\(\{ outputType: 'image_overlay_faces'/);
 });

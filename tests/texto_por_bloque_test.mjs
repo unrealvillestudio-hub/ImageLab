@@ -271,7 +271,7 @@ test('8c · la lámina aplica lo elegido y lo devuelve en meta', () => {
   assert.match(SRC, /\.\.\.\(cts\.applied \? \{ text_style: \{ requested: textStyleIn, applied: cts\.applied \} \} : \{\}\),/);
   assert.match(SRC, /\.\.\.\(block\.applied \? \{ text_style: \{ requested: textStyleIn, applied: block\.applied \} \} : \{\}\),/);
 });
-test('8d · la versión sube a 1.16.0', () => { assert.match(SRC, /COMPOSITOR_VERSION = '1\.16\.0'/); });
+test('8d · la versión sube a 1.16.0 o después', () => { assert.match(SRC, /COMPOSITOR_VERSION = '1\.(1[6-9]|[2-9]\d)\.\d+'/); });
 
 console.log('\n── 9 · marca N+1 ──');
 test('9 · el bloque nuevo no nombra marcas ni ciudades', () => {

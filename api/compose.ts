@@ -263,7 +263,12 @@ declare const process: { env: Record<string, string | undefined> };
 //         (`OVERLAY_SUBHEADLINE_RECOLORED`, `meta.subheadline_contrast`), salvo que una persona le haya elegido el color. Todo
 //         vale también en la lámina del carrusel, que además aplica por primera vez los campos sueltos de 1.8.0–1.9.0.
 //         Sin `text_style` ni el token, idéntico a 1.15.0.
-export const COMPOSITOR_VERSION = '1.16.0';
+//   1.17.0 (2026-10-24) — LA COLUMNA DEL TEXTO LA PIDE UNA PERSONA (Sam, 2026-10-24: «incluir la opción de alinear a la
+//         izquierda o derecha también», «incluye centro»). Campo opcional `text_column`: 'left' | 'center' | 'right' (ver
+//         «1.17.0 · LA COLUMNA DEL TEXTO»). En la imagen, el ancla de esa columna en la fila vigente y las líneas
+//         alineadas con ella; en la lámina, el bloque en la columna de ese lado o a todo el ancho. Se combina con
+//         `text_place`. Si tapa, se compone igual y se dice. Sin el campo, idéntico a 1.16.0.
+export const COMPOSITOR_VERSION = '1.17.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -4032,6 +4037,8 @@ type OverlayAnchorArgs = {
   products?: FaceBox[] | null;
   // 1.12.0 — la fila que pidió una persona (ya aplicada con `applyTextPlace`): si tapa algo, se compone igual y se dice.
   textPlace?: TextPlace | null;
+  // 1.17.0 — la columna que pidió una persona (ya aplicada con `applyTextColumn`): si tapa algo, se compone igual y se dice.
+  textColumn?: TextColumn | null;
   // 1.13.0 — figuras humanas completas (0..1). Sólo cuentan con `layout.avoidPeople`; desde 1.13.1, sólo desempatan.
   people?: FaceBox[] | null;
 };
@@ -4257,6 +4264,9 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
   if (forcedRow && best.overlap_pct > 0) {
     markers.push(`OVERLAY_TEXT_PLACE_COVERS: se pidió el texto ${TEXT_PLACE_LABEL[args.textPlace as 'top' | 'bottom']}; ninguna columna de esa fila lo deja ${libre}; se compone igual en ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
+  if (args.textColumn && best.overlap_pct > 0) {
+    markers.push(`OVERLAY_TEXT_COLUMN_COVERS: se pidió el texto ${TEXT_COLUMN_LABEL[args.textColumn]}; ninguna ancla de esa columna lo deja ${libre}; se compone igual en ${best.anchor}, que tapa ${best.overlap_pct} %`);
+  }
   if (narrowInfo) {
     markers.push(`OVERLAY_TEXT_NARROWED_FOR_PERSON: a todo el ancho el texto tapaba ${tapa}; en ${best.anchor} se estrecha al lado libre de la figura (ancho ${narrowInfo.max_width_pct_declared}→${narrowInfo.max_width_pct_used} %)`);
   }
@@ -4344,6 +4354,75 @@ export function applyTextPlace<S extends ReturnType<typeof resolveOverlayStyle>>
     style: { ...style, scrim, markers,
       layout: { ...style.layout, anchor: forced, align, ...(af ? { avoidFaces: { ...af, anchors: row } } : {}) } },
     applied: { requested: place, anchor_declared: declared, anchor_forced: forced, row_candidates: af ? row : [forced] },
+  };
+}
+
+// ── 1.17.0 · LA COLUMNA DEL TEXTO LA PIDE UNA PERSONA ────────────────────────────────────────────
+// Sam (2026-10-24), en el editor del texto de la imagen: «incluir la opción de alinear a la izquierda o derecha
+// también, me parece útil», y después: «incluye centro». Campo opcional de la petición `text_column`: 'left' |
+// 'center' | 'right'. Se combina con `text_place` (la fila): la fila dice arriba o abajo, la columna dice de qué lado.
+//   · OVERLAY: el ancla pasa a la de esa columna en la fila vigente (la pedida o la declarada) y las líneas se alinean
+//     con la columna (izquierda, centro, derecha), aunque la marca declare otra alineación: la pidió una persona. Con
+//     `avoid_faces`, se sigue esquivando, pero sólo entre las anclas de ESA columna que la marca declara candidatas; con
+//     la fila pedida también, el ancla queda fija. Si tapa algo, se compone igual y se dice (`OVERLAY_TEXT_COLUMN_COVERS`).
+//   · LÁMINA: el bloque va en la columna de ese lado ('left'/'right', con el ancho de columna que la marca declara en
+//     `carousel.avoid_faces.column_pct`, o `CAROUSEL_TEXT_COLUMN_PCT_DEFAULT`) o a todo el ancho ('center'). La maqueta
+//     de la lámina se lee alineada a la izquierda —sus pasos, su cifra, su llamada—, así que dentro del bloque las
+//     líneas no cambian de alineación. Si tapa algo, se compone igual y se dice (`CAROUSEL_TEXT_COLUMN_COVERS`).
+// Sin el campo, idéntico a 1.16.0.
+// EJE (código): qué columnas se pueden pedir y cómo se aplican a la geometría. INSTANCIA (dato): las anclas
+// candidatas, la zona segura y los anchos de columna de cada marca. El código no nombra marcas.
+export type TextColumn = 'left' | 'center' | 'right';
+export const TEXT_COLUMNS: readonly TextColumn[] = ['left', 'center', 'right'];
+/** El ancho de la columna de una lámina cuando la marca no declara ninguno (% del ancho interior). */
+export const CAROUSEL_TEXT_COLUMN_PCT_DEFAULT = 60;
+const COLUMN_X: Record<TextColumn, 'flex-start' | 'center' | 'flex-end'> = { left: 'flex-start', center: 'center', right: 'flex-end' };
+const COLUMN_ALIGN: Record<TextColumn, 'left' | 'center' | 'right'> = { left: 'left', center: 'center', right: 'right' };
+const TEXT_COLUMN_LABEL: Record<TextColumn, string> = { left: 'a la izquierda', center: 'al centro', right: 'a la derecha' };
+
+/** 1.17.0 — `text_column`: 'left' | 'center' | 'right'. Ausente = null (lo de siempre). Otro valor es 400. PURO. */
+export function parseTextColumnRequest(raw: unknown): TextColumn | null {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'string' && (TEXT_COLUMNS as readonly string[]).includes(raw)) return raw as TextColumn;
+  throw new CompositorError('COMPOSITOR_TEXT_COLUMN_INVALID', "text_column debe ser 'left', 'center' o 'right' (o no venir)", 400);
+}
+
+/** 1.17.0 — las anclas de una columna, la fila dada primero y luego las otras por cercanía. PURO. */
+export function textColumnAnchors(column: TextColumn, rowY: 'flex-start' | 'center' | 'flex-end'): string[] {
+  const x = COLUMN_X[column];
+  const ys = rowY === 'center' ? ['center', 'flex-end', 'flex-start']
+    : rowY === 'flex-start' ? ['flex-start', 'center', 'flex-end'] : ['flex-end', 'center', 'flex-start'];
+  return ys.map((y) => Object.keys(ANCHORS).find((k) => ANCHORS[k].y === y && ANCHORS[k].x === x)!).filter(Boolean);
+}
+
+/**
+ * 1.17.0 — aplica al estilo del overlay la columna pedida, DESPUÉS de la fila (`applyTextPlace`). PURO. Sin `column`,
+ * el estilo sale IGUAL. Con ella: el ancla de esa columna en la fila vigente (si la capa de producto ocupa esa esquina,
+ * la siguiente fila de la columna, y se dice); la alineación de la columna; y, con `avoid_faces`, las candidatas pasan
+ * a ser el ancla forzada y las que la marca declara en esa columna (sólo la forzada si la fila también se pidió).
+ */
+export function applyTextColumn<S extends ReturnType<typeof resolveOverlayStyle>>(
+  style: S, column: TextColumn | null, place: TextPlace | null, productAnchor: string | null = null,
+): { style: S; applied: null | { requested: TextColumn; anchor_before: string; anchor_forced: string | null; candidates: string[] } } {
+  if (!column) return { style, applied: null };
+  const before = style.layout.anchor;
+  if (!style.slots.headline || !ANCHORS[before]) return { style, applied: { requested: column, anchor_before: before, anchor_forced: null, candidates: [] } };
+  const col = textColumnAnchors(column, ANCHORS[before].y).filter((k) => k !== productAnchor);
+  if (!col.length) return { style, applied: { requested: column, anchor_before: before, anchor_forced: null, candidates: [] } };
+  const forced = col[0];
+  const markers = [...style.markers];
+  if (ANCHORS[forced].y !== ANCHORS[before].y) {
+    markers.push(`OVERLAY_TEXT_COLUMN_ROW_MOVED: la capa de producto ocupa ${productAnchor}; el texto ${TEXT_COLUMN_LABEL[column]} va en ${forced}`);
+  }
+  const rowForced = place === 'top' || place === 'bottom';
+  const af = style.layout.avoidFaces;
+  const candidates = !af ? [forced]
+    : rowForced ? [forced]
+      : [forced, ...af.anchors.filter((a) => a !== forced && a !== productAnchor && ANCHORS[a]?.x === COLUMN_X[column])];
+  return {
+    style: { ...style, markers,
+      layout: { ...style.layout, anchor: forced, align: COLUMN_ALIGN[column], ...(af ? { avoidFaces: { ...af, anchors: candidates, keepAlign: true } } : {}) } },
+    applied: { requested: column, anchor_before: before, anchor_forced: forced, candidates },
   };
 }
 
@@ -4726,6 +4805,9 @@ function chooseCarouselPlacementCore(args: {
   /** 1.12.0 — la fila que pidió una persona. 'top'/'bottom': sólo esa fila y sus columnas declaradas, sin último
    *  recurso; si tapa, se compone igual y se dice. 'auto' o ausente: la elección de siempre. */
   textPlace?: TextPlace | null;
+  /** 1.17.0 — la columna que pidió una persona. 'left'/'right': sólo las colocaciones de ese lado (y la de la fila
+   *  vigente en ese lado); 'center': sólo las de todo el ancho. Sin último recurso; si tapa, se compone igual y se dice. */
+  textColumn?: TextColumn | null;
 }): {
   fit: ReturnType<typeof fitCarouselContent>; warnings: string[];
   report: {
@@ -4734,6 +4816,7 @@ function chooseCarouselPlacementCore(args: {
     fallback: null | 'inset' | 'band'; reason: string; headline_size_pct?: number;
     inset?: { x0: number; y0: number; x1: number; y1: number }; band?: { y0: number; y1: number };
     text_place?: 'top' | 'bottom';
+    text_column?: TextColumn;
     // 1.13.0 — sólo con `carousel.avoid_people`. 1.13.1 — `body_overlap_pct`: cuánto del bloque cae sobre las figuras.
     people?: number; narrowed_column_pct?: { left: number | null; right: number | null }; body_overlap_pct?: number;
   };
@@ -4763,9 +4846,16 @@ function chooseCarouselPlacementCore(args: {
   // sólo sus columnas declaradas: se esquiva sin salir de donde se pidió.
   const forced = args.textPlace === 'top' || args.textPlace === 'bottom' ? args.textPlace : null;
   const declaredPlace: 'center' | 'top' | 'bottom' = forced ?? 'center';
+  // 1.17.0 — con una columna pedida, sólo las colocaciones de ese lado ('left'/'right') o las de todo el ancho ('center').
+  const column = args.textColumn ?? null;
+  const colSide: 'left' | 'right' | null = column === 'left' || column === 'right' ? column : null;
+  const sideOf = (p: string) => (CAROUSEL_PLACE_RE.exec(p)?.[2] ?? null) as 'left' | 'right' | null;
+  const enColumna = (p: string) => !column || sideOf(p) === colSide;
+  const colPct = avoid.columnPcts[0] ?? CAROUSEL_TEXT_COLUMN_PCT_DEFAULT;
   const slots: Slot[] = avoid.placements
     .filter((p) => (forced ? p.startsWith(`${forced}_`) : p !== 'center'))
-    .flatMap((p) => (p.includes('_') ? avoid.columnPcts.map((col) => ({ code: p, col })) : [{ code: p, col: null }]));
+    .filter(enColumna)
+    .flatMap((p) => (p.includes('_') ? (avoid.columnPcts.length ? avoid.columnPcts : [colPct]).map((col) => ({ code: p, col })) : [{ code: p, col: null }]));
   // 1.13.0 — ESTRECHAR AL LADO LIBRE: con `avoid.people.minWidthPct` y figuras detectadas, una columna más por lado, del
   // ancho que deja libre la figura más cercana (con su margen), en cada fila candidata. Nunca por debajo del mínimo
   // declarado ni del 100 %. Van después de las colocaciones declaradas: primero lo que la marca eligió.
@@ -4782,11 +4872,12 @@ function chooseCarouselPlacementCore(args: {
     const rows = forced ? [forced] : CAROUSEL_DEFAULT_ROWS;
     for (const side of ['left', 'right'] as const) {
       const col = narrowCol[side];
-      if (col == null) continue;
+      if (col == null || (column && side !== colSide)) continue;
       for (const row of rows) if (!slots.some((x) => x.code === `${row}_${side}` && x.col === col)) slots.push({ code: `${row}_${side}`, col });
     }
   }
-  const baseSlot: Slot | null = forced ? { code: forced, col: null } : null;
+  const baseSlot: Slot | null = colSide ? { code: `${declaredPlace}_${colSide}`, col: colPct }
+    : forced ? { code: forced, col: null } : null;
   const withBlockOf = (from: CarouselChrome, sl: Slot): CarouselChrome => {
     const mm = CAROUSEL_PLACE_RE.exec(sl.code)!;
     const side = (mm[2] ?? null) as CarouselBlock['side'];
@@ -4810,10 +4901,12 @@ function chooseCarouselPlacementCore(args: {
     overlap_pct: fallback === 'inset' ? 0 : used.overlap_pct,
     candidates: all.map((c) => ({ placement: c.placement, column_pct: c.column_pct, overlap_pct: c.overlap_pct, face_overlap_pct: c.face_overlap_pct,
       product_overlap_pct: c.product_overlap_pct, reduced: c.key !== base.key, overflow: c.fit.report.overflow })),
-    fallback, reason, ...(forced ? { text_place: forced } : {}),
+    fallback, reason, ...(forced ? { text_place: forced } : {}), ...(column ? { text_column: column } : {}),
     ...(avoid.people ? { people: peopleList.length, narrowed_column_pct: narrowCol } : {}), ...extra,
   });
-  const where = forced ? `${TEXT_PLACE_LABEL[forced]}, donde se pidió,` : 'en el centro';
+  const where = forced || column
+    ? `${[forced ? TEXT_PLACE_LABEL[forced] : null, column ? TEXT_COLUMN_LABEL[column] : null].filter(Boolean).join(' y ')}, donde se pidió,`
+    : 'en el centro';
   if (base.overlap_pct === 0) {
     return { fit: base.fit, warnings: [], report: report(base, null, allBoxes.length ? `${where} el texto no toca ${what}` : 'no se detectó nada que evitar') };
   }
@@ -4845,10 +4938,17 @@ function chooseCarouselPlacementCore(args: {
   const least = keep.reduce((acc, c) => (c.overlap_pct < acc.overlap_pct ? c : acc), keep[0]);
   // 1.12.0 — la fila la pidió una persona: ni 'inset' ni 'band' (moverían o taparían lo que se pidió). Se compone en la
   // columna de esa fila que menos tapa, y se dice.
-  if (forced) {
+  if (forced && !column) {
     const reason = `se pidió el texto ${TEXT_PLACE_LABEL[forced]}; ninguna colocación de esa fila (${all.map(label).join(', ')}) libra ${what}; ` +
       `se compone igual en ${label(least)}, que tapa ${least.overlap_pct} %`;
     return { fit: least.fit, warnings: [`CAROUSEL_TEXT_PLACE_COVERS: ${reason}`], report: report(least, null, reason) };
+  }
+  // 1.17.0 — la columna la pidió una persona: tampoco hay último recurso. Se compone en la colocación de esa columna que
+  // menos tapa, y se dice.
+  if (column) {
+    const reason = `se pidió el texto ${where.replace(/, donde se pidió,$/, '')}; ninguna colocación (${all.map(label).join(', ')}) libra ${what}; ` +
+      `se compone igual en ${label(least)}, que tapa ${least.overlap_pct} %`;
+    return { fit: least.fit, warnings: [`CAROUSEL_TEXT_COLUMN_COVERS: ${reason}`], report: report(least, null, reason) };
   }
   for (const mode of avoid.fallback) {
     if (mode === 'inset') {
@@ -4885,10 +4985,16 @@ function chooseCarouselPlacementCore(args: {
 
 /** 1.12.0 — la lámina SIN la política (o sin foto, o con la detección caída) y con una fila pedida: el bloque se
  *  compone en esa fila, a todo el ancho, con el ajuste de siempre. 'auto' o ausente ⇒ el ajuste de siempre. PURO. */
-export function fitCarouselAtPlace(args: { chrome: CarouselChrome; metrics?: FitMetrics | null; textPlace?: TextPlace | null }): ReturnType<typeof fitCarouselContent> {
+export function fitCarouselAtPlace(args: { chrome: CarouselChrome; metrics?: FitMetrics | null; textPlace?: TextPlace | null;
+  textColumn?: TextColumn | null; columnPct?: number | null }): ReturnType<typeof fitCarouselContent> {
   const p = args.textPlace;
-  if (p !== 'top' && p !== 'bottom') return fitCarouselContent({ chrome: args.chrome, metrics: args.metrics });
-  return fitCarouselContent({ chrome: { ...args.chrome, block: { place: p, side: null, columnPct: 100 } }, metrics: args.metrics });
+  const row = p === 'top' || p === 'bottom' ? p : null;
+  // 1.17.0 — con una columna lateral pedida, el bloque va en ese lado con el ancho de columna de la marca (o el de
+  // por defecto); 'center' es todo el ancho. Sin fila pedida, la fila es la del centro de la maqueta.
+  const side = args.textColumn === 'left' || args.textColumn === 'right' ? args.textColumn : null;
+  if (!row && !side) return fitCarouselContent({ chrome: args.chrome, metrics: args.metrics });
+  const columnPct = side ? (args.columnPct ?? CAROUSEL_TEXT_COLUMN_PCT_DEFAULT) : 100;
+  return fitCarouselContent({ chrome: { ...args.chrome, block: { place: row ?? 'center', side, columnPct } }, metrics: args.metrics });
 }
 
 /** El recorte (px de la FOTO) para el último recurso 'inset': la proporción del hueco, centrado en lo que hay que ver
@@ -5665,6 +5771,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const identityRoleIn = parseIdentityRoleRequest(body.identity_role);
     // 1.12.0 — la fila del texto pedida por una persona. Sin el campo, todo lo de abajo es 1.11.1.
     const textPlaceIn = parseTextPlaceRequest(body.text_place);
+    // 1.17.0 — la columna del texto pedida por una persona. Sin el campo, todo lo de abajo es 1.16.0.
+    const textColumnIn = parseTextColumnRequest(body.text_column);
     // 1.16.0 — lo elegido por bloque (titular y bajada). Sin el campo, todo lo de abajo es 1.15.0.
     const textStyleIn = parseTextStyleRequest(body.text_style);
     const hasImage = !!(body.image_data_url || body.image_url);
@@ -5787,7 +5895,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
         if (fc.faces) {
           const { width: cw, height: ch } = area.chrome.canvas;
-          const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid, slideIndex: carouselIn!.index, textPlace: textPlaceIn,
+          const pick = chooseCarouselPlacement({ chrome: area.chrome, metrics, avoid, slideIndex: carouselIn!.index, textPlace: textPlaceIn, textColumn: textColumnIn,
             faces: coverMapBoxes(fc.faces, slideDims.width, slideDims.height, cw, ch),
             products: coverMapBoxes(fc.products ?? [], slideDims.width, slideDims.height, cw, ch),
             people: coverMapBoxes(fc.people ?? [], slideDims.width, slideDims.height, cw, ch) });
@@ -5810,13 +5918,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         } else {
           // 1.12.0 — con una fila pedida, la detección caída no la deshace: se compone en esa fila.
           const rowIn = textPlaceIn === 'top' || textPlaceIn === 'bottom' ? textPlaceIn : null;
-          fit = fitCarouselAtPlace({ chrome: area.chrome, metrics, textPlace: textPlaceIn });
+          fit = fitCarouselAtPlace({ chrome: area.chrome, metrics, textPlace: textPlaceIn, textColumn: textColumnIn, columnPct: avoid.columnPcts[0] ?? null });
           warnings.push(`CAROUSEL_FACE_CHECK_UNAVAILABLE: ${fc.error ?? 'sin respuesta'}; ${rowIn ? `se compone en la fila pedida (${rowIn})` : 'se compone en el centro de la maqueta, como siempre'}`);
           avoidMeta = { faces: null, placement_used: rowIn ?? 'center', moved: false, fallback: null, reason: `detección no disponible: ${fc.error ?? 'sin respuesta'}` };
         }
       } else {
         // 1.12.0 — sin la política o sin foto, la fila pedida se aplica igual; sin pedido, el ajuste de siempre.
-        fit = fitCarouselAtPlace({ chrome: area.chrome, metrics, textPlace: textPlaceIn });
+        fit = fitCarouselAtPlace({ chrome: area.chrome, metrics, textPlace: textPlaceIn, textColumn: textColumnIn, columnPct: avoid?.columnPcts[0] ?? null });
         if (textPlaceIn === 'auto' && !avoid && chrome.slide.background === 'image') {
           warnings.push('CAROUSEL_TEXT_PLACE_AUTO_WITHOUT_POLICY: se pidió que el texto no tape cara ni producto, pero la marca no declara carousel.avoid_faces; se compone en el centro de la maqueta');
         }
@@ -5906,6 +6014,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             // 1.12.0 — la fila pedida y dónde quedó el bloque (sólo si llegó `text_place`).
             ...(textPlaceIn ? { text_place: { requested: textPlaceIn, placement_used: fit.chrome.block?.place ?? 'center',
               column: fit.chrome.block?.side ?? null } } : {}),
+            // 1.17.0 — la columna pedida y dónde quedó el bloque (sólo si llegó `text_column`).
+            ...(textColumnIn ? { text_column: { requested: textColumnIn, side_used: fit.chrome.block?.side ?? null,
+              column_pct: fit.chrome.block?.side ? fit.chrome.block.columnPct : null, placement_used: fit.chrome.block?.place ?? 'center' } } : {}),
             // 1.16.0 — lo pedido por bloque y lo aplicado; y si la bajada cambió de color para leerse.
             ...(cts.applied ? { text_style: { requested: textStyleIn, applied: cts.applied } } : {}),
             ...(slideSubContrastMeta ? { subheadline_contrast: slideSubContrastMeta } : {}),
@@ -5934,7 +6045,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const prodTok = (picked.tokens ?? {}).product as Record<string, any> | undefined;
     const prodAnchorIn = productsIn.length && prodTok?.mode === 'composite' && prodTok.anchor ? String(prodTok.anchor) : null;
     const placeApplied = applyTextPlace(style, textPlaceIn, prodAnchorIn);
-    const oStyle = placeApplied.style;
+    // 1.17.0 — la columna, después de la fila. Sin `text_column`, `oStyle` es el de 1.16.0.
+    const columnApplied = applyTextColumn(placeApplied.style, textColumnIn, textPlaceIn, prodAnchorIn);
+    const oStyle = columnApplied.style;
     const prodPick = resolveProductLayer({ tokens: picked.tokens, textAnchor: oStyle.slots.headline ? oStyle.layout.anchor : null, count: productsIn.length });
     oStyle.markers.push(...prodPick.markers);
     const productImgs: ProductImageIn[] = [];
@@ -6026,7 +6139,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (fc.faces) {
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
           faces: fc.faces, people: fc.people, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs, products: fc.products,
-          textPlace: textPlaceIn });
+          textPlace: textPlaceIn, textColumn: textColumnIn });
         finalStyle = ch.style;
         faceMeta = { ...faceMeta, ...(ch.report ?? {}) };
         signsUnder = ch.report?.signs_under_text ?? [];
@@ -6194,6 +6307,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(identityRoleIn ? { identity_role: { requested: identityRoleIn, applied: identityApplied.applied } } : {}),
         // 1.12.0 — la fila pedida, el ancla que forzó y dónde quedó el texto (sólo si llegó `text_place`).
         ...(placeApplied.applied ? { text_place: { ...placeApplied.applied, anchor_used: finalStyle.layout.anchor } } : {}),
+        // 1.17.0 — la columna pedida, el ancla que forzó y dónde quedó el texto (sólo si llegó `text_column`).
+        ...(columnApplied.applied ? { text_column: { ...columnApplied.applied, anchor_used: finalStyle.layout.anchor, align_used: finalStyle.layout.align } } : {}),
         // 1.13.0 — qué palabra sola se evitó y cuál bajó a acompañarla (sólo si hubo alguna).
         ...(orphan.report.length ? { orphan_lines: orphan.report } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
