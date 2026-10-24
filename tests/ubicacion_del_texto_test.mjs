@@ -261,12 +261,12 @@ test('8a · el handler valida text_place con el resto del contrato y lo aplica a
 });
 test('8b · la fila llega a las dos elecciones y vuelve en meta', () => {
   assert.match(SRC, /chooseCarouselPlacement\(\{ chrome: area\.chrome, metrics, avoid, slideIndex: carouselIn!\.index, textPlace: textPlaceIn,/);
-  assert.match(SRC, /signs: fc\.signs, products: fc\.products,\s*textPlace: textPlaceIn \}\);/);
+  assert.match(SRC, /signs: fc\.signs, products: fc\.products,\s*textPlace: textPlaceIn(, textColumn: textColumnIn)? \}\);/);
   assert.match(SRC, /\.\.\.\(placeApplied\.applied \? \{ text_place: \{ \.\.\.placeApplied\.applied, anchor_used: finalStyle\.layout\.anchor \} \} : \{\}\),/);
   assert.match(SRC, /\.\.\.\(textPlaceIn \? \{ text_place: \{ requested: textPlaceIn, placement_used: fit\.chrome\.block\?\.place \?\? 'center',/);
 });
 test('8c · la versión sube a 1.12.0 (o a una posterior)', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1(2\.0|3\.[01]|4\.0|5\.0|6\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.1(2\.0|3\.[01]|4\.0|5\.0|6\.0|7\.0)'/);
 });
 
 console.log('\n── 9 · marca N+1 ──');
