@@ -27,6 +27,7 @@ import {
 } from "./ui/components.tsx";
 import { FixedPreviewPane } from "./components/preview/FixedPreviewPane.tsx";
 import { AssetLibraryDrawer } from "./components/drawers/AssetLibraryDrawer.tsx";
+import { tramosDeCaja } from "./utils/logotipo.ts";
 
 // WRAPPER FOR STORE
 export default function App() {
@@ -111,10 +112,17 @@ function AppContent() {
         <div className="max-w-[1920px] mx-auto flex items-center justify-between">
           <div className="flex flex-col">
             <div className="flex items-center gap-6">
-              <div className="flex flex-col">
-                <div className="text-white font-black tracking-[-0.02em] text-[18px] leading-none uppercase italic">UNRLVL</div>
-                <div className="text-white/60 text-[11px] font-bold tracking-[0.28em] uppercase mt-1">ImageLab</div>
-              </div>
+              {/* El logotipo del lab: «>ImageLab» con el bloque de logotipo de la marca (BP v1.6, el mismo de
+                  unrealvillestudio.com): Bebas Neue, chevron cian que parpadea y nombre en chalk (Sam, 2026-10-26).
+                  Sustituye al lockup UNRLVL. Regla de todos los labs: unrlvl-context → ecosystem.json → labs._logotipo. */}
+              <span className="lt-logotype size-lab" aria-label=">ImageLab">
+                <span className="lt-chevron" aria-hidden>&gt;</span>
+                <span className="lt-un" aria-hidden>
+                  {tramosDeCaja('ImageLab').map((t, i) => t.minuscula
+                    ? <span key={i} className="lt-minuscula">{t.texto}</span>
+                    : <span key={i}>{t.texto}</span>)}
+                </span>
+              </span>
               <span className="text-[#FFB800]/70 text-[11px] font-black tracking-[0.28em] uppercase self-start mt-1">
                 BUILD:{BUILD_TAG}
               </span>
