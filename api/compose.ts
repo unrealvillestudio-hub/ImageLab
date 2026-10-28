@@ -278,7 +278,23 @@ declare const process: { env: Record<string, string | undefined> };
 //         SIMULA inclinando la recta (`skewX`) y se dice (`OVERLAY_ITALIC_SYNTHESIZED`). Cada tramo se mide con la métrica
 //         de su estilo final; la simulada, con la recta. Lo aplicado viaja en `meta.text_style.applied.<bloque>.italic`.
 //         Sin `italic_spans`, idéntico a 1.17.0.
-export const COMPOSITOR_VERSION = '1.18.0';
+//   1.19.0 (2026-10-28) — EL TAMAÑO DEL TEXTO Y LA BAJADA LOS PIDE UNA PERSONA (Sam, 2026-10-28, pieza 23698205
+//         compuesta con 1.18.0: «se pierde el texto de la bajada, ni refrescando entra», y un control para agrandar o
+//         achicar el texto compuesto sobre la imagen, «un toque mínimo y personal»). Medido ese día: el límite de área
+//         (20 %) bajó el titular a su escalón mínimo (`OVERLAY_TEXT_AREA_REDUCED: … titular 8.4→5.2 %`) y, para no tapar
+//         una cara, la escalera de `faceFitLadder` quitó la bajada que había escrito una persona
+//         (`OVERLAY_TEXT_REDUCED_FOR_FACE: … sin bajada`). Dos campos opcionales de la petición (ver «1.19.0 · EL TAMAÑO
+//         DEL TEXTO»):
+//         · `text_scale` (número de `TEXT_SCALE_MIN` a `TEXT_SCALE_MAX`): multiplica el tamaño de base de la marca del
+//           titular y de la bajada, y sus escalones más chicos en la misma proporción, ANTES del límite de área y de la
+//           escalera de caras. El límite de área sigue rigiendo después; si recorta un tamaño agrandado, además de
+//           `OVERLAY_TEXT_AREA_REDUCED` se dice `OVERLAY_TEXT_SCALE_CAPPED`. Eco en `meta.text_scale`. En la lámina,
+//           el titular y el cuerpo (bajada y pasos comparten esa tipografía), con `CAROUSEL_TEXT_SCALE_CAPPED` y
+//           `meta.carousel.text_scale`.
+//         · `keep_subheadline: true`: ni la escalera de caras ni la del área ni la del alto quitan la bajada. Se sigue
+//           achicando; si nada cabe sin tapar, se compone tapando lo menos posible y se dice (`OVERLAY_SUB_KEPT`).
+//         Sin los dos campos, idéntico a 1.18.0.
+export const COMPOSITOR_VERSION = '1.19.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -1272,6 +1288,9 @@ export function resolveOverlayStyle(args: {
   // simula inclinando la recta; 'none' ⇒ no hay recta de esa cursiva y el tramo queda como estaba. Lo pone SÓLO el
   // handler (`withItalicFallback`), después de bajar las fuentes; ausente ⇒ toda cara contraria está cargada.
   italicFallback?: Record<string, ItalicFallback>;
+  // 1.19.0 — la bajada la pidió una persona y no se quita en ninguna escalera (`applyKeepSubheadline`). Ausente ⇒ como
+  // 1.18.0: el último escalón de cada escalera la quita.
+  keepSubheadline?: boolean;
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -2026,9 +2045,33 @@ export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>
  * 1.5.0 — el límite de área de la plataforma (`layout.max_text_area_pct`). PURO y determinista. Si el
  * bloque cabe —o la marca no declara límite— devuelve EL MISMO estilo: la escena sale idéntica. Si no
  * cabe, baja por los escalones del titular, luego por los de la bajada, luego quita la bajada; si aun así
- * excede, compone al mínimo y lo marca. El texto nunca se recorta ni se reescribe.
+ * excede, compone al mínimo y lo marca. El texto nunca se recorta ni se reescribe. 1.19.0 — con `keepSubheadline`
+ * (la bajada la pidió una persona) el último escalón no existe: la bajada se queda.
  */
 export function fitOverlayTextArea(args: {
+  style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
+  metrics?: Record<string, FontAdvance | null | undefined> | null;
+  // 1.19.0 — lo pedido por una persona (ver «1.19.0 · EL TAMAÑO DEL TEXTO»): la escala del titular y la bajada, y que
+  // la bajada no se quite. Es la primera escalera del texto, así que se aplican aquí y el estilo que sale ya los lleva
+  // (el ajuste al alto y la elección del ancla trabajan sobre él). Ausentes ⇒ la función es la de 1.18.0, tal cual.
+  textScale?: number | null; keepSubheadline?: boolean;
+}): ReturnType<typeof fitOverlayTextAreaCore> {
+  const kept = applyKeepSubheadline(args.style, args.keepSubheadline === true);
+  const scale = args.textScale ?? null;
+  const scaled = applyTextScale(kept, scale);
+  const r = fitOverlayTextAreaCore({ ...args, style: scaled });
+  if (scaled === kept || scale == null) return r;
+  // Agrandado, ni al escalón más chico cabe: se mide sin la escala y gana la que ocupa menos.
+  let out = r;
+  if (scale > 1 && r.report?.exceeded) {
+    const un = fitOverlayTextAreaCore({ ...args, style: kept });
+    if (un.report && un.report.area_pct < r.report.area_pct) out = un;
+  }
+  const cap = textScaleCappedMarker('OVERLAY', scale, args.style.slots.headline?.sizePct, out.style.slots.headline?.sizePct);
+  return cap ? { ...out, style: { ...out.style, markers: [...out.style.markers, cap] } } : out;
+}
+
+function fitOverlayTextAreaCore(args: {
   style: ReturnType<typeof resolveOverlayStyle>; width: number; height: number;
   metrics?: Record<string, FontAdvance | null | undefined> | null;
 }): { style: ReturnType<typeof resolveOverlayStyle>; report: null | { limit_pct: number; area_pct_before: number; area_pct: number; adjusted: boolean; dropped_subheadline: boolean; exceeded: boolean; estimated_fonts: string[] } } {
@@ -2049,7 +2092,8 @@ export function fitOverlayTextArea(args: {
   let st: St = { h: hl.sizePct, s: sub ? sub.sizePct : null, drop: false };
   for (const h of hl.fitSmaller ?? []) ladder.push(st = { ...st, h });
   if (sub) for (const x of sub.fitSmaller ?? []) ladder.push(st = { ...st, s: x });
-  if (sub) ladder.push(st = { ...st, drop: true });
+  // 1.19.0 — con `keep_subheadline`, la bajada no se quita: si ni al mínimo cabe, se compone al mínimo y se dice.
+  if (sub && !base.keepSubheadline) ladder.push(st = { ...st, drop: true });
   const apply = (x: St): ReturnType<typeof resolveOverlayStyle> => ({
     ...base,
     slots: {
@@ -4285,7 +4329,26 @@ export function carouselTextArea(chrome: CarouselChrome, metrics: FitMetrics | n
  * declara límite o ya cabe, devuelve EL MISMO cromo. Si no cabe, baja el titular por sus escalones; si ni
  * al mínimo cabe, lo dice. No toca el texto.
  */
-export function fitCarouselCoverArea(args: { chrome: CarouselChrome; metrics?: FitMetrics | null }): {
+export function fitCarouselCoverArea(args: { chrome: CarouselChrome; metrics?: FitMetrics | null;
+  // 1.19.0 — la escala pedida por una persona (ver «1.19.0 · EL TAMAÑO DEL TEXTO»). Es la primera escalera de la lámina,
+  // así que se aplica aquí y el cromo que sale ya la lleva. Ausente ⇒ la función es la de 1.18.0, tal cual.
+  textScale?: number | null;
+}): ReturnType<typeof fitCarouselCoverAreaCore> {
+  const scale = args.textScale ?? null;
+  const scaled = applyCarouselTextScale(args.chrome, scale);
+  const r = fitCarouselCoverAreaCore({ ...args, chrome: scaled });
+  if (scaled === args.chrome || scale == null) return r;
+  // Agrandado, ni al escalón más chico cabe: se mide sin la escala y gana la que ocupa menos.
+  let out = r;
+  if (scale > 1 && r.report?.exceeded) {
+    const un = fitCarouselCoverAreaCore({ ...args, chrome: args.chrome });
+    if (un.report && un.report.area_pct < r.report.area_pct) out = un;
+  }
+  const cap = textScaleCappedMarker('CAROUSEL', scale, args.chrome.type.headline?.sizePct, out.chrome.type.headline?.sizePct);
+  return cap ? { ...out, warnings: [...out.warnings, cap] } : out;
+}
+
+function fitCarouselCoverAreaCore(args: { chrome: CarouselChrome; metrics?: FitMetrics | null }): {
   chrome: CarouselChrome; warnings: string[]; report: null | { limit_pct: number; area_pct_before: number; area_pct: number; exceeded: boolean };
 } {
   const c = args.chrome;
@@ -4368,7 +4431,7 @@ export function parseFaceBoxes(text: string, key: 'faces' | 'signs' | 'products'
 
 /** Los escalones para que el bloque quepa en un hueco: el titular baja por sus `fit_steps` más chicos, luego la
  *  bajada por los suyos, y por último la bajada se quita — el mismo orden que el límite de área de 1.5.0. El
- *  texto nunca se recorta ni se reescribe. PURO. */
+ *  texto nunca se recorta ni se reescribe. 1.19.0 — con `keepSubheadline` no hay último escalón. PURO. */
 function faceFitLadder(base: ReturnType<typeof resolveOverlayStyle>): Array<{ style: ReturnType<typeof resolveOverlayStyle>; what: string[] }> {
   const hl = base.slots.headline;
   const sub = base.slots.subheadline;
@@ -4388,7 +4451,8 @@ function faceFitLadder(base: ReturnType<typeof resolveOverlayStyle>): Array<{ st
   };
   for (const h of (hl.fitSmaller ?? []).filter((v) => v < hl.sizePct)) push(st = { ...st, h });
   if (sub) for (const v of (sub.fitSmaller ?? []).filter((v) => v < sub.sizePct)) push(st = { ...st, s: v });
-  if (sub) push(st = { ...st, drop: true });
+  // 1.19.0 — con `keep_subheadline`, la bajada no se quita: quien llama compone tapando lo menos posible y lo dice.
+  if (sub && !base.keepSubheadline) push(st = { ...st, drop: true });
   return out;
 }
 
@@ -4457,6 +4521,11 @@ export function chooseOverlayAnchor(args: OverlayAnchorArgs): OverlayAnchorResul
   const markers = body > 0
     ? [...r12.style.markers, `OVERLAY_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${style.layout.avoidProducts ? ' o un producto' : ''}, ni estrechado al lado libre; se compone donde libra la cara (${r12.style.layout.anchor}, la elección de 1.12.0), sin banda: el texto cae sobre ${body} % de la figura`]
     : r12.style.markers;
+  // 1.19.0 — la bajada la pidió una persona y lo que tapa es el cuerpo (si tapara una cara, ya lo dijo la elección de
+  // 1.12.0): se compone igual y se dice. Sin `keep_subheadline`, nada de esto existe.
+  if (style.keepSubheadline && r12.style.slots.subheadline && body > 0 && r12.report.overlap_pct === 0) {
+    markers.push(`OVERLAY_SUB_KEPT: la bajada la escribió una persona; se compone aunque tape ${body} %`);
+  }
   return {
     style: { ...r12.style, layout: { ...r12.style.layout, avoidPeople: apl }, markers },
     report: { ...r12.report, people: people.length, narrowed: null, fallback: null, body_overlap_pct: body },
@@ -4624,6 +4693,10 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
   if (best.overlap_pct > 0) {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto ${libre} ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
+  // 1.19.0 — la bajada la pidió una persona: la escalera no la quitó y el bloque tapa algo. Se compone igual y se dice.
+  if (style.keepSubheadline && base.slots.subheadline && best.overlap_pct > 0) {
+    markers.push(`OVERLAY_SUB_KEPT: la bajada la escribió una persona; se compone aunque tape ${best.overlap_pct} %`);
+  }
   markers.push(...signMarkers);
   const forcedRow = args.textPlace === 'top' || args.textPlace === 'bottom';
   if (forcedRow && best.overlap_pct > 0) {
@@ -4789,6 +4862,116 @@ export function applyTextColumn<S extends ReturnType<typeof resolveOverlayStyle>
       layout: { ...style.layout, anchor: forced, align: COLUMN_ALIGN[column], ...(af ? { avoidFaces: { ...af, anchors: candidates, keepAlign: true } } : {}) } },
     applied: { requested: column, anchor_before: before, anchor_forced: forced, candidates },
   };
+}
+
+// ── 1.19.0 · EL TAMAÑO DEL TEXTO Y LA BAJADA LOS PIDE UNA PERSONA ────────────────────────────────────
+// Sam (2026-10-28), mirando la pieza 23698205 compuesta con 1.18.0: «se pierde el texto de la bajada, ni refrescando
+// entra», y pidió un control que agrande o achique el texto compuesto sobre la imagen: «un toque mínimo y personal».
+// Medido ese día: el límite de área bajó el titular a su escalón mínimo y, para no tapar una cara, la escalera de
+// `faceFitLadder` quitó la bajada. Refrescar no cambiaba nada porque la composición es determinista: mismo dato, misma
+// salida. Dos campos opcionales de la petición, con el mismo trato que `text_place` y `text_column` —la pidió una
+// persona: si tapa algo, se compone igual y se dice—:
+//   · `text_scale`: un número de `TEXT_SCALE_MIN` a `TEXT_SCALE_MAX`. Multiplica el tamaño de base que la marca declara
+//     para el titular y la bajada (el escalón que eligió `fit_steps`) y sus escalones más chicos en la misma
+//     proporción, de modo que las escaleras siguen bajando desde el tamaño pedido. Se aplica al entrar al límite de
+//     área (`fitOverlayTextArea`, `fitCarouselCoverArea`), antes del ajuste al alto y de la escalera de caras. El límite de área es una regla publicitaria que fijó el dueño y
+//     sigue rigiendo después: si recorta un tamaño agrandado, lo dice `OVERLAY_TEXT_AREA_REDUCED` y, además,
+//     `OVERLAY_TEXT_SCALE_CAPPED` dice cuánto se pidió y cuánto dejó. Si con la escala pedida ni el escalón más chico
+//     cabe en el límite, el límite se mide otra vez SIN la escala y gana la que ocupa menos: agrandar nunca deja el
+//     texto más fuera del límite de lo que quedaría sin pedirlo. Medido al escribirlo, en una lámina de prueba con
+//     escala 1,3: el escalón más chico escalado no cabía en el 20 % (`CAROUSEL_TEXT_AREA_EXCEEDED`) y sin escala sí.
+//     En la lámina del carrusel multiplica el titular y el cuerpo (la bajada y los pasos comparten esa tipografía),
+//     antes del límite de área de la portada y del ajuste vertical (`CAROUSEL_TEXT_SCALE_CAPPED`).
+//   · `keep_subheadline: true`: la bajada no se quita en ninguna escalera (caras, área, alto). Se sigue achicando por
+//     los escalones; si nada cabe sin tapar, se compone tapando lo menos posible (la elección de siempre) y se dice
+//     (`OVERLAY_SUB_KEPT`). La lámina nunca quita la bajada, así que allí no cambia nada.
+// Sin los dos campos, idéntico a 1.18.0: ni el estilo ni el cromo se tocan (`applyTextScale` y `applyKeepSubheadline`
+// devuelven EL MISMO objeto).
+// EJE (código): el rango, qué ranuras se escalan y en qué orden. INSTANCIA (dato): los tamaños y escalones de cada
+// marca, su límite de área y su política de caras. El código no nombra marcas.
+export const TEXT_SCALE_MIN = 0.7;
+export const TEXT_SCALE_MAX = 1.3;
+
+/** 1.19.0 — `text_scale`: un número de TEXT_SCALE_MIN a TEXT_SCALE_MAX, ambos incluidos. Ausente o null = null (lo de
+ *  siempre, es decir 1). Otro valor —un texto, un número fuera del rango— es 400. PURO. */
+export function parseTextScaleRequest(raw: unknown): number | null {
+  if (raw == null) return null;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= TEXT_SCALE_MIN && raw <= TEXT_SCALE_MAX) return raw;
+  throw new CompositorError('COMPOSITOR_TEXT_SCALE_INVALID',
+    `text_scale debe ser un número entre ${TEXT_SCALE_MIN} y ${TEXT_SCALE_MAX} (o no venir)`, 400);
+}
+
+/** 1.19.0 — `keep_subheadline`: true | false. Ausente o null = false (lo de siempre). Otro valor es 400. PURO. */
+export function parseKeepSubheadlineRequest(raw: unknown): boolean {
+  if (raw == null) return false;
+  if (typeof raw === 'boolean') return raw;
+  throw new CompositorError('COMPOSITOR_KEEP_SUBHEADLINE_INVALID', 'keep_subheadline debe ser true o false (o no venir)', 400);
+}
+
+/** 1.19.0 — un tamaño (% del ancho) por la escala, a tres decimales: la misma precisión que el ajuste vertical de la
+ *  lámina. PURO. */
+export function scaledSizePct(sizePct: number, scale: number): number {
+  return Math.round(sizePct * scale * 1000) / 1000;
+}
+
+/**
+ * 1.19.0 — aplica la escala pedida al titular y a la bajada del overlay: su tamaño y sus escalones más chicos
+ * (`fitSmaller`), en la misma proporción, de modo que las escaleras siguen bajando desde el tamaño pedido. PURO. Sin
+ * escala (o con 1), EL MISMO estilo. El resaltado escala con su ranura (`sizeScale` es relativo al tamaño de la ranura).
+ */
+export function applyTextScale<S extends ReturnType<typeof resolveOverlayStyle>>(style: S, scale: number | null): S {
+  if (scale == null || scale === 1) return style;
+  const one = <T extends { sizePct: number; fitSmaller?: number[] } | null>(sl: T): T => (sl
+    ? { ...sl, sizePct: scaledSizePct(sl.sizePct, scale), ...(sl.fitSmaller ? { fitSmaller: sl.fitSmaller.map((v) => scaledSizePct(v, scale)) } : {}) }
+    : sl);
+  return { ...style, slots: { ...style.slots, headline: one(style.slots.headline), subheadline: one(style.slots.subheadline) } };
+}
+
+/** 1.19.0 — marca el estilo para que ninguna escalera quite la bajada. PURO. Sin el pedido, o sin bajada, EL MISMO
+ *  estilo. */
+export function applyKeepSubheadline<S extends ReturnType<typeof resolveOverlayStyle>>(style: S, keep: boolean): S {
+  if (!keep || !style.slots.subheadline) return style;
+  return { ...style, keepSubheadline: true };
+}
+
+/**
+ * 1.19.0 — aplica la escala pedida a la lámina: el titular (su tamaño, sus escalones y su resaltado) y el cuerpo, que
+ * es la tipografía de la bajada y de los pasos. La cifra, el rótulo y el logotipo no cambian: son la maqueta. PURO. Sin
+ * escala (o con 1), EL MISMO cromo.
+ */
+export function applyCarouselTextScale(chrome: CarouselChrome, scale: number | null): CarouselChrome {
+  if (scale == null || scale === 1) return chrome;
+  const t = chrome.type;
+  return {
+    ...chrome,
+    type: {
+      ...t,
+      ...(t.headline ? { headline: { ...t.headline, sizePct: scaledSizePct(t.headline.sizePct, scale) } } : {}),
+      ...(t.body ? { body: { ...t.body, sizePct: scaledSizePct(t.body.sizePct, scale) } } : {}),
+    },
+    ...(chrome.headlineEmphasis ? { headlineEmphasis: { ...chrome.headlineEmphasis, sizePct: scaledSizePct(chrome.headlineEmphasis.sizePct, scale) } } : {}),
+    fitLadder: { ...chrome.fitLadder, headline: chrome.fitLadder.headline.map((v) => scaledSizePct(v, scale)) },
+  };
+}
+
+/** 1.19.0 — la escala que quedó: el tamaño final del titular sobre el de base de la marca, a dos decimales. null si
+ *  no hay titular. PURO. */
+export function textScaleApplied(basePct: number | null | undefined, finalPct: number | null | undefined): number | null {
+  if (basePct == null || !(basePct > 0) || finalPct == null || !Number.isFinite(finalPct)) return null;
+  return Math.round((finalPct / basePct) * 100) / 100;
+}
+
+/**
+ * 1.19.0 — el aviso de que el límite de área recortó una escala pedida mayor que 1: se pidió x %, el área dejó y %
+ * (el titular que dejó el límite sobre el de base de la marca). null si no se pidió agrandar o si el límite no
+ * recortó el tamaño pedido. `prefix` es la familia del aviso: 'OVERLAY' o 'CAROUSEL'. PURO.
+ */
+export function textScaleCappedMarker(prefix: 'OVERLAY' | 'CAROUSEL', requested: number | null,
+  basePct: number | null | undefined, areaPct: number | null | undefined): string | null {
+  if (requested == null || !(requested > 1) || basePct == null || !(basePct > 0) || areaPct == null) return null;
+  if (areaPct >= scaledSizePct(basePct, requested)) return null;
+  const left = textScaleApplied(basePct, areaPct)!;
+  return `${prefix}_TEXT_SCALE_CAPPED: se pidió ${Math.round(requested * 100)} %, la regla del área dejó ${Math.round(left * 100)} %`;
 }
 
 /**
@@ -6187,6 +6370,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const textColumnIn = parseTextColumnRequest(body.text_column);
     // 1.16.0 — lo elegido por bloque (titular y bajada). Sin el campo, todo lo de abajo es 1.15.0.
     const textStyleIn = parseTextStyleRequest(body.text_style);
+    // 1.19.0 — el tamaño del texto y la bajada pedidos por una persona. Sin los campos, todo lo de abajo es 1.18.0.
+    // `meta.text_scale` viaja siempre que el campo llegue, aunque llegue en null.
+    const textScaleIn = parseTextScaleRequest(body.text_scale);
+    const textScaleArrived = body.text_scale !== undefined;
+    const keepSubIn = parseKeepSubheadlineRequest(body.keep_subheadline);
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -6286,7 +6474,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       Object.assign(metrics, italicLoad.metrics);
       style.markers.push(...italicLoad.markers);
       // 1.5.0 — primero el límite de área de la plataforma (sólo portada), después el ajuste vertical.
-      const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics });
+      // 1.19.0 — la escala pedida entra en el límite de área, antes de la colocación y del ajuste vertical. Sin ella, EL
+      // MISMO cromo.
+      const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics, ...(textScaleIn != null ? { textScale: textScaleIn } : {}) });
       warnings.push(...area.warnings);
       // 1.11.0 — EL TEXTO NO TAPA CARAS NI PRODUCTOS. Con la política y foto: la MISMA detección de 1.6.x (más
       // productos, si se declaran) y la colocación libre de la maqueta. Sin política, sin foto o si la detección falla,
@@ -6438,6 +6628,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             // 1.16.0 — lo pedido por bloque y lo aplicado; y si la bajada cambió de color para leerse.
             ...(cts.applied ? { text_style: { requested: textStyleIn, applied: cts.applied } } : {}),
             ...(slideSubContrastMeta ? { subheadline_contrast: slideSubContrastMeta } : {}),
+            // 1.19.0 — la escala pedida y la que quedó en el titular (sólo si llegó `text_scale`).
+            ...(textScaleArrived ? { text_scale: { requested: textScaleIn,
+              applied: chrome.headline.length ? textScaleApplied(chrome.type.headline?.sizePct, fit.chrome.type.headline?.sizePct) : null } } : {}),
           },
         },
         duration_ms: Date.now() - t0,
@@ -6531,7 +6724,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     Object.assign(areaMetrics, italicLoad.metrics);
     oStyle.markers.push(...italicLoad.markers);
     if (Object.keys(italicLoad.fallback).length) oStyle.italicFallback = withItalicFallback(oStyle, italicLoad.fallback).italicFallback;
-    const areaFit = fitOverlayTextArea({ style: oStyle, width: dims.width, height: dims.height, metrics: areaMetrics });
+    // 1.19.0 — la escala y la bajada pedidas entran en el límite de área, ANTES del alto y de las caras. Sin los campos,
+    // EL MISMO estilo. El límite de área rige después de escalar: si recorta un tamaño agrandado, se dice.
+    const baseHeadlinePct = oStyle.slots.headline?.sizePct ?? null;
+    const areaFit = fitOverlayTextArea({ style: oStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
+      ...(textScaleIn != null ? { textScale: textScaleIn } : {}), ...(keepSubIn ? { keepSubheadline: true } : {}) });
     // 1.14.0 — el bloque cabe en el ALTO del lienzo, en cualquier proporción. Si ya cabe, el MISMO estilo.
     const heightFit = fitOverlayTextHeight({ style: areaFit.style, width: dims.width, height: dims.height, metrics: areaMetrics });
     let finalStyle = heightFit.style;
@@ -6737,6 +6934,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(columnApplied.applied ? { text_column: { ...columnApplied.applied, anchor_used: finalStyle.layout.anchor, align_used: finalStyle.layout.align } } : {}),
         // 1.13.0 — qué palabra sola se evitó y cuál bajó a acompañarla (sólo si hubo alguna).
         ...(orphan.report.length ? { orphan_lines: orphan.report } : {}),
+        // 1.19.0 — la escala pedida y la que quedó en el titular, tras el área, el alto y las caras (sólo si llegó `text_scale`).
+        ...(textScaleArrived ? { text_scale: { requested: textScaleIn, applied: textScaleApplied(baseHeadlinePct, finalStyle.slots.headline?.sizePct) } } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
