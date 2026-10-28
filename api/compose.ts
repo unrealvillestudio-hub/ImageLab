@@ -294,7 +294,17 @@ declare const process: { env: Record<string, string | undefined> };
 //         · `keep_subheadline: true`: ni la escalera de caras ni la del área ni la del alto quitan la bajada. Se sigue
 //           achicando; si nada cabe sin tapar, se compone tapando lo menos posible y se dice (`OVERLAY_SUB_KEPT`).
 //         Sin los dos campos, idéntico a 1.18.0.
-export const COMPOSITOR_VERSION = '1.19.0';
+//   1.20.0 (2026-10-28) — LA BAJADA RESPETA SUS SALTOS DE LÍNEA (Sam, 2026-10-28: «en la bajada quisiera poder poner una
+//         línea aparte entre por ejemplo una oración y otra»). Desde 1.7.0 el titular respeta un salto escrito; la bajada
+//         se componía como un solo párrafo corrido y un `\n` se leía como un espacio. Ahora cada `\n` de la bajada abre
+//         línea, en la imagen y en la lámina del carrusel (portada, cuerpo y cierre); dentro de cada tramo el corte por
+//         ancho sigue igual, cada tramo se recorta y dos saltos seguidos no dejan una línea en blanco (ver «1.20.0 · LA
+//         BAJADA CON SALTOS DE LÍNEA»). Toda medida que dimensiona o ubica la bajada cuenta las líneas forzadas: el límite
+//         de área, las escaleras de caras y del alto, `keep_subheadline`, `text_scale` y el ajuste vertical y el área de
+//         la lámina. Un tramo de `text_style.sub` (resaltado, sombra, cursiva) que cruza un salto no se encuentra y se dice
+//         con el aviso de siempre (`…_NOT_IN_SUBHEADLINE`, `CAROUSEL_SHADOW_SPAN_NOT_FOUND`). Eco: `meta.sub_breaks` y
+//         `meta.carousel.sub_breaks`, los saltos respetados, sólo si la bajada trae `\n`. Sin `\n`, idéntico a 1.19.0.
+export const COMPOSITOR_VERSION = '1.20.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -729,7 +739,8 @@ export function applySlotShadow<S extends {
   if (block.shadow_spans.length) {
     if (!declared) markers.push(`OVERLAY_SHADOW_NOT_DECLARED: hay tramos de la ${label} con la sombra al revés y la marca no declara layout.text_effect; se compone sin tocarlos`);
     else {
-      const split = splitEmphasis(String(s.text ?? ''), [...block.shadow_spans]);
+      // 1.20.0 — en la bajada, un tramo que cruza un salto de línea no se encuentra.
+      const split = (slot === 'subheadline' ? splitSubheadlineSpans : splitEmphasis)(String(s.text ?? ''), [...block.shadow_spans]);
       if (split.missing.length) markers.push(`OVERLAY_SHADOW_SPAN_NOT_IN_${slot === 'headline' ? 'HEADLINE' : 'SUBHEADLINE'}: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en la ${label}`);
       const ranges: Array<[number, number]> = [];
       let pos = 0;
@@ -777,7 +788,8 @@ export function applySlotItalic<S extends { slots: Record<string, any>; markers:
   if (!s) {
     return { style: { ...style, markers: [...style.markers, `${code}: ${spans.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label} (la composición no ${slot === 'headline' ? 'lo' : 'la'} lleva)`] }, applied: { italic: [] } };
   }
-  const split = splitEmphasis(String(s.text ?? ''), [...spans]);
+  // 1.20.0 — en la bajada, un tramo que cruza un salto de línea no se encuentra.
+  const split = (slot === 'subheadline' ? splitSubheadlineSpans : splitEmphasis)(String(s.text ?? ''), [...spans]);
   const markers = [...style.markers];
   if (split.missing.length) markers.push(`${code}: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label}; ese tramo no cambia de estilo`);
   const ranges: Array<[number, number]> = [];
@@ -1403,7 +1415,8 @@ export function resolveOverlayStyle(args: {
           if (!ep) missing.push(`brand_palette.role='${emRole}' (pedido por palette.${(t.palette ?? {}).subheadline_emphasis != null ? 'subheadline_emphasis' : 'headline_emphasis'})`);
           else emColor = hexToRgba(String(ep.hex), 1);
         }
-        const split = splitEmphasis(value, terms);
+        // 1.20.0 — un tramo que cruza un salto de línea escrito no se encuentra (`splitSubheadlineSpans`).
+        const split = splitSubheadlineSpans(value, terms);
         if (split.missing.length) {
           markers.push(`OVERLAY_SUB_EMPHASIS_NOT_IN_SUBHEADLINE: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en la bajada; ese tramo no se resalta`);
         }
@@ -1419,6 +1432,9 @@ export function resolveOverlayStyle(args: {
     const lines = slot === 'headline'
       ? headlineLineRanges(value, parts && emphasis && lbTok === 'emphasis_rule' ? parts : null) : null;
     if (lines) markers.push(`OVERLAY_HEADLINE_LINES: ${lines.ranges.length} líneas (${lines.source === 'manual' ? 'escritas en el titular' : 'regla del énfasis'})`);
+    // 1.20.0 — la bajada respeta sus saltos de línea escritos (ver «1.20.0 · LA BAJADA CON SALTOS DE LÍNEA»). Sin `\n`,
+    // null y la ranura es la de 1.19.0, clave por clave.
+    const subLines = slot === 'subheadline' ? subheadlineLineRanges(value) : null;
 
     const fit = fitFontSizePct(steps, parts && emphasis ? 'x'.repeat(emphasisEffectiveLength(parts, emphasis.sizeScale)) : value);
     if (fit.overflow) {
@@ -1446,6 +1462,8 @@ export function resolveOverlayStyle(args: {
       ...(parts && emphasis ? { parts, emphasis } : {}),
       // 1.7.0 — sin cortes impuestos la clave no existe: la ranura es la de 1.6.4.
       ...(lines ? { lines: lines.ranges } : {}),
+      // 1.20.0 — y la bajada con saltos escritos, los suyos: el medidor, las escaleras y la escena ya leen `lines`.
+      ...(subLines ? { lines: subLines } : {}),
       fitSmaller: [...new Set(steps.map((x: any) => Number(x.size_pct)))]
         .filter((x) => Number.isFinite(x) && x > 0 && x < fit.sizePct).sort((a, b) => b - a),
     };
@@ -3099,8 +3117,9 @@ export function resolveCarouselChrome(args: {
 export interface CarouselBlockShadow { mode?: 'on' | 'off'; scale?: number; flip?: Array<[number, number]> }
 
 /** Rangos [inicio, fin) de los tramos literales en un texto. PURO. */
-function literalRanges(text: string, spans: readonly string[]): { ranges: Array<[number, number]>; found: string[]; missing: string[] } {
-  const split = splitEmphasis(text, [...spans]);
+function literalRanges(text: string, spans: readonly string[], sub = false): { ranges: Array<[number, number]>; found: string[]; missing: string[] } {
+  // 1.20.0 — en la bajada (`sub`), un tramo que cruza un salto de línea escrito no se encuentra.
+  const split = (sub ? splitSubheadlineSpans : splitEmphasis)(text, [...spans]);
   const ranges: Array<[number, number]> = [];
   let pos = 0;
   for (const p of split.parts) { if (p.keyword) ranges.push([pos, pos + p.text.length]); pos += p.text.length; }
@@ -3150,7 +3169,7 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
 
   // El resaltado de la bajada: color propio, o el del resaltado de la marca, o el de la palabra clave de la lámina.
   if (sb.emphasis.length && chrome.subheadline) {
-    const r = literalRanges(chrome.subheadline, sb.emphasis);
+    const r = literalRanges(chrome.subheadline, sb.emphasis, true);
     if (r.missing.length) warnings.push(`CAROUSEL_SUB_EMPHASIS_NOT_IN_SUBHEADLINE: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en la bajada; ese tramo no se resalta`);
     if (r.found.length) {
       const own = pick('SUB_EMPHASIS', sb.emphasis_role, emRoles);
@@ -3164,7 +3183,7 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
 
   // La sombra de cada bloque. Sin sombra que la marca declare, 'on' y los tramos no inventan una.
   const declared = (chrome.textEffect && chrome.textEffect.color) ? chrome.textEffect : (args.declared ?? null);
-  const shadowOf = (block: TextBlockStyleIn, text: string, legacySpans: string[], label: string): CarouselBlockShadow | undefined => {
+  const shadowOf = (block: TextBlockStyleIn, text: string, legacySpans: string[], label: string, sub = false): CarouselBlockShadow | undefined => {
     const mode = block.text_shadow ?? legacy.text_shadow;
     const spans = block.shadow_spans.length ? block.shadow_spans : legacySpans;
     const scale = block.shadow_strength && block.shadow_strength !== 'brand' ? SHADOW_STRENGTHS[block.shadow_strength] : undefined;
@@ -3175,7 +3194,7 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
     if (spans.length) {
       if (!declared) warnings.push(`CAROUSEL_SHADOW_NOT_DECLARED: hay tramos de ${label} con la sombra al revés y la marca no declara sombra; se compone sin tocarlos`);
       else {
-        const r = literalRanges(text, spans);
+        const r = literalRanges(text, spans, sub);
         if (r.missing.length) warnings.push(`CAROUSEL_SHADOW_SPAN_NOT_FOUND: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${label}`);
         if (r.ranges.length) sh.flip = r.ranges;
       }
@@ -3186,14 +3205,14 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
   const headText = chrome.headline.map((p) => p.text).join('');
   const hs = shadowOf(hb, headText, legacy.shadow_spans, 'el titular');
   // Los tramos sueltos (1.9.0) son del titular; la bajada sólo toma los suyos.
-  const ss = chrome.subheadline ? shadowOf(sb, chrome.subheadline, [], 'la bajada') : undefined;
+  const ss = chrome.subheadline ? shadowOf(sb, chrome.subheadline, [], 'la bajada', true) : undefined;
   if (hs) { out = { ...out, headlineShadow: hs }; applied.headline.shadow = hs; }
   if (ss) { out = { ...out, subShadow: ss }; applied.sub.shadow = ss; }
 
   // 1.18.0 — la cursiva por tramo: cada tramo invierte la cursiva de lo que tiene debajo, como en el overlay.
   const italicOf = (spans: readonly string[] | undefined, text: string | null, code: 'HEADLINE' | 'SUBHEADLINE', label: string) => {
     if (!spans?.length) return { ranges: [] as Array<[number, number]>, found: [] as string[] };
-    const r = literalRanges(text ?? '', spans);
+    const r = literalRanges(text ?? '', spans, code === 'SUBHEADLINE');
     if (r.missing.length) warnings.push(`CAROUSEL_ITALIC_SPAN_NOT_IN_${code}: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${label}; ese tramo no cambia de estilo`);
     return { ranges: r.ranges, found: r.found };
   };
@@ -3257,17 +3276,9 @@ export function headlineLineRanges(
   headline: string, parts: Array<{ text: string; keyword: boolean }> | null,
 ): { ranges: Array<[number, number]>; source: 'manual' | 'rule' } | null {
   const h = String(headline ?? '');
-  if (/\n/.test(h)) {
-    const ranges: Array<[number, number]> = [];
-    let at = 0;
-    for (const line of h.split('\n')) {
-      const lead = line.length - line.trimStart().length;
-      const t = line.trim();
-      if (t) ranges.push([at + lead, at + lead + t.length]);
-      at += line.length + 1;
-    }
-    return ranges.length > 1 ? { ranges, source: 'manual' } : null;
-  }
+  // 1.20.0 — la regla manual vive en `writtenLineRanges`, que comparte con la bajada; la salida es la de 1.7.0.
+  const written = writtenLineRanges(h);
+  if (written) return written.length > 1 ? { ranges: written, source: 'manual' } : null;
   if (!parts || !parts.some((p) => p.keyword)) return null;
   // Las zonas con énfasis, en coordenadas del titular.
   const kw: Array<[number, number]> = [];
@@ -3331,6 +3342,58 @@ export function partsInRange<P extends { text: string; keyword: boolean }>(parts
     pos += p.text.length;
   }
   return out;
+}
+
+// ── 1.20.0 · LA BAJADA CON SALTOS DE LÍNEA ──────────────────────────────────────────────────────────────────────
+// EL CASO (Sam, 2026-10-28): «en la bajada quisiera poder poner una línea aparte entre por ejemplo una oración y otra».
+// Desde 1.7.0 el titular respeta un salto de línea escrito (`headlineLineRanges`, regla manual); la bajada, en cambio, se
+// componía como un solo párrafo corrido y un `\n` se leía como un espacio.
+// EJE (código): cada salto escrito en la bajada abre línea; dentro de cada tramo, el corte por ancho sigue igual. Cada
+// tramo se recorta, y los vacíos (dos saltos seguidos) no dejan una línea en blanco: se funden en un solo salto. Toda
+// medida que dimensiona o ubica la bajada —el límite de área, las escaleras de caras y del alto, la escala pedida, la
+// lámina del carrusel— cuenta las líneas forzadas, porque mide con los mismos tramos que dibuja. Un tramo pedido sobre la
+// bajada (resaltado, sombra o cursiva) no puede cruzar un salto: si lo cruza, no se encuentra y se dice con el aviso de
+// siempre. Cero marcas, cero idiomas: una línea es lo que separa el `\n`.
+// Sin `\n` en la bajada, la escena es la de 1.19.0, byte a byte.
+
+/** 1.20.0 — los tramos [inicio, fin) de las líneas ESCRITAS de un texto: cada `\n` abre línea, cada línea se recorta y
+ *  las vacías no cuentan. null si el texto no trae ningún salto. Es la regla manual del titular de 1.7.0. PURO. */
+export function writtenLineRanges(text: string | null | undefined): Array<[number, number]> | null {
+  const h = String(text ?? '');
+  if (!/\n/.test(h)) return null;
+  const ranges: Array<[number, number]> = [];
+  let at = 0;
+  for (const line of h.split('\n')) {
+    const lead = line.length - line.trimStart().length;
+    const t = line.trim();
+    if (t) ranges.push([at + lead, at + lead + t.length]);
+    at += line.length + 1;
+  }
+  return ranges;
+}
+
+/** 1.20.0 — dónde se corta la bajada: los tramos de sus líneas escritas, si son dos o más. null si no (la bajada se
+ *  envuelve sola, como en 1.19.0). PURO. */
+export function subheadlineLineRanges(text: string | null | undefined): Array<[number, number]> | null {
+  const r = writtenLineRanges(text);
+  return r && r.length > 1 ? r : null;
+}
+
+/** 1.20.0 — cuántos saltos escritos de la bajada se respetan: las líneas que quedan menos una (los vacíos se funden).
+ *  null si la bajada no trae ningún `\n`: entonces no hay eco. PURO. */
+export function subheadlineBreaks(text: string | null | undefined): number | null {
+  const r = writtenLineRanges(text);
+  return r ? Math.max(0, r.length - 1) : null;
+}
+
+/** 1.20.0 — `splitEmphasis` para la bajada: un tramo que cruza un salto de línea (lo trae dentro) no se encuentra y va
+ *  a `missing`, en el orden pedido. Sin tramos así, la salida es la de `splitEmphasis`, campo por campo. PURO. */
+export function splitSubheadlineSpans(text: string, terms: Array<string | null | undefined>): ReturnType<typeof splitEmphasis> {
+  const crosses = (t: string | null | undefined) => typeof t === 'string' && t.includes('\n');
+  if (!(terms ?? []).some(crosses)) return splitEmphasis(text, terms);
+  const r = splitEmphasis(text, terms.filter((t) => !crosses(t)));
+  const missing = terms.filter((t): t is string => !!t && (crosses(t) || r.missing.includes(t)));
+  return { ...r, missing };
 }
 
 export function headlineAtoms<P extends { text: string; keyword: boolean }>(parts: P[]): P[][] {
@@ -3571,12 +3634,34 @@ export function buildCarouselScene(args: {
   // EXACTAMENTE el texto de 1.15.0.
   // 1.18.0 — lo mismo con tramos de cursiva al revés: cada tramo con su estilo explícito.
   const subItalic = chrome.subItalic?.length ? chrome.subItalic : null;
-  const subNode = (marginTop: number) => {
-    if (!chrome.subParts && !subFx.flip && !subItalic) return text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...subFx.fx });
+  // 1.20.0 — la bajada con saltos de línea escritos (ver «1.20.0 · LA BAJADA CON SALTOS DE LÍNEA»): una COLUMNA con una
+  // fila por línea escrita, cada una con lo que la bajada lleva (texto llano o átomos). Sin `\n`, null y la bajada es la
+  // de 1.19.0, nodo por nodo.
+  const subLines = chrome.subheadline ? subheadlineLineRanges(chrome.subheadline) : null;
+  const subSpans = !!(chrome.subParts || subFx.flip || subItalic);
+  const subAllParts = () => {
     const base = chrome.subParts ?? [{ text: chrome.subheadline!, keyword: false }];
-    const parts = subItalic
+    return subItalic
       ? withSpanFlags(chrome.subheadline!, base, { ...(subFx.flip ? { flip: chrome.subShadow!.flip! } : {}), italic: subItalic })
       : subFx.flip ? withShadowFlip(chrome.subheadline!, base, chrome.subShadow!.flip!) : base;
+  };
+  const subNode = (marginTop: number): Record<string, any> => {
+    if (subLines) {
+      const all = subSpans ? subAllParts() : null;
+      return {
+        type: 'div',
+        props: {
+          style: { display: 'flex', flexDirection: 'column', marginTop, width: blockW },
+          children: subLines.map(([a, b]) => (all
+            ? subRow(partsInRange(all, a, b), 0)
+            : text(chrome.subheadline!.slice(a, b), { ...font(T.body, B), color: c.subheadline, width: blockW, ...subFx.fx }))),
+        },
+      };
+    }
+    if (!subSpans) return text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...subFx.fx });
+    return subRow(subAllParts(), marginTop);
+  };
+  const subRow = (parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>, marginTop: number) => {
     return {
       type: 'div',
       props: {
@@ -4051,13 +4136,29 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   const seen = (w: number, over = false) => { midW = Math.max(midW, w); if (over) wide = true; };
   // 1.18.0 — la bajada con tramos de cursiva al revés se mide palabra a palabra con la cara de cada tramo; sin ellos,
   // EXACTAMENTE `textHW` de siempre.
-  const subHW = (maxW: number) => {
-    if (!chrome.subItalic?.length) return textHW(T.body, B, chrome.subheadline!, maxW);
+  // 1.20.0 — con saltos de línea escritos, cada línea escrita se mide sola (con su corte por ancho) y el alto es la suma:
+  // las líneas forzadas cuentan en el ajuste vertical, en la colocación y en la caja del bloque. Sin `\n`, como siempre.
+  const subHW = (maxW: number): { h: number; w: number; over: boolean } => {
+    const lines = subheadlineLineRanges(chrome.subheadline);
+    if (lines) {
+      let h = 0, w = 0, over = false;
+      for (const [a, b] of lines) {
+        const r = subRangeHW(maxW, a, b);
+        h += r.h; w = Math.max(w, r.w); over = over || r.over;
+      }
+      return { h, w, over };
+    }
+    return subRangeHW(maxW, 0, chrome.subheadline!.length, true);
+  };
+  const subRangeHW = (maxW: number, a: number, b: number, whole = false) => {
+    const seg = whole ? chrome.subheadline! : chrome.subheadline!.slice(a, b);
+    if (!chrome.subItalic?.length) return textHW(T.body, B, seg, maxW);
     const ls = r2(T.body.letterSpacingEm * B);
     const wb = widthFn(T.body, B, ls, T.body.transform);
     const flipped = carouselFlippedFace(T.body, chrome.italicFallback);
     const wi = flipped === T.body ? wb : widthFn(flipped, B, ls, T.body.transform);
-    const parts = withSpanFlags(chrome.subheadline!, [{ text: chrome.subheadline!, keyword: false }], { italic: chrome.subItalic });
+    const all = withSpanFlags(chrome.subheadline!, [{ text: chrome.subheadline!, keyword: false }], { italic: chrome.subItalic });
+    const parts = whole ? all : partsInRange(all, a, b);
     const r = wordLinesW(wordWidthsOfParts(parts, (p) => (p.italic ? wi : wb)), wb(' '), maxW);
     return { h: r.n * B * T.body.lineHeight, w: r.w, over: r.over };
   };
@@ -4311,14 +4412,24 @@ export function carouselTextArea(chrome: CarouselChrome, metrics: FitMetrics | n
     // 1.18.0 — con tramos de cursiva al revés, cada palabra se mide tramo a tramo con su cara; sin ellos, como siempre.
     const bFlip = chrome.subItalic?.length ? carouselFlippedFace(T.body, chrome.italicFallback) : T.body;
     const bIt = bFlip === T.body ? bOf : widthFn(bFlip, B);
-    const words = chrome.subItalic?.length
-      ? wordWidthsOfParts(withSpanFlags(chrome.subheadline, [{ text: chrome.subheadline, keyword: false }], { italic: chrome.subItalic }), (p) => (p.italic ? bIt : bOf))
-      : chrome.subheadline.split(/\s+/).filter(Boolean).map((word) => bOf(word));
-    let cur = 0, n = words.length ? 1 : 0;
-    for (const ww of words) {
-      if (cur > 0 && cur + bOf(' ') + ww > inner + 0.01) { n++; maxW = Math.max(maxW, cur); cur = ww; } else cur = cur > 0 ? cur + bOf(' ') + ww : ww;
+    // 1.20.0 — con saltos de línea escritos, cada línea escrita es una fila propia: sus palabras se cortan por ancho
+    // dentro de ella y las líneas se suman. Sin `\n`, una sola fila con el texto entero, como siempre.
+    const sub = chrome.subheadline;
+    const ranges: Array<[number, number]> = subheadlineLineRanges(sub) ?? [[0, sub.length]];
+    const flagged = chrome.subItalic?.length ? withSpanFlags(sub, [{ text: sub, keyword: false }], { italic: chrome.subItalic }) : null;
+    let n = 0;
+    for (const [a, b] of ranges) {
+      const whole = ranges.length === 1;
+      const words = flagged
+        ? wordWidthsOfParts(whole ? flagged : partsInRange(flagged, a, b), (p) => (p.italic ? bIt : bOf))
+        : (whole ? sub : sub.slice(a, b)).split(/\s+/).filter(Boolean).map((word) => bOf(word));
+      let cur = 0;
+      if (words.length) n++;
+      for (const ww of words) {
+        if (cur > 0 && cur + bOf(' ') + ww > inner + 0.01) { n++; maxW = Math.max(maxW, cur); cur = ww; } else cur = cur > 0 ? cur + bOf(' ') + ww : ww;
+      }
+      maxW = Math.max(maxW, Math.min(cur, inner));
     }
-    maxW = Math.max(maxW, Math.min(cur, inner));
     total += r2(B * 0.69) + n * B * T.body.lineHeight;
   }
   return { areaPct: Math.round((10000 * Math.min(maxW, inner) * total) / (W * H)) / 100, estimated };
@@ -6375,6 +6486,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const textScaleIn = parseTextScaleRequest(body.text_scale);
     const textScaleArrived = body.text_scale !== undefined;
     const keepSubIn = parseKeepSubheadlineRequest(body.keep_subheadline);
+    // 1.20.0 — los saltos de línea escritos en la bajada (ver «1.20.0 · LA BAJADA CON SALTOS DE LÍNEA»). null sin `\n`:
+    // entonces no hay eco y todo lo de abajo es 1.19.0.
+    const subBreaksIn = subheadline != null ? subheadlineBreaks(subheadline) : null;
     const hasImage = !!(body.image_data_url || body.image_url);
     // BRIEF 8 · D — un titular vacío ya NO es motivo suficiente para rechazar: si la marca declara
     // franja de identidad, la escena se SELLA igual (el sello no es un adorno del texto). La guarda
@@ -6631,6 +6745,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
             // 1.19.0 — la escala pedida y la que quedó en el titular (sólo si llegó `text_scale`).
             ...(textScaleArrived ? { text_scale: { requested: textScaleIn,
               applied: chrome.headline.length ? textScaleApplied(chrome.type.headline?.sizePct, fit.chrome.type.headline?.sizePct) : null } } : {}),
+            // 1.20.0 — cuántos saltos de línea escritos en la bajada se respetaron (sólo si la bajada trae `\n`).
+            ...(subBreaksIn != null ? { sub_breaks: fit.chrome.subheadline ? subBreaksIn : 0 } : {}),
           },
         },
         duration_ms: Date.now() - t0,
@@ -6936,6 +7052,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         ...(orphan.report.length ? { orphan_lines: orphan.report } : {}),
         // 1.19.0 — la escala pedida y la que quedó en el titular, tras el área, el alto y las caras (sólo si llegó `text_scale`).
         ...(textScaleArrived ? { text_scale: { requested: textScaleIn, applied: textScaleApplied(baseHeadlinePct, finalStyle.slots.headline?.sizePct) } } : {}),
+        // 1.20.0 — cuántos saltos de línea escritos en la bajada se respetaron (sólo si la bajada trae `\n`). Si una
+        // escalera quitó la bajada, ninguno.
+        ...(subBreaksIn != null ? { sub_breaks: finalStyle.slots.subheadline ? subBreaksIn : 0 } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,

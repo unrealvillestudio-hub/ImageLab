@@ -410,7 +410,7 @@ test('10l · cableado: las caras contrarias se bajan antes de cualquier ajuste, 
   const c = SRC.indexOf('const italicLoad = await loadOppositeFaces(carouselItalicFacesNeeded(chrome), new Set(Object.keys(metrics)));');
   const d = SRC.indexOf('const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics');
   assert.ok(c > 0 && d > c);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(18|19)\.0'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(18|19|20)\.0'/);
   assert.match(SRC, /googleFontsFaceCssUrl\(need\.family, need\.weight, need\.italic\)/);
 });
 test('10m · el bloque nuevo no nombra familias ni marcas', () => {
