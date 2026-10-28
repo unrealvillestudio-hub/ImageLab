@@ -268,7 +268,17 @@ declare const process: { env: Record<string, string | undefined> };
 //         «1.17.0 · LA COLUMNA DEL TEXTO»). En la imagen, el ancla de esa columna en la fila vigente y las líneas
 //         alineadas con ella; en la lámina, el bloque en la columna de ese lado o a todo el ancho. Se combina con
 //         `text_place`. Si tapa, se compone igual y se dice. Sin el campo, idéntico a 1.16.0.
-export const COMPOSITOR_VERSION = '1.17.0';
+//   1.18.0 (2026-10-28) — CURSIVA POR TRAMO (Sam, 2026-10-28: «quiero poder aplicar italic al texto cuando lo requiera…
+//         cursiva a)»). Hasta 1.17.0 la cursiva era de la ranura entera o del resaltado; nadie podía poner en cursiva una
+//         palabra suelta. Campo opcional `italic_spans` en cada bloque de `text_style` (`headline` y `sub`), en el overlay
+//         y en la lámina, validado como `shadow_spans` (ver «1.18.0 · CURSIVA POR TRAMO»). Cada tramo INVIERTE la cursiva
+//         de lo que tiene debajo: sobre recto sale en cursiva; sobre cursiva (la ranura con `italic: true` o un resaltado
+//         con `emphasis.italic: true`), recto. La cara contraria se baja de la misma hoja o, si la hoja es de Google Fonts
+//         y no la trae, por el eje `ital` del API; si la familia no tiene cursiva (o la fuente es un `font_url` fijado), se
+//         SIMULA inclinando la recta (`skewX`) y se dice (`OVERLAY_ITALIC_SYNTHESIZED`). Cada tramo se mide con la métrica
+//         de su estilo final; la simulada, con la recta. Lo aplicado viaja en `meta.text_style.applied.<bloque>.italic`.
+//         Sin `italic_spans`, idéntico a 1.17.0.
+export const COMPOSITOR_VERSION = '1.18.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -485,22 +495,41 @@ export function applyTextShadowRequest<S extends {
 /**
  * 1.9.0 — los tramos del titular con la marca de sombra al revés (`flip`). PURA. Parte los tramos de énfasis (o el
  * titular entero) en los bordes de cada rango; el texto visible no cambia.
+ * 1.18.0 — es `withSpanFlags` con sólo la sombra: la salida es la misma de 1.9.0, campo por campo.
  */
 export function withShadowFlip(
   text: string, parts: Array<{ text: string; keyword: boolean }> | null | undefined, ranges: ReadonlyArray<[number, number]>,
 ): Array<{ text: string; keyword: boolean; flip?: boolean }> {
-  const base = parts && parts.length ? parts : [{ text, keyword: false }];
+  return withSpanFlags(text, parts, { flip: ranges });
+}
+
+/**
+ * 1.18.0 — parte los tramos (o el texto entero) en los bordes de cada rango y marca cada trozo con las banderas que le
+ * tocan: `flip` (sombra al revés, 1.9.0) e `italic` (cursiva al revés, 1.18.0). Un mismo trozo puede llevar las dos. Una
+ * bandera cuyos rangos llegan se recalcula (dentro ⇒ `true`; fuera ⇒ no está); una que no llega se conserva como venía,
+ * igual que el resto de los campos del tramo. El texto visible no cambia. PURA.
+ */
+export function withSpanFlags<P extends { text: string; keyword: boolean }>(
+  text: string, parts: P[] | null | undefined,
+  flags: { flip?: ReadonlyArray<[number, number]> | null; italic?: ReadonlyArray<[number, number]> | null },
+): Array<P & { flip?: boolean; italic?: boolean }> {
+  const base = (parts && parts.length ? parts : [{ text, keyword: false }]) as P[];
+  const keys = (['flip', 'italic'] as const).filter((k) => flags[k]);
   const cuts = new Set<number>();
-  for (const [a, b] of ranges) { cuts.add(a); cuts.add(b); }
-  const inFlip = (i: number) => ranges.some(([a, b]) => i >= a && i < b);
-  const out: Array<{ text: string; keyword: boolean; flip?: boolean }> = [];
+  for (const k of keys) for (const [a, b] of flags[k]!) { cuts.add(a); cuts.add(b); }
+  const inside = (k: 'flip' | 'italic', i: number) => flags[k]!.some(([a, b]) => i >= a && i < b);
+  const out: Array<P & { flip?: boolean; italic?: boolean }> = [];
   let pos = 0;
   for (const p of base) {
     let start = 0;
     for (let k = 1; k <= p.text.length; k++) {
       if (k === p.text.length || cuts.has(pos + k)) {
         const seg = p.text.slice(start, k);
-        if (seg) out.push({ text: seg, keyword: p.keyword, ...(inFlip(pos + start) ? { flip: true } : {}) });
+        if (seg) {
+          const piece: Record<string, unknown> = { ...p, text: seg };
+          for (const f of keys) { delete piece[f]; if (inside(f, pos + start)) piece[f] = true; }
+          out.push(piece as P & { flip?: boolean; italic?: boolean });
+        }
         start = k;
       }
     }
@@ -529,14 +558,17 @@ export type ShadowStrength = 'soft' | 'brand' | 'strong' | 'heavy';
 export interface TextBlockStyleIn {
   role: string | null; emphasis: string[]; emphasis_role: string | null;
   text_shadow: 'on' | 'off' | null; shadow_spans: string[]; shadow_strength: ShadowStrength | null;
+  // 1.18.0 — tramos literales del bloque cuya cursiva se INVIERTE (ver «1.18.0 · CURSIVA POR TRAMO»). Vacío ⇒ 1.17.0.
+  italic_spans: string[];
 }
 export interface TextStyleIn { headline: TextBlockStyleIn; sub: TextBlockStyleIn }
 
-const EMPTY_TEXT_BLOCK: TextBlockStyleIn = Object.freeze({ role: null, emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: null }) as TextBlockStyleIn;
+const EMPTY_TEXT_BLOCK: TextBlockStyleIn = Object.freeze({ role: null, emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: null, italic_spans: [] }) as TextBlockStyleIn;
 
 /** ¿El bloque pide algo? PURO. */
 export function textBlockRequested(b: TextBlockStyleIn | null | undefined): boolean {
-  return !!b && !!(b.role || b.emphasis.length || b.emphasis_role || b.text_shadow || b.shadow_spans.length || b.shadow_strength);
+  return !!b && !!(b.role || b.emphasis.length || b.emphasis_role || b.text_shadow || b.shadow_spans.length || b.shadow_strength ||
+    b.italic_spans?.length);
 }
 
 /**
@@ -556,8 +588,8 @@ export function parseTextStyleRequest(raw: unknown): TextStyleIn {
     if (v == null) return { ...EMPTY_TEXT_BLOCK };
     if (!isPlain(v)) throw bad(`${name} debe ser un objeto`);
     const allowed = name === 'headline'
-      ? ['role', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength']
-      : ['role', 'emphasis', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength'];
+      ? ['role', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans']
+      : ['role', 'emphasis', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans'];
     const unknown = Object.keys(v).filter((k) => !allowed.includes(k));
     if (unknown.length) {
       throw bad(`${name} trae ${unknown.map((k) => `'${k}'`).join(', ')} (válidos: ${allowed.join(', ')})` +
@@ -584,6 +616,8 @@ export function parseTextStyleRequest(raw: unknown): TextStyleIn {
       role: role('role'), emphasis: name === 'sub' ? list('emphasis') : [], emphasis_role: role('emphasis_role'),
       text_shadow: ts === 'on' || ts === 'off' ? ts : null, shadow_spans: list('shadow_spans'),
       shadow_strength: typeof st === 'string' && st ? st as ShadowStrength : null,
+      // 1.18.0 — mismos límites que `shadow_spans`: hasta 3 tramos literales de ≤60 caracteres.
+      italic_spans: list('italic_spans'),
     };
   };
   return { headline: block('headline'), sub: block('sub') };
@@ -693,6 +727,156 @@ export function applySlotShadow<S extends {
   return { style: { ...style, slots: { ...style.slots, [slot]: next }, markers }, applied: { mode, spans, strength } };
 }
 
+// ── 1.18.0 · CURSIVA POR TRAMO ────────────────────────────────────────────────────────────────────────────────────
+// EL CASO (Sam, 2026-10-28): «quiero poder aplicar italic al texto cuando lo requiera… cursiva a)». Hasta 1.17.0 la
+// cursiva era de la RANURA entera (`typography.<slot>.italic`) o del resaltado (`emphasis.italic`): nadie podía poner en
+// cursiva una palabra suelta del titular o de la bajada.
+// EJE (código): QUÉ se pide —tramos literales del bloque (`text_style.<bloque>.italic_spans`)— y CÓMO se aplica: cada
+// tramo INVIERTE la cursiva de lo que tiene debajo (decisión de Sam). Sobre texto recto sale en cursiva; sobre texto que
+// ya es cursiva (la ranura con `italic: true`, o un tramo de resaltado con `emphasis.italic: true`) sale recto.
+// INSTANCIA (dato): la familia y su peso, que siguen siendo los de la marca. La cara contraria se pide a la misma fuente
+// de la que salió la de base; si la familia no la tiene, la cursiva se SIMULA inclinando la recta y se dice
+// (`OVERLAY_ITALIC_SYNTHESIZED`). Cero familias y cero marcas en el código: la regla de la URL es del API de Google Fonts.
+// Sin `italic_spans`, la escena es la de 1.17.0, clave por clave.
+
+/** 1.18.0 — qué se hace cuando la cara contraria no existe: 'skew' simula la cursiva; 'none' deja el tramo como está. */
+export type ItalicFallback = 'skew' | 'none';
+/** 1.18.0 — la inclinación de la cursiva simulada, en grados de `skewX` (negativa: la parte de arriba va a la derecha). */
+export const ITALIC_SYNTH_SKEW_DEG = -10;
+
+/**
+ * 1.18.0 — los tramos de una ranura con la cursiva al revés. PURO, gemelo de `applySlotShadow`: convierte los tramos
+ * literales en rangos `[a, b)` (`slot.italicFlip`). Lo que no está literal no se aplica y se dice. Sin tramos pedidos
+ * devuelve EL MISMO estilo.
+ */
+export function applySlotItalic<S extends { slots: Record<string, any>; markers: string[] }>(
+  style: S, slot: 'headline' | 'subheadline', block: Pick<TextBlockStyleIn, 'italic_spans'> | null | undefined,
+): { style: S; applied: { italic: string[] } } {
+  const spans = block?.italic_spans ?? [];
+  if (!spans.length) return { style, applied: { italic: [] } };
+  const label = slot === 'headline' ? 'titular' : 'bajada';
+  const code = `OVERLAY_ITALIC_SPAN_NOT_IN_${slot === 'headline' ? 'HEADLINE' : 'SUBHEADLINE'}`;
+  const s = style.slots?.[slot];
+  const art = slot === 'headline' ? 'el' : 'la';
+  if (!s) {
+    return { style: { ...style, markers: [...style.markers, `${code}: ${spans.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label} (la composición no ${slot === 'headline' ? 'lo' : 'la'} lleva)`] }, applied: { italic: [] } };
+  }
+  const split = splitEmphasis(String(s.text ?? ''), [...spans]);
+  const markers = [...style.markers];
+  if (split.missing.length) markers.push(`${code}: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label}; ese tramo no cambia de estilo`);
+  const ranges: Array<[number, number]> = [];
+  let pos = 0;
+  for (const p of split.parts) { if (p.keyword) ranges.push([pos, pos + p.text.length]); pos += p.text.length; }
+  if (!ranges.length) return { style: { ...style, markers }, applied: { italic: [] } };
+  return { style: { ...style, slots: { ...style.slots, [slot]: { ...s, italicFlip: ranges } }, markers }, applied: { italic: split.found } };
+}
+
+/**
+ * 1.18.0 — el estilo FINAL de un tramo: la cursiva de base (la de la ranura, o la del resaltado si el tramo es keyword)
+ * invertida si el tramo la pide. PURO. Si la cara contraria no existe: 'skew' ⇒ cara recta inclinada; 'none' ⇒ como
+ * estaba. `italic` es la cara que se dibuja (y se mide); `skew`, si además se inclina.
+ */
+export function spanItalicStyle(baseItalic: boolean, flipped: boolean, fallback?: ItalicFallback | null): { italic: boolean; skew: boolean } {
+  if (!flipped) return { italic: baseItalic, skew: false };
+  if (fallback === 'none') return { italic: baseItalic, skew: false };
+  if (fallback === 'skew' && !baseItalic) return { italic: false, skew: true };
+  return { italic: !baseItalic, skew: false };
+}
+
+/** 1.18.0 — el estilo de satori de un tramo con su cursiva explícita (y la inclinación, si se simula). PURO. */
+export function italicSpanCss(baseItalic: boolean, flipped: boolean, fallback?: ItalicFallback | null): Record<string, string> {
+  const r = spanItalicStyle(baseItalic, flipped, fallback);
+  return { fontStyle: r.italic ? 'italic' : 'normal', ...(r.skew ? { transform: `skewX(${ITALIC_SYNTH_SKEW_DEG}deg)` } : {}) };
+}
+
+/**
+ * 1.18.0 — las caras CONTRARIAS que hacen falta para dibujar los tramos con la cursiva al revés: la familia y el peso de
+ * la cara de base, con la cursiva invertida. Cada una lleva `baseKey` (la clave de la cara de base, que es la que usa
+ * `italicFallback`) y `key` (la de la cara pedida, la de las métricas). Deduplicadas por `key`. PURO.
+ */
+export interface ItalicFaceNeed {
+  key: string; baseKey: string; role: string; family: string; weight: number; italic: boolean;
+  cssImport: string | null; fontUrl: string | null; slot: string;
+}
+export function italicFacesNeeded(groups: Array<{
+  slot: string; text: string; parts: Array<{ text: string; keyword: boolean }> | null | undefined; ranges: ReadonlyArray<[number, number]> | null | undefined;
+  base: { role: string; family: string; weight: number; italic: boolean; cssImport?: string | null; fontUrl?: string | null };
+  keyword?: { role: string; family: string; weight: number; italic: boolean; cssImport?: string | null; fontUrl?: string | null } | null;
+}>): ItalicFaceNeed[] {
+  const out: ItalicFaceNeed[] = [];
+  for (const g of groups) {
+    if (!g.ranges?.length) continue;
+    for (const p of withSpanFlags(g.text, g.parts, { italic: g.ranges })) {
+      if (!p.italic) continue;
+      const face = p.keyword && g.keyword ? g.keyword : g.base;
+      const want = { family: face.family, weight: face.weight, italic: !face.italic };
+      const key = fitFontKey(want);
+      if (out.some((x) => x.key === key)) continue;
+      out.push({ key, baseKey: fitFontKey(face), role: face.role, ...want, cssImport: face.cssImport ?? null, fontUrl: face.fontUrl ?? null,
+        slot: `${g.slot}${p.keyword && g.keyword ? ':emphasis' : ''}:${want.italic ? 'italic' : 'upright'}` });
+    }
+  }
+  return out;
+}
+
+/** 1.18.0 — las caras contrarias que pide el overlay (titular y bajada, con su resaltado). PURO. */
+export function overlayItalicFacesNeeded(style: { slots: Record<string, any> }): ItalicFaceNeed[] {
+  return italicFacesNeeded(SLOTS.flatMap((slot) => {
+    const s = style.slots?.[slot];
+    if (!s?.italicFlip?.length) return [];
+    const em = s.parts && s.emphasis ? s.emphasis : null;
+    return [{ slot, text: String(s.text ?? ''), parts: em ? s.parts : null, ranges: s.italicFlip, base: s, keyword: em }];
+  }));
+}
+
+/** 1.18.0 — anota en el estilo qué caras contrarias no se pudieron cargar. Mapa vacío ⇒ EL MISMO objeto. PURO. */
+export function withItalicFallback<S extends { italicFallback?: Record<string, ItalicFallback> }>(style: S, map: Record<string, ItalicFallback> | null | undefined): S {
+  if (!map || !Object.keys(map).length) return style;
+  return { ...style, italicFallback: { ...(style.italicFallback ?? {}), ...map } };
+}
+
+/**
+ * 1.18.0 — la hoja css2 de Google Fonts con UNA cara: la familia, su peso y el eje `ital` (1 cursiva, 0 recta). PURO.
+ * Es la forma del API de Google Fonts (`family=<Nombre+Con+Mas>:ital,wght@<ital>,<peso>`), no un dato de marca.
+ */
+export function googleFontsFaceCssUrl(family: string, weight: number, italic = true): string {
+  const name = String(family ?? '').trim().split(/\s+/).filter(Boolean).map((w) => encodeURIComponent(w)).join('+');
+  const w = Number.isFinite(Number(weight)) ? Math.round(Number(weight)) : 400;
+  return `https://fonts.googleapis.com/css2?family=${name}:ital,wght@${italic ? 1 : 0},${w}`;
+}
+
+/** 1.18.0 — ¿la hoja es del API css de Google Fonts? Sólo entonces se puede pedir la cara contraria por el eje. PURO. */
+export function isGoogleFontsCss(url: string | null | undefined): boolean {
+  return /^https:\/\/fonts\.googleapis\.com\/css2?\?/i.test(String(url ?? ''));
+}
+
+/**
+ * 1.18.0 — de una hoja ya bajada, la cara de la familia con la cursiva pedida, o null si la hoja no la trae. A diferencia
+ * de `pickFontFace`, NUNCA cae a la cara del otro estilo: esa caída en silencio es justo lo que aquí hay que detectar. PURO.
+ */
+export function pickExactStyleFace(
+  faces: Array<{ family: string; weight: number; italic: boolean; url: string }>, want: { family: string; weight: number; italic: boolean },
+): { family: string; weight: number; italic: boolean; url: string } | null {
+  // La familia de la hoja manda si coincide con la de la marca; si la hoja la nombra distinto, vale toda la hoja (como en
+  // `loadFont`, que tampoco filtra por nombre).
+  const fam = (x: string) => x.trim().toLowerCase();
+  const own = faces.filter((f) => fam(f.family) === fam(want.family));
+  const pool = (own.length ? own : faces).filter((f) => f.italic === want.italic);
+  if (!pool.length) return null;
+  const face = pickFontFace(pool, { weight: want.weight, italic: want.italic });
+  return face && face.italic === want.italic ? face : null;
+}
+
+/**
+ * 1.18.0 — qué hacer con una cara contraria que no se pudo cargar: cursiva ⇒ se simula ('skew') y se dice con
+ * `OVERLAY_ITALIC_SYNTHESIZED`; recta ⇒ no hay forma de enderezar una cursiva ('none') y se dice. PURO.
+ */
+export function italicFallbackFor(need: Pick<ItalicFaceNeed, 'family' | 'italic'>): { fallback: ItalicFallback; marker: string } {
+  return need.italic
+    ? { fallback: 'skew', marker: `OVERLAY_ITALIC_SYNTHESIZED: ${need.family} no tiene cursiva; se inclinó` }
+    : { fallback: 'none', marker: `OVERLAY_ITALIC_UPRIGHT_UNAVAILABLE: ${need.family} no tiene cara recta; el tramo queda en cursiva` };
+}
+
 /**
  * 1.16.0 — aplica lo elegido por bloque al estilo del overlay: color del texto de cada ranura, color del resaltado de
  * la bajada y la sombra propia de cada una. PURO. Sin nada pedido devuelve EL MISMO estilo (la escena de 1.15.0).
@@ -708,10 +892,13 @@ export function applyTextStyleBlocks<S extends ReturnType<typeof resolveOverlayS
   const s2 = applySubEmphasisRole(out, ts.sub.emphasis_role, palette, emphasisAllowedRoles(tokens)); out = s2.style;
   const h3 = applySlotShadow(out, 'headline', ts.headline); out = h3.style;
   const s3 = applySlotShadow(out, 'subheadline', ts.sub); out = s3.style;
+  // 1.18.0 — la cursiva por tramo de cada ranura.
+  const h4 = applySlotItalic(out, 'headline', ts.headline); out = h4.style;
+  const s4 = applySlotItalic(out, 'subheadline', ts.sub); out = s4.style;
   const sub = out.slots.subheadline;
   return { style: out, applied: {
-    headline: { role: h1.applied, shadow: h3.applied },
-    sub: { role: s1.applied, emphasis_role: s2.applied, shadow: s3.applied,
+    headline: { role: h1.applied, shadow: h3.applied, italic: h4.applied.italic },
+    sub: { role: s1.applied, emphasis_role: s2.applied, shadow: s3.applied, italic: s4.applied.italic,
       highlighted: sub?.parts && sub.emphasis ? sub.parts.filter((p) => p.keyword).map((p) => p.text) : [] },
   } };
 }
@@ -1081,6 +1268,10 @@ export function resolveOverlayStyle(args: {
   // 1.9.0 — la sombra que la marca declara, se aplique hoy o no (`when: 'on_request'` sólo existe aquí). La usan
   // `text_shadow: 'on'` y los tramos de `shadow_spans`.
   textEffectDeclared?: { color: string; blurPct: number; offsetPct: number };
+  // 1.18.0 — qué cara contraria NO se pudo cargar, por clave `fitFontKey` de la cara de base: 'skew' ⇒ la cursiva se
+  // simula inclinando la recta; 'none' ⇒ no hay recta de esa cursiva y el tramo queda como estaba. Lo pone SÓLO el
+  // handler (`withItalicFallback`), después de bajar las fuentes; ausente ⇒ toda cara contraria está cargada.
+  italicFallback?: Record<string, ItalicFallback>;
   slots: Record<Slot, null | {
     text: string; role: string; family: string; fallback: string | null; cssImport: string | null;
     fontUrl: string | null; weight: number; italic: boolean; transform: string;
@@ -1095,6 +1286,8 @@ export function resolveOverlayStyle(args: {
     // 1.16.0 — la sombra elegida para ESTA ranura ('on' | 'off') y su grosor (factor). Ausentes ⇒ la del bloque.
     shadowMode?: 'on' | 'off';
     shadowScale?: number;
+    // 1.18.0 — tramos [inicio, fin) cuya cursiva va al revés de la que tienen debajo. Ausente ⇒ como 1.17.0.
+    italicFlip?: Array<[number, number]>;
     // 1.5.0 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el límite de área
     // baja por ellos. Lo usa sólo `fitOverlayTextArea`; la escena no lo lee.
     fitSmaller?: number[];
@@ -1614,26 +1807,57 @@ export function overlayWidthFn(metrics: Record<string, FontAdvance | null | unde
   };
 }
 
-/** 1.13.0 — los átomos (palabras) de una ranura del overlay por tramo de línea impuesto, con su ancho (px) medido como
- *  `measureOverlayText`. Un tramo sin cortes impuestos es la ranura entera. PURO. */
-export function overlaySlotAtoms(
+/**
+ * 1.18.0 — los tramos de una ranura del overlay y, para cada uno, la medida de SU estilo final: la de la ranura o la del
+ * resaltado (keyword), y su versión con la cursiva al revés si el tramo la pide. La cursiva simulada se mide con la recta
+ * (inclinar no cambia el avance). Sin tramos de cursiva, los tramos y las medidas son los de 1.17.0. PURO (salvo
+ * `estimated`, que es suyo).
+ */
+export function overlaySlotMeasure(
   s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, width: number,
   metrics: Record<string, FontAdvance | null | undefined> | null | undefined, estimated: string[],
-): Array<{ range: [number, number]; atoms: Array<{ a: number; b: number; w: number; keyword: boolean }> }> {
+  fallback?: Record<string, ItalicFallback> | null,
+): { parts: Array<{ text: string; keyword: boolean; italic?: boolean }>; widthOf: (p: { keyword: boolean; italic?: boolean }) => (t: string) => number;
+  sizeOf: (p: { keyword: boolean }) => number } {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const wf = overlayWidthFn(metrics, estimated);
   const size = r2((s.sizePct / 100) * width);
   const base = wf(s, size);
   const em = s.parts && s.emphasis ? s.emphasis : null;
-  const emw = em ? wf(em, r2(size * em.sizeScale)) : base;
-  const allParts = s.parts && em ? s.parts : [{ text: s.text, keyword: false }];
+  const esize = em ? r2(size * em.sizeScale) : size;
+  const emw = em ? wf(em, esize) : base;
+  const plain = s.parts && em ? s.parts : [{ text: s.text, keyword: false }];
+  const parts = s.italicFlip?.length ? withSpanFlags(s.text, plain, { italic: s.italicFlip }) : plain;
+  const flipped = new Map<string, (t: string) => number>();
+  const widthOf = (p: { keyword: boolean; italic?: boolean }) => {
+    const kw = !!(p.keyword && em);
+    if (!p.italic) return kw ? emw : base;
+    const face = kw ? em! : s;
+    const r = spanItalicStyle(face.italic, true, fallback?.[fitFontKey(face)]);
+    if (r.italic === face.italic) return kw ? emw : base;
+    const k = `${kw ? 'e' : 'b'}|${r.italic}`;
+    if (!flipped.has(k)) flipped.set(k, wf({ ...face, italic: r.italic }, kw ? esize : size));
+    return flipped.get(k)!;
+  };
+  return { parts, widthOf, sizeOf: (p) => (p.keyword && em ? esize : size) };
+}
+
+/** 1.13.0 — los átomos (palabras) de una ranura del overlay por tramo de línea impuesto, con su ancho (px) medido como
+ *  `measureOverlayText`. Un tramo sin cortes impuestos es la ranura entera. PURO. 1.18.0 — cada tramo, con la medida de su
+ *  estilo final (`overlaySlotMeasure`). */
+export function overlaySlotAtoms(
+  s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, width: number,
+  metrics: Record<string, FontAdvance | null | undefined> | null | undefined, estimated: string[],
+  fallback?: Record<string, ItalicFallback> | null,
+): Array<{ range: [number, number]; atoms: Array<{ a: number; b: number; w: number; keyword: boolean }> }> {
+  const sm = overlaySlotMeasure(s, width, metrics, estimated, fallback);
   const ranges: Array<[number, number]> = s.lines ? s.lines : [[0, s.text.length]];
   return ranges.map(([a, b]) => {
-    const atoms = headlineAtoms(partsInRange(allParts, a, b));
+    const atoms = headlineAtoms(partsInRange(sm.parts, a, b));
     const words = [...s.text.slice(a, b).matchAll(/\S+/g)];
     return { range: [a, b] as [number, number], atoms: atoms.map((atom, k) => ({
       a: a + (words[k]?.index ?? 0), b: a + (words[k]?.index ?? 0) + (words[k]?.[0].length ?? 0),
-      w: atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0),
+      w: atom.reduce((acc, p) => acc + sm.widthOf(p)(p.text), 0),
       keyword: atom.some((p) => p.keyword),
     })) };
   });
@@ -1647,7 +1871,7 @@ export function overlayWordOverflow(style: ReturnType<typeof resolveOverlayStyle
   for (const slot of SLOTS) {
     const s = style.slots[slot];
     if (!s) continue;
-    for (const g of overlaySlotAtoms(s, width, metrics, [])) if (g.atoms.some((x) => x.w > maxW + 0.5)) return true;
+    for (const g of overlaySlotAtoms(s, width, metrics, [], style.italicFallback)) if (g.atoms.some((x) => x.w > maxW + 0.5)) return true;
   }
   return false;
 }
@@ -1700,7 +1924,7 @@ export function overlayLoneWords(style: ReturnType<typeof resolveOverlayStyle>, 
     const s = style.slots[slot];
     if (!s) continue;
     const estimated: string[] = [];
-    const groups = overlaySlotAtoms(s, width, metrics, estimated);
+    const groups = overlaySlotAtoms(s, width, metrics, estimated, style.italicFallback);
     if (estimated.length) continue;
     groups.forEach((g, i) => {
       const next = groups[i + 1];
@@ -1728,7 +1952,7 @@ export function avoidOrphanLines(style: ReturnType<typeof resolveOverlayStyle>, 
     const s = style.slots[slot];
     if (!s) continue;
     const estimated: string[] = [];
-    const groups = overlaySlotAtoms(s, width, metrics, estimated);
+    const groups = overlaySlotAtoms(s, width, metrics, estimated, style.italicFallback);
     if (estimated.length) continue;
     let changed = false;
     const ranges: Array<[number, number]> = [];
@@ -1765,24 +1989,20 @@ export function measureOverlayText(style: ReturnType<typeof resolveOverlayStyle>
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const box = overlayTextBox(style, width, height);
   const estimated: string[] = [];
-  const widthFn = overlayWidthFn(metrics, estimated);
   let maxLine = 0;
   let total = 0;
   const slotBlock = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>) => {
-    const size = r2((s.sizePct / 100) * width);
-    const base = widthFn(s, size);
-    const em = s.parts && s.emphasis ? s.emphasis : null;
-    const esize = em ? r2(size * em.sizeScale) : size;
-    const emw = em ? widthFn(em, esize) : base;
-    const allParts = s.parts && em ? s.parts : [{ text: s.text, keyword: false }];
+    // 1.18.0 — cada tramo con la medida de su estilo final (resaltado, cursiva al revés); sin ellos, la de 1.17.0.
+    const sm = overlaySlotMeasure(s, width, metrics, estimated, style.italicFallback);
+    const allParts = sm.parts;
     // 1.7.0 — con cortes impuestos, cada línea empieza fila: se mide línea por línea.
     const groups = s.lines ? s.lines.map(([a, b]) => headlineAtoms(partsInRange(allParts, a, b))) : [headlineAtoms(allParts)];
     let h = 0;
     for (const atoms of groups) {
       let cur = 0, lineMax = 0;
       for (const atom of atoms) {
-        const aw = atom.reduce((acc, p) => acc + (p.keyword && em ? emw(p.text) : base(p.text)), 0);
-        const ah = Math.max(...atom.map((p) => (p.keyword && em ? esize : size)));
+        const aw = atom.reduce((acc, p) => acc + sm.widthOf(p)(p.text), 0);
+        const ah = Math.max(...atom.map((p) => sm.sizeOf(p)));
         if (cur > 0 && cur + aw > box.maxWidth + 0.01) { h += lineMax; maxLine = Math.max(maxLine, cur); cur = aw; lineMax = ah; }
         else { cur += aw; lineMax = Math.max(lineMax, ah); }
       }
@@ -1926,7 +2146,7 @@ export function fitOverlayTextHeight(args: {
  * estilo, tamaño (escala del titular), tracking, transformación y color. Los demás heredan del padre.
  */
 function emphasisAtomsNode(
-  parts: Array<{ text: string; keyword: boolean; flip?: boolean }>,
+  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>,
   base: { sizePct: number },
   em: (EmphasisType & { color: string }) | null | undefined,
   width: number,
@@ -1934,6 +2154,8 @@ function emphasisAtomsNode(
   textShadow?: string,
   // 1.9.0 — con tramos de sombra al revés, cada tramo lleva la suya explícita (la ranura no la hereda).
   shadowOf?: (p: { flip?: boolean }) => string | undefined,
+  // 1.18.0 — con tramos de cursiva al revés, cada tramo lleva su `fontStyle` explícito (y su inclinación, si se simula).
+  italicOf?: (p: { keyword: boolean; italic?: boolean }) => Record<string, string>,
 ): Array<Record<string, any>> {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const size = em ? r2((base.sizePct * em.sizeScale / 100) * width) : 0;
@@ -1942,8 +2164,9 @@ function emphasisAtomsNode(
     fontSize: size, letterSpacing: r2(em.letterSpacingEm * size), textTransform: em.transform, color: em.color,
     ...(textShadow && !shadowOf ? { textShadow } : {}),
   } : {};
-  const styleOf = (p: { keyword: boolean; flip?: boolean }) => {
-    const st = p.keyword && em ? emStyle : {};
+  const styleOf = (p: { keyword: boolean; flip?: boolean; italic?: boolean }) => {
+    const st0 = p.keyword && em ? emStyle : {};
+    const st = italicOf ? { ...st0, ...italicOf(p) } : st0;
     if (!shadowOf) return st;
     const sh = shadowOf(p);
     return sh ? { ...st, textShadow: sh } : st;
@@ -1963,6 +2186,13 @@ export function shadowForSpan(flip: boolean | undefined, baseShadow: string | un
   return baseShadow ? undefined : declaredShadow;
 }
 
+/** 1.9.0 / 1.18.0 — una ranura dibujada por tramos marcados: sus trozos y, si los hay, la sombra y la cursiva de cada uno. */
+type SpanFlagsNode = {
+  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>;
+  shadowOf?: (p: { flip?: boolean }) => string | undefined;
+  italicOf?: (p: { keyword: boolean; italic?: boolean }) => Record<string, string>;
+};
+
 /**
  * 1.7.0 — el titular con cortes impuestos, como filas de satori. PURO. Cada línea es una fila que se envuelve
  * sola si no cabe; con énfasis, la fila lleva los átomos de 1.4.0 de ESA línea.
@@ -1971,7 +2201,8 @@ function headlineRowsNode(
   s: { text: string; lines?: Array<[number, number]>; parts?: Array<{ text: string; keyword: boolean }> | null; emphasis?: any; sizePct: number },
   width: number, textShadow: string | undefined, align: string,
   // 1.9.0 — tramos de sombra al revés: el titular entero va por átomos, cada uno con su sombra.
-  flip?: { parts: Array<{ text: string; keyword: boolean; flip?: boolean }>; shadowOf: (p: { flip?: boolean }) => string | undefined },
+  // 1.18.0 — y lo mismo con tramos de cursiva al revés: cada átomo con su estilo.
+  flip?: SpanFlagsNode,
 ): Array<Record<string, any>> {
   const justify = align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start';
   return (s.lines ?? []).map(([a, b]) => ({
@@ -1979,7 +2210,7 @@ function headlineRowsNode(
     props: {
       style: { display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: justify },
       children: flip
-        ? emphasisAtomsNode(partsInRange(flip.parts, a, b), s, s.emphasis, width, textShadow, flip.shadowOf)
+        ? emphasisAtomsNode(partsInRange(flip.parts, a, b), s, s.emphasis, width, textShadow, flip.shadowOf, flip.italicOf)
         : s.parts && s.emphasis
         ? emphasisAtomsNode(partsInRange(s.parts, a, b), s, s.emphasis, width, textShadow)
         : s.text.slice(a, b),
@@ -2100,11 +2331,22 @@ export function buildOverlayScene(args: {
   // 1.9.0 — tramos con la sombra al revés: sólo con sombra declarada (sin ella `applyTextShadowRequest` no los marca).
   const declaredShadowOf = (s: { shadowScale?: number }) =>
     style.textEffectDeclared ? overlayTextShadow(scaleTextEffect(style.textEffectDeclared, s.shadowScale), width) : null;
-  const flipOf = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, shadow: string | undefined) => {
+  // 1.18.0 — y tramos con la cursiva al revés: la ranura va por átomos y cada tramo lleva su estilo explícito. Sin ninguno
+  // de los dos, undefined y la ranura es la de 1.17.0.
+  const flipOf = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, shadow: string | undefined): SpanFlagsNode | undefined => {
     const declaredShadow = declaredShadowOf(s);
-    return s.shadowFlip?.length && declaredShadow
-      ? { parts: withShadowFlip(s.text, s.parts, s.shadowFlip), shadowOf: (p: { flip?: boolean }) => shadowForSpan(p.flip, shadow, declaredShadow) }
-      : undefined;
+    const shadowFlip = s.shadowFlip?.length && declaredShadow ? s.shadowFlip : null;
+    const italicFlip = s.italicFlip?.length ? s.italicFlip : null;
+    if (!shadowFlip && !italicFlip) return undefined;
+    const em = s.parts && s.emphasis ? s.emphasis : null;
+    return {
+      parts: withSpanFlags(s.text, s.parts, { ...(shadowFlip ? { flip: shadowFlip } : {}), ...(italicFlip ? { italic: italicFlip } : {}) }),
+      ...(shadowFlip ? { shadowOf: (p: { flip?: boolean }) => shadowForSpan(p.flip, shadow, declaredShadow!) } : {}),
+      ...(italicFlip ? { italicOf: (p: { keyword: boolean; italic?: boolean }) => {
+        const face = p.keyword && em ? em : s;
+        return italicSpanCss(face.italic, !!p.italic, style.italicFallback?.[fitFontKey(face)]);
+      } } : {}),
+    };
   };
   const slotNode = (s: NonNullable<ReturnType<typeof resolveOverlayStyle>['slots']['headline']>, marginTop: number) => {
     const shadow = shadowOfSlot(s);
@@ -2124,7 +2366,7 @@ export function buildOverlayScene(args: {
         letterSpacing: px(s.letterSpacingEm * s.sizePct, width),
         textTransform: s.transform,
         textAlign: style.layout.align,
-        ...(shadow && !flip ? { textShadow: shadow } : {}),
+        ...(shadow && !flip?.shadowOf ? { textShadow: shadow } : {}),
         // 1.4.0 — con tramos, la ranura es una fila que envuelve átomos (palabras que no se cortan),
         // alineados por la línea de base: un tramo más grande no descoloca a sus vecinos.
         // 1.7.0 — con cortes impuestos, la ranura es una COLUMNA de filas: una por línea.
@@ -2137,7 +2379,7 @@ export function buildOverlayScene(args: {
         } : {}),
       },
       children: s.lines ? headlineRowsNode(s, width, shadow, style.layout.align, flip)
-        : flip ? emphasisAtomsNode(flip.parts, s, s.emphasis, width, shadow, flip.shadowOf)
+        : flip ? emphasisAtomsNode(flip.parts, s, s.emphasis, width, shadow, flip.shadowOf, flip.italicOf)
         : s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
     },
   };
@@ -2588,6 +2830,12 @@ export function resolveCarouselChrome(args: {
   subShadow?: CarouselBlockShadow;
   subParts?: Array<{ text: string; keyword: boolean }>;
   subKeywordColor?: string;
+  // 1.18.0 — tramos [inicio, fin) del titular y de la bajada con la cursiva al revés, y qué caras contrarias no se
+  // pudieron cargar (clave `fitFontKey` de la cara de base). Los pone SÓLO `applyCarouselTextStyle` y el handler;
+  // ausentes ⇒ la lámina de 1.17.0.
+  headlineItalic?: Array<[number, number]>;
+  subItalic?: Array<[number, number]>;
+  italicFallback?: Record<string, ItalicFallback>;
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
@@ -2897,6 +3145,20 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
   const ss = chrome.subheadline ? shadowOf(sb, chrome.subheadline, [], 'la bajada') : undefined;
   if (hs) { out = { ...out, headlineShadow: hs }; applied.headline.shadow = hs; }
   if (ss) { out = { ...out, subShadow: ss }; applied.sub.shadow = ss; }
+
+  // 1.18.0 — la cursiva por tramo: cada tramo invierte la cursiva de lo que tiene debajo, como en el overlay.
+  const italicOf = (spans: readonly string[] | undefined, text: string | null, code: 'HEADLINE' | 'SUBHEADLINE', label: string) => {
+    if (!spans?.length) return { ranges: [] as Array<[number, number]>, found: [] as string[] };
+    const r = literalRanges(text ?? '', spans);
+    if (r.missing.length) warnings.push(`CAROUSEL_ITALIC_SPAN_NOT_IN_${code}: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${label}; ese tramo no cambia de estilo`);
+    return { ranges: r.ranges, found: r.found };
+  };
+  const hi = italicOf(hb.italic_spans, chrome.headline.length ? headText : null, 'HEADLINE', 'el titular');
+  const si = italicOf(sb.italic_spans, chrome.subheadline, 'SUBHEADLINE', 'la bajada');
+  if (hi.ranges.length) out = { ...out, headlineItalic: hi.ranges };
+  if (si.ranges.length) out = { ...out, subItalic: si.ranges };
+  applied.headline.italic = hi.found;
+  applied.sub.italic = si.found;
   return { chrome: out, warnings, applied };
 }
 
@@ -3228,7 +3490,12 @@ export function buildCarouselScene(args: {
       type: 'div',
       props: {
         style: { display: 'flex', flexWrap: 'wrap', width: blockW, ...hf, color: c.headline, ...headFx.fx, ...(HE ? { alignItems: 'baseline' } : {}) },
-        children: headlineAtoms(headFx.flip ? withShadowFlip(chrome.headline.map((p) => p.text).join(''), chrome.headline, chrome.headlineShadow!.flip!) : chrome.headline).flatMap((atom, k) => [
+        // 1.18.0 — los tramos de cursiva al revés se marcan junto con los de sombra (`withSpanFlags`); sin ninguno, el
+        // titular de 1.17.0.
+        children: headlineAtoms(headFx.flip || chrome.headlineItalic?.length
+          ? withSpanFlags(chrome.headline.map((p) => p.text).join(''), chrome.headline, {
+            ...(headFx.flip ? { flip: chrome.headlineShadow!.flip! } : {}), ...(chrome.headlineItalic?.length ? { italic: chrome.headlineItalic } : {}) })
+          : chrome.headline).flatMap((atom, k) => [
           // 1.13.0 — un corte a la fuerza es un hueco del ancho del bloque y alto cero: la fila se parte justo ahí.
           ...(chrome.headlineBreaks?.includes(k) ? [{ type: 'div', props: { style: { display: 'flex', width: blockW, height: 0 } } }] : []),
           {
@@ -3242,6 +3509,11 @@ export function buildCarouselScene(args: {
                   textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline, ...headFx.spanFx((p as { flip?: boolean }).flip),
                   // 1.4.0 — el tramo resaltado con la tipografía de énfasis de la marca.
                   ...(HE && p.keyword ? { ...font(HE, r2(hs * HE.sizeScale)) } : {}),
+                  // 1.18.0 — con tramos de cursiva al revés, cada tramo lleva su estilo explícito.
+                  ...(chrome.headlineItalic?.length ? (() => {
+                    const face = HE && p.keyword ? HE : T.headline;
+                    return italicSpanCss(face.italic, !!(p as { italic?: boolean }).italic, chrome.italicFallback?.[fitFontKey(face)]);
+                  })() : {}),
                 },
                 children: p.text,
               },
@@ -3253,10 +3525,14 @@ export function buildCarouselScene(args: {
   }
   // 1.16.0 — con resaltado o tramos de sombra, la bajada es una fila de átomos (palabras que no se cortan); sin ellos,
   // EXACTAMENTE el texto de 1.15.0.
+  // 1.18.0 — lo mismo con tramos de cursiva al revés: cada tramo con su estilo explícito.
+  const subItalic = chrome.subItalic?.length ? chrome.subItalic : null;
   const subNode = (marginTop: number) => {
-    if (!chrome.subParts && !subFx.flip) return text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...subFx.fx });
+    if (!chrome.subParts && !subFx.flip && !subItalic) return text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...subFx.fx });
     const base = chrome.subParts ?? [{ text: chrome.subheadline!, keyword: false }];
-    const parts = subFx.flip ? withShadowFlip(chrome.subheadline!, base, chrome.subShadow!.flip!) : base;
+    const parts = subItalic
+      ? withSpanFlags(chrome.subheadline!, base, { ...(subFx.flip ? { flip: chrome.subShadow!.flip! } : {}), italic: subItalic })
+      : subFx.flip ? withShadowFlip(chrome.subheadline!, base, chrome.subShadow!.flip!) : base;
     return {
       type: 'div',
       props: {
@@ -3267,7 +3543,8 @@ export function buildCarouselScene(args: {
             style: { display: 'flex', flexDirection: 'row', alignItems: 'baseline' },
             children: atom.map((p) => ({ type: 'span', props: { style: {
               color: p.keyword && chrome.subKeywordColor ? chrome.subKeywordColor : c.subheadline,
-              ...subFx.spanFx((p as { flip?: boolean }).flip) }, children: p.text } })),
+              ...subFx.spanFx((p as { flip?: boolean }).flip),
+              ...(subItalic ? italicSpanCss(T.body.italic, !!(p as { italic?: boolean }).italic, chrome.italicFallback?.[fitFontKey(T.body)]) : {}) }, children: p.text } })),
           },
         })),
       },
@@ -3591,6 +3868,52 @@ export function carouselWidthFn(metrics: FitMetrics | null | undefined, estimate
   };
 }
 
+/** 1.18.0 — la cara con la que se dibuja (y se mide) un tramo de la lámina con la cursiva al revés: la de base con la
+ *  cursiva invertida, o la de base si la contraria no existe (la simulada se mide con la recta). PURO. */
+export function carouselFlippedFace<K extends { family: string; weight: number; italic: boolean }>(face: K, fallback?: Record<string, ItalicFallback> | null): K {
+  const r = spanItalicStyle(face.italic, true, fallback?.[fitFontKey(face)]);
+  return r.italic === face.italic ? face : { ...face, italic: r.italic };
+}
+
+/** 1.18.0 — el titular de la lámina con sus tramos de cursiva marcados (`italic`); sin ellos, EL MISMO arreglo. PURO. */
+export function carouselHeadlineParts(chrome: { headline: Array<{ text: string; keyword: boolean }>; headlineItalic?: Array<[number, number]> }) {
+  if (!chrome.headlineItalic?.length) return chrome.headline as Array<{ text: string; keyword: boolean; italic?: boolean }>;
+  return withSpanFlags(chrome.headline.map((p) => p.text).join(''), chrome.headline, { italic: chrome.headlineItalic });
+}
+
+/** 1.18.0 — las palabras de un texto por tramos, con el ancho de cada una medido tramo a tramo (sin el espacio duro que
+ *  `headlineAtoms` pega al final). PURO. */
+export function wordWidthsOfParts<P extends { text: string; keyword: boolean }>(parts: P[], widthOf: (p: P) => (t: string) => number): number[] {
+  return headlineAtoms(parts).map((atom) => atom.reduce((acc, p, k) =>
+    acc + widthOf(p)(k === atom.length - 1 ? p.text.replace(/\u00a0$/, '') : p.text), 0));
+}
+
+/** 1.18.0 — el corte voraz por palabras de anchos dados, con el MISMO criterio que el de la bajada de la lámina (palabra +
+ *  espacio + palabra). Devuelve líneas, ancho de la más larga y si alguna palabra no cabe. PURO. */
+export function wordLinesW(widths: number[], space: number, maxW: number): { n: number; w: number; over: boolean } {
+  if (!widths.length) return { n: 0, w: 0, over: false };
+  let n = 1, cur = -1, wMax = 0, over = false;
+  for (const ww of widths) {
+    if (ww > maxW + 0.5) over = true;
+    if (cur < 0) cur = ww;
+    else if (cur + space + ww <= maxW + 0.01) cur += space + ww;
+    else { n++; wMax = Math.max(wMax, cur); cur = ww; }
+  }
+  return { n, w: Math.min(maxW, Math.max(wMax, cur)), over };
+}
+
+/** 1.18.0 — las caras contrarias que pide la lámina (titular, su resaltado y la bajada). PURO. */
+export function carouselItalicFacesNeeded(chrome: CarouselChrome): ItalicFaceNeed[] {
+  const T = chrome.type;
+  const HE = chrome.headlineEmphasis;
+  return italicFacesNeeded([
+    ...(chrome.headlineItalic?.length ? [{ slot: 'carousel:headline', text: chrome.headline.map((p) => p.text).join(''), parts: chrome.headline,
+      ranges: chrome.headlineItalic, base: T.headline, keyword: HE ?? null }] : []),
+    ...(chrome.subItalic?.length && chrome.subheadline ? [{ slot: 'carousel:sub', text: chrome.subheadline, parts: null,
+      ranges: chrome.subItalic, base: T.body, keyword: null }] : []),
+  ]);
+}
+
 /**
  * 1.13.0 — LA PALABRA SOLA, EN LA LÁMINA. PURO. El titular de la lámina se envuelve solo (átomos en una fila que se
  * parte); si su corte voraz —medido como `measureCarouselLayout`, al ancho de su columna— deja UNA palabra en la última
@@ -3612,8 +3935,16 @@ export function carouselAvoidOrphan<F extends { chrome: CarouselChrome; warnings
   const HE = chrome.headlineEmphasis;
   const es = HE ? r2(hs * HE.sizeScale) : hs;
   const eOf = HE ? wf(HE, es, r2(HE.letterSpacingEm * es), HE.transform) : wOf;
-  const atoms = headlineAtoms(chrome.headline);
-  const widths = atoms.map((atom) => Math.ceil(atom.reduce((acc, p) => acc + (HE && p.keyword ? eOf(p.text) : wOf(p.text)), 0)));
+  // 1.18.0 — un tramo con la cursiva al revés se mide con la cara que lo dibuja.
+  const atoms = headlineAtoms(carouselHeadlineParts(chrome));
+  const pw = (p: { keyword: boolean; italic?: boolean }) => {
+    const em = !!(HE && p.keyword);
+    if (!p.italic) return em ? eOf : wOf;
+    const face = em ? HE! : T.headline;
+    const f = carouselFlippedFace(face, chrome.italicFallback);
+    return f === face ? (em ? eOf : wOf) : wf(f, em ? es : hs, r2(face.letterSpacingEm * (em ? es : hs)), face.transform);
+  };
+  const widths = atoms.map((atom) => Math.ceil(atom.reduce((acc, p) => acc + pw(p)(p.text), 0)));
   if (estimated.length) return fit;
   const r = orphanFreeLines(widths, blockW, true);
   if (r.moved == null) return fit;
@@ -3674,6 +4005,18 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
   const textH = (k: CarouselType, size: number, s: string, maxW: number, letterSpacing = r2(k.letterSpacingEm * size), transform = k.transform, lh = k.lineHeight) =>
     textHW(k, size, s, maxW, letterSpacing, transform, lh).h;
   const seen = (w: number, over = false) => { midW = Math.max(midW, w); if (over) wide = true; };
+  // 1.18.0 — la bajada con tramos de cursiva al revés se mide palabra a palabra con la cara de cada tramo; sin ellos,
+  // EXACTAMENTE `textHW` de siempre.
+  const subHW = (maxW: number) => {
+    if (!chrome.subItalic?.length) return textHW(T.body, B, chrome.subheadline!, maxW);
+    const ls = r2(T.body.letterSpacingEm * B);
+    const wb = widthFn(T.body, B, ls, T.body.transform);
+    const flipped = carouselFlippedFace(T.body, chrome.italicFallback);
+    const wi = flipped === T.body ? wb : widthFn(flipped, B, ls, T.body.transform);
+    const parts = withSpanFlags(chrome.subheadline!, [{ text: chrome.subheadline!, keyword: false }], { italic: chrome.subItalic });
+    const r = wordLinesW(wordWidthsOfParts(parts, (p) => (p.italic ? wi : wb)), wb(' '), maxW);
+    return { h: r.n * B * T.body.lineHeight, w: r.w, over: r.over };
+  };
 
   // ── cabecera ──
   const counterW = widthFn(T.label, L, r2(T.label.letterSpacingEm * L), 'none')(`${slide.index} / ${slide.total}`);
@@ -3687,11 +4030,18 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
     const hs = px(T.headline.sizePct);
     const wOf = widthFn(T.headline, hs, r2(T.headline.letterSpacingEm * hs), T.headline.transform);
     const HE = chrome.headlineEmphasis;
+    // 1.18.0 — los tramos con la cursiva al revés, con la medida de la cara que los dibuja. Sin ellos, la de 1.17.0.
+    const hParts = carouselHeadlineParts(chrome);
+    const flipW = (face: CarouselType, size: number, w: (t: string) => number) => {
+      const f = carouselFlippedFace(face, chrome.italicFallback);
+      return f === face ? w : widthFn(f, size, r2(face.letterSpacingEm * size), face.transform);
+    };
     if (!HE) {
       let n = 1;
       let cur = 0;
-      for (const atom of headlineAtoms(chrome.headline)) {
-        const aw = Math.ceil(atom.reduce((s, p) => s + wOf(p.text), 0));
+      const wIt = hParts !== chrome.headline ? flipW(T.headline, hs, wOf) : wOf;
+      for (const atom of headlineAtoms(hParts)) {
+        const aw = Math.ceil(atom.reduce((s, p) => s + (p.italic ? wIt : wOf)(p.text), 0));
         if (aw > blockW + 0.5) wide = true;
         if (cur > 0 && cur + aw > blockW + 0.01) { n++; seen(cur); cur = aw; } else cur += aw;
       }
@@ -3702,11 +4052,13 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
       // como su letra más grande.
       const es = r2(hs * HE.sizeScale);
       const eOf = widthFn(HE, es, r2(HE.letterSpacingEm * es), HE.transform);
+      const wIt = hParts !== chrome.headline ? flipW(T.headline, hs, wOf) : wOf;
+      const eIt = hParts !== chrome.headline ? flipW(HE, es, eOf) : eOf;
       let cur = 0;
       let lineMax = 0;
       let total = 0;
-      for (const atom of headlineAtoms(chrome.headline)) {
-        const aw = Math.ceil(atom.reduce((s, p) => s + (p.keyword ? eOf(p.text) : wOf(p.text)), 0));
+      for (const atom of headlineAtoms(hParts)) {
+        const aw = Math.ceil(atom.reduce((s, p) => s + (p.keyword ? (p.italic ? eIt : eOf) : (p.italic ? wIt : wOf))(p.text), 0));
         const ah = Math.max(...atom.map((p) => (p.keyword ? es : hs)));
         if (aw > blockW + 0.5) wide = true;
         if (cur > 0 && cur + aw > blockW + 0.01) { total += lineMax; seen(cur); cur = aw; lineMax = ah; }
@@ -3724,14 +4076,14 @@ export function measureCarouselLayout(chrome: CarouselChrome, metrics: FitMetric
     seen(fv.w, fv.over);
     any = true;
     if (slide.figure.bar) { mid += r2(L * 1.26) + Math.max(2, r2(L * 0.53)); seen(blockW); }
-    if (chrome.subheadline) { const sb = textHW(T.body, B, chrome.subheadline, blockW); mid += r2(B * 0.69) + sb.h; seen(sb.w, sb.over); }
+    if (chrome.subheadline) { const sb = subHW(blockW); mid += r2(B * 0.69) + sb.h; seen(sb.w, sb.over); }
     const dot = r2(L * 0.63);
     const ls = r2(L * 1.1);
     const src = textHW(T.label, ls, slide.figure.source, blockW - dot - r2(L * 0.74), r2(T.label.letterSpacingEm * 0.4 * ls), 'none');
     mid += r2(B * 0.69) + Math.max(dot, src.h);
     seen(dot + r2(L * 0.74) + src.w, src.over);
   } else if (chrome.subheadline) {
-    const sb = textHW(T.body, B, chrome.subheadline, blockW);
+    const sb = subHW(blockW);
     mid += (any ? r2(B * 0.69) : 0) + sb.h;
     seen(sb.w, sb.over);
     any = true;
@@ -3891,9 +4243,17 @@ export function carouselTextArea(chrome: CarouselChrome, metrics: FitMetrics | n
     const es = HE ? r2(hs * HE.sizeScale) : hs;
     const wOf = widthFn(T.headline, hs);
     const eOf = HE ? widthFn(HE, es) : wOf;
+    // 1.18.0 — los tramos con la cursiva al revés, con la medida de la cara que los dibuja.
+    const hParts = carouselHeadlineParts(chrome);
+    const flipW = (face: CarouselType, size: number, w: (t: string) => number) => {
+      const f = carouselFlippedFace(face, chrome.italicFallback);
+      return f === face ? w : widthFn(f, size);
+    };
+    const wIt = hParts !== chrome.headline ? flipW(T.headline, hs, wOf) : wOf;
+    const eIt = HE && hParts !== chrome.headline ? flipW(HE, es, eOf) : eOf;
     let cur = 0, lineMax = 0, h = 0;
-    for (const atom of headlineAtoms(chrome.headline)) {
-      const aw = Math.ceil(atom.reduce((acc, p) => acc + (p.keyword && HE ? eOf(p.text) : wOf(p.text)), 0));
+    for (const atom of headlineAtoms(hParts)) {
+      const aw = Math.ceil(atom.reduce((acc, p) => acc + (p.keyword && HE ? (p.italic ? eIt : eOf) : (p.italic ? wIt : wOf))(p.text), 0));
       const ah = Math.max(...atom.map((p) => (p.keyword && HE ? es : hs)));
       if (cur > 0 && cur + aw > inner + 0.01) { h += lineMax; maxW = Math.max(maxW, cur); cur = aw; lineMax = ah; }
       else { cur += aw; lineMax = Math.max(lineMax, ah); }
@@ -3904,9 +4264,14 @@ export function carouselTextArea(chrome: CarouselChrome, metrics: FitMetrics | n
   if (chrome.subheadline) {
     const B = r2((T.body.sizePct / 100) * W);
     const bOf = widthFn(T.body, B);
-    let cur = 0, n = chrome.subheadline.split(/\s+/).filter(Boolean).length ? 1 : 0;
-    for (const word of chrome.subheadline.split(/\s+/).filter(Boolean)) {
-      const ww = bOf(word);
+    // 1.18.0 — con tramos de cursiva al revés, cada palabra se mide tramo a tramo con su cara; sin ellos, como siempre.
+    const bFlip = chrome.subItalic?.length ? carouselFlippedFace(T.body, chrome.italicFallback) : T.body;
+    const bIt = bFlip === T.body ? bOf : widthFn(bFlip, B);
+    const words = chrome.subItalic?.length
+      ? wordWidthsOfParts(withSpanFlags(chrome.subheadline, [{ text: chrome.subheadline, keyword: false }], { italic: chrome.subItalic }), (p) => (p.italic ? bIt : bOf))
+      : chrome.subheadline.split(/\s+/).filter(Boolean).map((word) => bOf(word));
+    let cur = 0, n = words.length ? 1 : 0;
+    for (const ww of words) {
       if (cur > 0 && cur + bOf(' ') + ww > inner + 0.01) { n++; maxW = Math.max(maxW, cur); cur = ww; } else cur = cur > 0 ? cur + bOf(' ') + ww : ww;
     }
     maxW = Math.max(maxW, Math.min(cur, inner));
@@ -5147,6 +5512,53 @@ async function loadFont(slot: Slot | string, s: {
 }
 
 /**
+ * 1.18.0 — CURSIVA POR TRAMO: baja las caras CONTRARIAS que piden los tramos con la cursiva al revés. Para cada una:
+ *   · si la cara de base viene de un `font_url` fijado por la marca, no hay de dónde sacar la contraria;
+ *   · si viene de `css_import`, primero la misma hoja (`pickExactStyleFace`, que no cae al otro estilo en silencio);
+ *   · si la hoja es de Google Fonts y no la trae, se pide la cara por el eje `ital` (`googleFontsFaceCssUrl`), con el
+ *     mismo `fetchBytes` y el mismo User-Agent (TTF).
+ * Lo que no se consigue NO hace fallar la composición: la cursiva se simula ('skew') o el tramo queda como está ('none'),
+ * y se dice (`italicFallbackFor`). Las métricas de cada cara bajada se devuelven con su clave `fitFontKey`.
+ */
+async function loadOppositeFaces(needs: ItalicFaceNeed[], loadedKeys: ReadonlySet<string>): Promise<{
+  fonts: Array<{ slot: string; name: string; data: Uint8Array; weight: number; style: 'normal' | 'italic'; source: string }>;
+  metrics: Record<string, FontAdvance | null>; fallback: Record<string, ItalicFallback>; markers: string[];
+}> {
+  const out = { fonts: [] as Array<{ slot: string; name: string; data: Uint8Array; weight: number; style: 'normal' | 'italic'; source: string }>,
+    metrics: {} as Record<string, FontAdvance | null>, fallback: {} as Record<string, ItalicFallback>, markers: [] as string[] };
+  const sheets = new Map<string, Array<{ family: string; weight: number; italic: boolean; url: string }> | null>();
+  const facesOf = async (url: string) => {
+    if (!sheets.has(url)) {
+      try { sheets.set(url, parseFontFaces(new TextDecoder().decode(await fetchBytes(url, 'COMPOSITOR_FONT_CSS_FAILED')))); }
+      catch { sheets.set(url, null); }
+    }
+    return sheets.get(url) ?? [];
+  };
+  for (const need of needs) {
+    if (loadedKeys.has(need.key)) continue;
+    let face: { family: string; weight: number; italic: boolean; url: string } | null = null;
+    if (!need.fontUrl && need.cssImport && /^https?:\/\//i.test(need.cssImport)) {
+      face = pickExactStyleFace(await facesOf(need.cssImport), need);
+      if (!face && isGoogleFontsCss(need.cssImport)) {
+        face = pickExactStyleFace(await facesOf(googleFontsFaceCssUrl(need.family, need.weight, need.italic)), need);
+      }
+    }
+    if (face) {
+      try {
+        const data = neutralizeKerning(await fetchBytes(face.url, 'COMPOSITOR_FONT_FETCH_FAILED')).bytes;
+        out.fonts.push({ slot: need.slot, name: need.family, data, weight: face.weight, style: face.italic ? 'italic' : 'normal', source: face.url });
+        out.metrics[need.key] = fontAdvanceMetrics(data);
+        continue;
+      } catch { /* sin bytes, como sin cara: se simula y se dice */ }
+    }
+    const fb = italicFallbackFor(need);
+    out.fallback[need.baseKey] = fb.fallback;
+    if (!out.markers.includes(fb.marker)) out.markers.push(fb.marker);
+  }
+  return out;
+}
+
+/**
  * F3 — el logotipo de firma de la marca (`public.brand_logo`, role 'signature', activo). TOLERANTE por
  * contrato: sin fila, sin tabla, sin permiso o con un `src` que no baja ⇒ null y un aviso; nunca un
  * error. Una lámina sin logotipo es una lámina legible; una lámina que no sale no lo es.
@@ -5867,8 +6279,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // 1.3.3 — el ajuste vertical se mide con las MISMAS fuentes que recibe satori (ya sin kerning).
       const metrics: Record<string, FontAdvance | null> = {};
       chrome.fonts.forEach((f, k) => { metrics[fitFontKey(f)] = fontAdvanceMetrics(fonts[k].data); });
+      // 1.18.0 — CURSIVA POR TRAMO, también en la lámina: las caras contrarias, bajadas y medidas antes de cualquier ajuste;
+      // la que no existe se simula y se dice (en `markers`, como en el overlay). Sin `italic_spans`, EL MISMO cromo.
+      const italicLoad = await loadOppositeFaces(carouselItalicFacesNeeded(chrome), new Set(Object.keys(metrics)));
+      fonts.push(...italicLoad.fonts);
+      Object.assign(metrics, italicLoad.metrics);
+      style.markers.push(...italicLoad.markers);
       // 1.5.0 — primero el límite de área de la plataforma (sólo portada), después el ajuste vertical.
-      const area = fitCarouselCoverArea({ chrome, metrics });
+      const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics });
       warnings.push(...area.warnings);
       // 1.11.0 — EL TEXTO NO TAPA CARAS NI PRODUCTOS. Con la política y foto: la MISMA detección de 1.6.x (más
       // productos, si se declaran) y la colocación libre de la maqueta. Sin política, sin foto o si la detección falla,
@@ -6105,6 +6523,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         : (f.slot as string) === 'subheadline:emphasis' ? style.slots.subheadline?.emphasis : style.slots[f.slot as Slot];
       if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
     }
+    // 1.18.0 — CURSIVA POR TRAMO: las caras contrarias que piden los tramos, bajadas y medidas ANTES de cualquier ajuste;
+    // la que no existe se simula y se dice. Sin `italic_spans`, no se baja nada y `oStyle` no cambia. (Se anota sobre
+    // `oStyle` como sus marcadores: es el estilo de esta composición y de aquí en adelante todo deriva de él.)
+    const italicLoad = await loadOppositeFaces(overlayItalicFacesNeeded(oStyle), new Set(Object.keys(areaMetrics)));
+    fonts.push(...italicLoad.fonts.map((f) => ({ ...f, slot: f.slot as any })));
+    Object.assign(areaMetrics, italicLoad.metrics);
+    oStyle.markers.push(...italicLoad.markers);
+    if (Object.keys(italicLoad.fallback).length) oStyle.italicFallback = withItalicFallback(oStyle, italicLoad.fallback).italicFallback;
     const areaFit = fitOverlayTextArea({ style: oStyle, width: dims.width, height: dims.height, metrics: areaMetrics });
     // 1.14.0 — el bloque cabe en el ALTO del lienzo, en cualquier proporción. Si ya cabe, el MISMO estilo.
     const heightFit = fitOverlayTextHeight({ style: areaFit.style, width: dims.width, height: dims.height, metrics: areaMetrics });

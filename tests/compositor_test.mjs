@@ -1094,7 +1094,7 @@ const overlayN1 = (style) => M.buildOverlayScene({ style, width: 1000, height: 1
 const spanTexts = (scene) => findAll(scene, (n) => n.type === 'span').map((n) => n.props.children);
 
 test('1.4.0 · la versión sube: cambia lo que el compositor dibuja', () => {
-  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.11.1', '1.12.0', '1.13.0', '1.13.1', '1.14.0', '1.15.0', '1.16.0', '1.17.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
+  assert.ok(['1.4.0', '1.5.0', '1.6.0', '1.6.1', '1.6.2', '1.6.3', '1.6.4', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.11.1', '1.12.0', '1.13.0', '1.13.1', '1.14.0', '1.15.0', '1.16.0', '1.17.0', '1.18.0'].includes(M.COMPOSITOR_VERSION), 'la versión sube cuando cambia lo que se dibuja');
 });
 
 test('1.4.0 · contrato de `emphasis`: lista de hasta 3 subcadenas; lo demás es 400 con etiqueta', () => {
@@ -1577,6 +1577,73 @@ test('1.10.0 · el contrato de identity_role', () => {
   assert.equal(M.parseIdentityRoleRequest(undefined), null);
   assert.equal(M.parseIdentityRoleRequest('accent_2'), 'accent_2');
   assert.throws(() => M.parseIdentityRoleRequest('Accent 2'), /identity_role/);
+});
+
+console.log('\n── 1.18.0 · CURSIVA POR TRAMO ──');
+test('1.18.0 · el bloque exporta lo nuevo', () => {
+  for (const fn of ['applySlotItalic', 'withSpanFlags', 'spanItalicStyle', 'italicSpanCss', 'italicFacesNeeded', 'overlayItalicFacesNeeded',
+    'carouselItalicFacesNeeded', 'withItalicFallback', 'googleFontsFaceCssUrl', 'isGoogleFontsCss', 'pickExactStyleFace', 'italicFallbackFor',
+    'overlaySlotMeasure', 'carouselFlippedFace', 'carouselHeadlineParts', 'wordWidthsOfParts', 'wordLinesW']) {
+    assert.equal(typeof M[fn], 'function', fn);
+  }
+  assert.equal(M.ITALIC_SYNTH_SKEW_DEG, -10);
+});
+test('1.18.0 · withShadowFlip sigue partiendo igual que en 1.9.0', () => {
+  const parts = [{ text: 'La cuota ', keyword: false }, { text: 'extraordinaria', keyword: true }, { text: ' no se vota', keyword: false }];
+  assert.deepEqual(M.withShadowFlip('La cuota extraordinaria no se vota', parts, [[3, 15]]), [
+    { text: 'La ', keyword: false }, { text: 'cuota ', keyword: false, flip: true }, { text: 'extrao', keyword: true, flip: true },
+    { text: 'rdinaria', keyword: true }, { text: ' no se vota', keyword: false },
+  ]);
+  assert.deepEqual(M.withShadowFlip('abc', null, []), [{ text: 'abc', keyword: false }]);
+});
+test('1.18.0 · withSpanFlags: sombra y cursiva a la vez, y conserva lo que no recalcula', () => {
+  const r = M.withSpanFlags('uno dos tres', null, { flip: [[0, 7]], italic: [[4, 12]] });
+  assert.deepEqual(r, [
+    { text: 'uno ', keyword: false, flip: true }, { text: 'dos', keyword: false, flip: true, italic: true }, { text: ' tres', keyword: false, italic: true },
+  ]);
+  assert.equal(r.map((x) => x.text).join(''), 'uno dos tres', 'el texto visible no cambia');
+  const again = M.withSpanFlags('uno dos tres', r, { italic: [[0, 3]] });
+  assert.deepEqual(again.map((x) => [x.text, !!x.flip, !!x.italic]), [['uno', true, true], [' ', true, false], ['dos', true, false], [' tres', false, false]]);
+});
+test('1.18.0 · el estilo de cada tramo invierte el de debajo; sin cara cursiva se inclina la recta', () => {
+  assert.deepEqual(M.spanItalicStyle(false, false), { italic: false, skew: false });
+  assert.deepEqual(M.spanItalicStyle(false, true), { italic: true, skew: false });
+  assert.deepEqual(M.spanItalicStyle(true, true), { italic: false, skew: false });
+  assert.deepEqual(M.spanItalicStyle(false, true, 'skew'), { italic: false, skew: true });
+  assert.deepEqual(M.spanItalicStyle(true, true, 'none'), { italic: true, skew: false });
+  assert.deepEqual(M.italicSpanCss(false, true, 'skew'), { fontStyle: 'normal', transform: 'skewX(-10deg)' });
+  assert.deepEqual(M.italicSpanCss(true, true), { fontStyle: 'normal' });
+});
+test('1.18.0 · la hoja css2 de Google con el eje ital, para cualquier familia', () => {
+  assert.equal(M.googleFontsFaceCssUrl('Fuente  Titular Condensada', 700), 'https://fonts.googleapis.com/css2?family=Fuente+Titular+Condensada:ital,wght@1,700');
+  assert.equal(M.googleFontsFaceCssUrl('Fuente Texto', 400, false), 'https://fonts.googleapis.com/css2?family=Fuente+Texto:ital,wght@0,400');
+  assert.equal(M.isGoogleFontsCss('https://fonts.googleapis.com/css2?family=Fuente+Texto'), true);
+  assert.equal(M.isGoogleFontsCss('https://fonts.example/titular.css'), false);
+  assert.equal(M.isGoogleFontsCss(null), false);
+});
+test('1.18.0 · sin cara cursiva en la hoja, pickExactStyleFace no cae a la recta (pickFontFace sí)', () => {
+  const css = "@font-face { font-family: 'Fuente Titular'; font-style: normal; font-weight: 700; src: url(https://x/t700.ttf) format('truetype'); }";
+  const faces = M.parseFontFaces(css);
+  assert.equal(M.pickFontFace(faces, { weight: 700, italic: true }).italic, false, 'pickFontFace cae a la recta en silencio');
+  assert.equal(M.pickExactStyleFace(faces, { family: 'Fuente Titular', weight: 700, italic: true }), null);
+  const fb = M.italicFallbackFor({ family: 'Fuente Titular', italic: true });
+  assert.deepEqual(fb, { fallback: 'skew', marker: 'OVERLAY_ITALIC_SYNTHESIZED: Fuente Titular no tiene cursiva; se inclinó' });
+  assert.equal(M.italicFallbackFor({ family: 'Fuente Titular', italic: false }).fallback, 'none');
+  const both = M.parseFontFaces(css + "@font-face { font-family: 'Fuente Titular'; font-style: italic; font-weight: 600; src: url(https://x/t600i.ttf) format('truetype'); }");
+  assert.equal(M.pickExactStyleFace(both, { family: 'Fuente Titular', weight: 700, italic: true }).url, 'https://x/t600i.ttf');
+});
+test('1.18.0 · la ranura marca sus tramos y la escena los dibuja en cursiva; sin tramos, EL MISMO estilo', () => {
+  const base = styleN1({ headline: H_EM });
+  assert.equal(M.applySlotItalic(base, 'headline', { italic_spans: [] }).style, base);
+  const r = M.applySlotItalic(base, 'headline', { italic_spans: ['no se vota'] });
+  const at = H_EM.indexOf('no se vota');
+  assert.deepEqual(r.style.slots.headline.italicFlip, [[at, at + 'no se vota'.length]]);
+  assert.deepEqual(r.applied.italic, ['no se vota']);
+  const spans = findAll(overlayN1(r.style), (n) => n.type === 'span');
+  const st = (t) => spans.find((n) => String(n.props.children).startsWith(t)).props.style.fontStyle;
+  assert.equal(st('vota'), 'italic'); assert.equal(st('se'), 'italic'); assert.equal(st('cuota'), 'normal');
+  assert.deepEqual(M.overlayItalicFacesNeeded(r.style).map((x) => x.key), ['Fuente Titular|700|italic']);
+  assert.deepEqual(M.overlayItalicFacesNeeded(base), []);
 });
 
 console.log(`\n${'─'.repeat(72)}`);
