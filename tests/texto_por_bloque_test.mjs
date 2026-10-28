@@ -15,6 +15,8 @@
 //   7. Lámina de carrusel: lo mismo sobre su cromo; y los campos sueltos de 1.8.0–1.9.0 por fin la alcanzan.
 //   8. Cableado del handler.
 //   9. Marca N+1: el bloque nuevo no nombra marcas.
+//  10. 1.18.0 — CURSIVA POR TRAMO: `italic_spans` por bloque invierte la cursiva de lo que tiene debajo, en el overlay y
+//      en la lámina; la cara que falta se simula inclinando la recta; cada tramo se mide con la métrica de su estilo.
 //
 // Ejecutar:  node tests/texto_por_bloque_test.mjs     (Node ≥ 22.18)
 
@@ -73,8 +75,9 @@ test('1a · ausente ⇒ los dos bloques vacíos', () => {
 });
 test('1b · la forma válida se normaliza', () => {
   const r = ts({ headline: { role: 'tinta', shadow_strength: 'strong' }, sub: { emphasis: ['el vecino'], emphasis_role: 'hoja', role: 'lino', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy' } });
-  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong' });
-  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy' });
+  // 1.18.0 — la forma normalizada lleva además `italic_spans` (vacío si no llega).
+  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong', italic_spans: [] });
+  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy', italic_spans: [] });
   assert.deepEqual(Object.keys(M.SHADOW_STRENGTHS), ['soft', 'brand', 'strong', 'heavy']);
 });
 test('1c · lo que no es contrato es 400 con etiqueta, antes de leer dato', () => {
@@ -281,6 +284,141 @@ test('9 · el bloque nuevo no nombra marcas ni ciudades', () => {
   const blk = SRC.slice(ini, fin) + SRC.slice(ini2, SRC.indexOf('/**\n * El titular, en «átomos»', ini2));
   assert.ok(blk.length > 2000);
   assert.ok(!/neurone|forum|unrealville|lucien|panam|miami/i.test(blk));
+});
+
+console.log('\n── 10 · 1.18.0 · cursiva por tramo ──');
+const ITOK = (over = {}) => baseTokens({}, over);
+const resolveI = (tok = ITOK(), text = TEXT) => resolve(tok, text);
+const spanStyle = (sc, t) => nodes(sc).find((n) => n.type === 'span' && String(n.props.children).replace(/ $/, '') === t)?.props.style;
+test('10a · contrato: `italic_spans` se acepta en los dos bloques, con los límites de `shadow_spans`', () => {
+  const r = ts({ headline: { italic_spans: ['cosecha'] }, sub: { italic_spans: ['el clima', 'el vecino'] } });
+  assert.deepEqual(r.headline.italic_spans, ['cosecha']); assert.deepEqual(r.sub.italic_spans, ['el clima', 'el vecino']);
+  assert.equal(M.textBlockRequested(r.headline), true);
+  for (const v of [{ headline: { italic_spans: ['a', 'b', 'c', 'd'] } }, { sub: { italic_spans: 'x' } }, { sub: { italic_spans: [3] } },
+    { headline: { italic_spans: ['x'.repeat(61)] } }, { headline: { italics: ['x'] } }]) {
+    assert.throws(() => ts(v), (e) => e.label === 'COMPOSITOR_TEXT_STYLE_INVALID' && e.status === 400, JSON.stringify(v));
+  }
+});
+test('10b · golden: sin `italic_spans` la ranura no lleva tramos, no se pide ninguna cara y la escena es la misma', () => {
+  const s = resolveI();
+  const r = M.applyTextStyleBlocks(s, ts({ headline: { role: 'tinta' } }), PAL, ITOK());
+  assert.equal(r.style.slots.headline.italicFlip, undefined); assert.equal(r.style.slots.subheadline.italicFlip, undefined);
+  assert.deepEqual(r.applied.headline.italic, []); assert.deepEqual(r.applied.sub.italic, []);
+  assert.deepEqual(M.overlayItalicFacesNeeded(r.style), []);
+  assert.equal(M.withItalicFallback(s, {}), s);
+  const only = M.applyTextStyleBlocks(s, ts({ headline: { role: 'tinta' } }), PAL, ITOK()).style;
+  assert.equal(sha(scene(only)), sha(scene(r.style)));
+});
+test('10c · sobre texto recto, el tramo sale en cursiva y el resto queda recto; `applied.italic` lo dice', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { italic_spans: ['cosecha'] }, sub: { italic_spans: ['el vecino'] } }), PAL, ITOK());
+  assert.deepEqual(r.applied.headline.italic, ['cosecha']); assert.deepEqual(r.applied.sub.italic, ['el vecino']);
+  const sc = scene(r.style);
+  assert.equal(spanStyle(sc, 'cosecha').fontStyle, 'italic'); assert.equal(spanStyle(sc, 'precio').fontStyle, 'normal');
+  assert.equal(spanStyle(sc, 'vecino').fontStyle, 'italic'); assert.equal(spanStyle(sc, 'clima.').fontStyle, 'normal');
+  const sub = nodes(sc).find((n) => n.props?.style?.fontFamily === 'Fuente Texto');
+  assert.ok(sub.props.style.textShadow, 'sin tramos de sombra, la ranura conserva su sombra');
+});
+test('10d · lo que no está literal no se aplica y se dice, en el titular y en la bajada', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { italic_spans: ['granizo'] }, sub: { italic_spans: ['la lluvia'] } }), PAL, ITOK());
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_ITALIC_SPAN_NOT_IN_HEADLINE: «granizo»')));
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_ITALIC_SPAN_NOT_IN_SUBHEADLINE: «la lluvia»')));
+  assert.deepEqual(r.applied.headline.italic, []);
+  const sinBajada = M.applyTextStyleBlocks(resolveI(ITOK(), { headline: TEXT.headline }), ts({ sub: { italic_spans: ['x'] } }), PAL, ITOK());
+  assert.ok(sinBajada.style.markers.some((m) => m.startsWith('OVERLAY_ITALIC_SPAN_NOT_IN_SUBHEADLINE')));
+});
+test('10e · sobre una ranura en cursiva, el tramo sale recto', () => {
+  const tok = ITOK({ typography: { subheadline: { italic: true } } });
+  const r = M.applyTextStyleBlocks(resolveI(tok), ts({ sub: { italic_spans: ['el vecino'] } }), PAL, tok);
+  const sc = scene(r.style);
+  assert.equal(spanStyle(sc, 'vecino').fontStyle, 'normal'); assert.equal(spanStyle(sc, 'clima.').fontStyle, 'italic');
+  assert.deepEqual(M.overlayItalicFacesNeeded(r.style).map((x) => x.key), ['Fuente Texto|400|normal']);
+});
+test('10f · sobre un resaltado en cursiva, el tramo sale recto; fuera del resaltado, en cursiva', () => {
+  const s = resolveI(ITOK(), { ...TEXT, emphasis: ['está bajando'] });
+  const r = M.applyTextStyleBlocks(s, ts({ headline: { italic_spans: ['bajando', 'precio'] } }), PAL, ITOK());
+  const sc = scene(r.style);
+  assert.equal(spanStyle(sc, 'bajando').fontStyle, 'normal', 'resaltado en cursiva ⇒ recto');
+  assert.equal(spanStyle(sc, 'está').fontStyle, 'italic', 'el resto del resaltado sigue en cursiva');
+  assert.equal(spanStyle(sc, 'precio').fontStyle, 'italic', 'fuera del resaltado, recto ⇒ cursiva');
+  assert.equal(spanStyle(sc, 'cosecha').fontStyle, 'normal');
+});
+test('10g · un tramo con la sombra al revés y la cursiva a la vez lleva las dos cosas', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { shadow_spans: ['la cosecha'], italic_spans: ['cosecha está'] } }), PAL, ITOK());
+  const sc = scene(r.style);
+  const cos = spanStyle(sc, 'cosecha'), la = spanStyle(sc, 'la'), esta = spanStyle(sc, 'está');
+  assert.equal(cos.fontStyle, 'italic'); assert.equal(cos.textShadow, undefined, 'el tramo marcado va sin la sombra que el resto lleva');
+  assert.equal(la.fontStyle, 'normal'); assert.equal(la.textShadow, undefined);
+  assert.equal(esta.fontStyle, 'italic'); assert.ok(esta.textShadow, 'fuera del tramo de sombra, la sombra de siempre');
+});
+test('10h · sin cara cursiva, el tramo se dibuja con la recta inclinada', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { italic_spans: ['cosecha'] } }), PAL, ITOK());
+  const need = M.overlayItalicFacesNeeded(r.style)[0];
+  const fb = M.italicFallbackFor(need);
+  assert.equal(fb.marker, 'OVERLAY_ITALIC_SYNTHESIZED: Fuente Titular no tiene cursiva; se inclinó');
+  const st = M.withItalicFallback(r.style, { [need.baseKey]: fb.fallback });
+  const cos = spanStyle(scene(st), 'cosecha');
+  assert.equal(cos.fontStyle, 'normal'); assert.equal(cos.transform, 'skewX(-10deg)');
+  assert.equal(spanStyle(scene(st), 'precio').transform, undefined);
+});
+// Métricas sintéticas: la recta mide 0,5 em por carácter; la cursiva, 0,7 em. Lo que se mide es CUÁL se usa.
+const adv = (em) => ({ advances: new Map(Array.from({ length: 0x250 }, (_, c) => [c, em])), avgEm: em });
+const METRICS = { 'Fuente Titular|400|normal': adv(0.5), 'Fuente Titular|400|italic': adv(0.7), 'Fuente Texto|400|normal': adv(0.5), 'Fuente Texto|400|italic': adv(0.7) };
+test('10i · la medición usa la métrica de la cara cursiva; la simulada, la de la recta', () => {
+  const tok = ITOK({ typography: { headline: { emphasis: null } } });
+  const plain = resolveI(tok, { headline: 'la cosecha' });
+  const it = M.applyTextStyleBlocks(plain, ts({ headline: { italic_spans: ['la cosecha'] } }), PAL, tok).style;
+  const w0 = M.measureOverlayText(plain, W, H, METRICS).width;
+  const w1 = M.measureOverlayText(it, W, H, METRICS).width;
+  assert.ok(Math.abs(w1 / w0 - 0.7 / 0.5) < 0.01, `${w0} → ${w1}`);
+  const key = M.overlayItalicFacesNeeded(it)[0].baseKey;
+  const synth = M.withItalicFallback(it, { [key]: 'skew' });
+  assert.equal(M.measureOverlayText(synth, W, H, METRICS).width, w0, 'inclinar no cambia el avance');
+  const atoms = M.overlaySlotAtoms(it.slots.headline, W, METRICS, [], it.italicFallback);
+  const atoms0 = M.overlaySlotAtoms(plain.slots.headline, W, METRICS, []);
+  assert.ok(atoms[0].atoms[0].w > atoms0[0].atoms[0].w);
+  const est = [];
+  M.measureOverlayText(it, W, H, { 'Fuente Titular|400|normal': adv(0.5) }).estimated.forEach((x) => est.push(x));
+  assert.deepEqual(est, ['Fuente Titular'], 'sin la métrica cursiva, la medición se dice estimada');
+});
+test('10j · lámina: el titular y la bajada invierten la cursiva, se miden con su cara y lo dicen', () => {
+  const r = M.applyCarouselTextStyle(chromeOf(), { ts: ts({ headline: { italic_spans: ['precio'] }, sub: { italic_spans: ['el vecino', 'granizo'] } }), legacy: NOLEG, palette: PAL, tokens: CTOK, declared: null });
+  assert.deepEqual(r.applied.headline.italic, ['precio']); assert.deepEqual(r.applied.sub.italic, ['el vecino']);
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_ITALIC_SPAN_NOT_IN_SUBHEADLINE: «granizo»')));
+  const sc = cscene(r.chrome);
+  assert.equal(spanStyle(sc, 'precio').fontStyle, 'italic'); assert.equal(spanStyle(sc, 'cosecha').fontStyle, 'normal');
+  assert.equal(spanStyle(sc, 'vecino').fontStyle, 'italic'); assert.equal(spanStyle(sc, 'clima.').fontStyle, 'normal');
+  assert.deepEqual(M.carouselItalicFacesNeeded(r.chrome).map((x) => x.key), ['Fuente Titular|700|italic', 'Fuente Texto|400|italic']);
+  const CM = { 'Fuente Titular|700|normal': adv(0.5), 'Fuente Titular|700|italic': adv(0.9), 'Fuente Texto|400|normal': adv(0.5),
+    'Fuente Texto|400|italic': adv(0.9), 'Fuente Rotulo|600|normal': adv(0.5), 'Fuente Titular|400|normal': adv(0.5) };
+  const before = M.measureCarouselLayout(chromeOf(), CM), after = M.measureCarouselLayout(r.chrome, CM);
+  assert.ok(after.midWidth >= before.midWidth && (after.midWidth > before.midWidth || after.mid > before.mid), JSON.stringify({ before, after }));
+  const key = M.carouselItalicFacesNeeded(r.chrome)[0].baseKey;
+  const synth = M.withItalicFallback(r.chrome, { [key]: 'skew', 'Fuente Texto|400|normal': 'skew' });
+  assert.equal(spanStyle(cscene(synth), 'precio').transform, 'skewX(-10deg)');
+  const ms = M.measureCarouselLayout(synth, CM);
+  assert.equal(ms.mid, before.mid); assert.equal(ms.midWidth, before.midWidth);
+});
+test('10k · lámina sin `italic_spans`: EL MISMO cromo (golden de 7a) y sin caras que pedir', () => {
+  const c = chromeOf();
+  assert.deepEqual(M.carouselItalicFacesNeeded(c), []);
+  assert.equal(M.carouselHeadlineParts(c), c.headline);
+});
+test('10l · cableado: las caras contrarias se bajan antes de cualquier ajuste, en el overlay y en la lámina', () => {
+  const a = SRC.indexOf('const italicLoad = await loadOppositeFaces(overlayItalicFacesNeeded(oStyle), new Set(Object.keys(areaMetrics)));');
+  const b = SRC.indexOf('const areaFit = fitOverlayTextArea({ style: oStyle,');
+  assert.ok(a > 0 && b > a);
+  const c = SRC.indexOf('const italicLoad = await loadOppositeFaces(carouselItalicFacesNeeded(chrome), new Set(Object.keys(metrics)));');
+  const d = SRC.indexOf('const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics });');
+  assert.ok(c > 0 && d > c);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.18\.0'/);
+  assert.match(SRC, /googleFontsFaceCssUrl\(need\.family, need\.weight, need\.italic\)/);
+});
+test('10m · el bloque nuevo no nombra familias ni marcas', () => {
+  const ini = SRC.indexOf('// ── 1.18.0 · CURSIVA POR TRAMO');
+  const fin = SRC.indexOf('/**\n * 1.16.0 — aplica lo elegido por bloque al estilo del overlay', ini);
+  const blk = SRC.slice(ini, fin);
+  assert.ok(blk.length > 2000);
+  assert.ok(!/neurone|forum|unrealville|lucien|panam|miami|pt sans|narrow|garamond|bebas|baskerville/i.test(blk));
 });
 
 console.log(`\n${pass} ok · ${fails.length} fallos`);
