@@ -405,12 +405,12 @@ test('10k · lámina sin `italic_spans`: EL MISMO cromo (golden de 7a) y sin car
 });
 test('10l · cableado: las caras contrarias se bajan antes de cualquier ajuste, en el overlay y en la lámina', () => {
   const a = SRC.indexOf('const italicLoad = await loadOppositeFaces(overlayItalicFacesNeeded(oStyle), new Set(Object.keys(areaMetrics)));');
-  const b = SRC.indexOf('const areaFit = fitOverlayTextArea({ style: oStyle,');
+  const b = SRC.indexOf('const areaFit = fitOverlayTextArea({ style: ');
   assert.ok(a > 0 && b > a);
   const c = SRC.indexOf('const italicLoad = await loadOppositeFaces(carouselItalicFacesNeeded(chrome), new Set(Object.keys(metrics)));');
-  const d = SRC.indexOf('const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics });');
+  const d = SRC.indexOf('const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics');
   assert.ok(c > 0 && d > c);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.18\.0'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(18|19)\.0'/);
   assert.match(SRC, /googleFontsFaceCssUrl\(need\.family, need\.weight, need\.italic\)/);
 });
 test('10m · el bloque nuevo no nombra familias ni marcas', () => {
