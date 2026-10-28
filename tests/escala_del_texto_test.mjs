@@ -270,8 +270,8 @@ test('6b · meta.text_scale { requested, applied } vuelve siempre que el campo l
   assert.match(SRC, /\.\.\.\(textScaleArrived \? \{ text_scale: \{ requested: textScaleIn, applied: textScaleApplied\(baseHeadlinePct, finalStyle\.slots\.headline\?\.sizePct\) \} \} : \{\}\),/);
   assert.match(SRC, /\.\.\.\(textScaleArrived \? \{ text_scale: \{ requested: textScaleIn,\n\s*applied: chrome\.headline\.length \? textScaleApplied\(chrome\.type\.headline\?\.sizePct, fit\.chrome\.type\.headline\?\.sizePct\) : null \} \} : \{\}\),/);
 });
-test('6c · la versión sube a 1.19.0 y la historia lo cuenta', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.19\.0'/);
+test('6c · la versión sube a 1.19.0 (o después) y la historia lo cuenta', () => {
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(19|20)\.0'/);
   assert.ok(SRC.includes('//   1.19.0 (2026-10-28) — EL TAMAÑO DEL TEXTO Y LA BAJADA LOS PIDE UNA PERSONA'));
 });
 test('6d · el bloque nuevo no nombra marcas, ciudades ni familias, y nadie vosea', () => {
