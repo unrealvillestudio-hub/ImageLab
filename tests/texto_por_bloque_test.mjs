@@ -17,6 +17,8 @@
 //   9. Marca N+1: el bloque nuevo no nombra marcas.
 //  10. 1.18.0 — CURSIVA POR TRAMO: `italic_spans` por bloque invierte la cursiva de lo que tiene debajo, en el overlay y
 //      en la lámina; la cara que falta se simula inclinando la recta; cada tramo se mide con la métrica de su estilo.
+//  12. 1.22.0 — NEGRITA POR TRAMO: `bold_spans` por bloque invierte el peso (regular → 700, negrita → 400), en el overlay y
+//      en la lámina; la cara de ese peso se pide y se mide; si falta, el tramo queda con su peso y se dice.
 //  11. 1.21.0 — COLOR POR TRAMO: `color_spans` por bloque cambia SÓLO el color (misma familia, caja y tamaño), con el
 //      color del resaltado de ese bloque; en el overlay y en la lámina; no cambia ninguna medida.
 //
@@ -78,8 +80,8 @@ test('1a · ausente ⇒ los dos bloques vacíos', () => {
 test('1b · la forma válida se normaliza', () => {
   const r = ts({ headline: { role: 'tinta', shadow_strength: 'strong' }, sub: { emphasis: ['el vecino'], emphasis_role: 'hoja', role: 'lino', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy' } });
   // 1.18.0 — la forma normalizada lleva además `italic_spans` (vacío si no llega). 1.21.0 — y `color_spans`.
-  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong', italic_spans: [], color_spans: [] });
-  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy', italic_spans: [], color_spans: [] });
+  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong', italic_spans: [], color_spans: [], bold_spans: [] });
+  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy', italic_spans: [], color_spans: [], bold_spans: [] });
   assert.deepEqual(Object.keys(M.SHADOW_STRENGTHS), ['soft', 'brand', 'strong', 'heavy']);
 });
 test('1c · lo que no es contrato es 400 con etiqueta, antes de leer dato', () => {
@@ -522,6 +524,115 @@ test('11l · el bloque nuevo no nombra familias ni marcas', () => {
   const blk = SRC.slice(ini, fin);
   assert.ok(blk.length > 1500, String(blk.length));
   assert.ok(!/neurone|forum|unrealville|lucien|panam|miami|pt sans|narrow|garamond|bebas|baskerville/i.test(blk));
+});
+
+console.log('\n── 12 · 1.22.0 · negrita por tramo ──');
+test('12a · contrato: `bold_spans` se acepta en los dos bloques, con los límites de los demás tramos', () => {
+  const r = ts({ headline: { bold_spans: ['cosecha'] }, sub: { bold_spans: ['el vecino'] } });
+  assert.deepEqual(r.headline.bold_spans, ['cosecha']); assert.deepEqual(r.sub.bold_spans, ['el vecino']);
+  assert.equal(M.textBlockRequested(r.headline), true);
+  for (const v of [{ headline: { bold_spans: ['a', 'b', 'c', 'd'] } }, { sub: { bold_spans: 'x' } }, { headline: { bold: ['x'] } }]) {
+    assert.throws(() => ts(v), (e) => e.label === 'COMPOSITOR_TEXT_STYLE_INVALID' && e.status === 400, JSON.stringify(v));
+  }
+});
+test('12b · el peso contrario: debajo de 600 sale 700; desde 600, 400', () => {
+  assert.equal(M.flippedWeight(400), 700); assert.equal(M.flippedWeight(300), 700); assert.equal(M.flippedWeight(500), 700);
+  assert.equal(M.flippedWeight(600), 400); assert.equal(M.flippedWeight(700), 400); assert.equal(M.flippedWeight(900), 400);
+});
+test('12c · golden: sin `bold_spans` no hay tramos, ni caras que pedir, ni `fontWeight` por tramo', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { italic_spans: ['cosecha'] } }), PAL, ITOK());
+  assert.equal(r.style.slots.headline.boldFlip, undefined);
+  assert.ok(!('bold' in r.applied.headline));
+  assert.equal(spanStyle(scene(r.style), 'cosecha').fontWeight, undefined, 'sólo cursiva: el tramo no declara peso (escena de 1.21.0)');
+  assert.ok(M.overlayItalicFacesNeeded(r.style).every((x) => !x.axis));
+});
+test('12d · sobre texto regular, el tramo sale en 700 y el resto en su peso; `applied.bold` lo dice', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { bold_spans: ['cosecha'] }, sub: { bold_spans: ['el vecino'] } }), PAL, ITOK());
+  assert.deepEqual(r.applied.headline.bold, ['cosecha']); assert.deepEqual(r.applied.sub.bold, ['el vecino']);
+  const sc = scene(r.style);
+  const w = r.style.slots.headline.weight;
+  assert.equal(spanStyle(sc, 'cosecha').fontWeight, M.flippedWeight(w)); assert.equal(spanStyle(sc, 'precio').fontWeight, w);
+  assert.equal(spanStyle(sc, 'cosecha').fontStyle, undefined, 'sin tramos de cursiva, el tramo no declara estilo');
+  assert.equal(spanStyle(sc, 'vecino').fontWeight, M.flippedWeight(r.style.slots.subheadline.weight));
+  const need = M.overlayItalicFacesNeeded(r.style);
+  assert.deepEqual(need.map((x) => [x.key, x.axis]), [[`Fuente Titular|${M.flippedWeight(w)}|normal`, 'bold'], [`Fuente Texto|${M.flippedWeight(r.style.slots.subheadline.weight)}|normal`, 'bold']]);
+});
+test('12e · sobre una ranura en negrita, el tramo sale regular', () => {
+  const tok = ITOK({ typography: { headline: { weight: 700 } } });
+  const r = M.applyTextStyleBlocks(resolveI(tok), ts({ headline: { bold_spans: ['cosecha'] } }), PAL, tok);
+  assert.equal(r.style.slots.headline.weight, 700);
+  const sc = scene(r.style);
+  assert.equal(spanStyle(sc, 'cosecha').fontWeight, 400); assert.equal(spanStyle(sc, 'precio').fontWeight, 700);
+});
+test('12f · lo que no está literal no se aplica y se dice', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { bold_spans: ['granizo'] }, sub: { bold_spans: ['la lluvia'] } }), PAL, ITOK());
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_BOLD_SPAN_NOT_IN_HEADLINE: «granizo»')));
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_BOLD_SPAN_NOT_IN_SUBHEADLINE: «la lluvia»')));
+  assert.ok(!('bold' in r.applied.headline));
+});
+test('12g · sin la cara de ese peso, NO se simula: el tramo queda con su peso y se dice', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { bold_spans: ['cosecha'] } }), PAL, ITOK());
+  const need = M.overlayItalicFacesNeeded(r.style)[0];
+  const fb = M.italicFallbackFor(need);
+  assert.equal(fb.fallback, 'none'); assert.match(fb.marker, /^OVERLAY_BOLD_UNAVAILABLE: Fuente Titular no tiene la cara de peso 700; el tramo queda con su peso$/);
+  const st = M.withItalicFallback(r.style, { [M.boldFallbackKey(need.baseKey)]: 'none' });
+  assert.equal(spanStyle(scene(st), 'cosecha').fontWeight, r.style.slots.headline.weight);
+  assert.equal(M.spanFaceStyle(r.style.slots.headline, { bold: true }, st.italicFallback).weight, r.style.slots.headline.weight);
+});
+test('12h · cursiva y negrita en el mismo tramo: la cara de los dos, y por si falta, cada una', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { bold_spans: ['cosecha'], italic_spans: ['cosecha'] } }), PAL, ITOK());
+  const cos = spanStyle(scene(r.style), 'cosecha');
+  assert.equal(cos.fontWeight, 700); assert.equal(cos.fontStyle, 'italic');
+  assert.deepEqual(M.overlayItalicFacesNeeded(r.style).map((x) => [x.key, x.axis ?? 'italic']),
+    [['Fuente Titular|700|italic', 'both'], ['Fuente Titular|400|italic', 'italic'], ['Fuente Titular|700|normal', 'bold']]);
+  // Falta la de los dos: queda la cursiva sin negrita.
+  const st = M.withItalicFallback(r.style, { [M.boldFallbackKey('Fuente Titular|400|normal')]: 'none' });
+  const c2 = spanStyle(scene(st), 'cosecha');
+  assert.equal(c2.fontWeight, 400); assert.equal(c2.fontStyle, 'italic');
+});
+test('12i · la medición usa la métrica de la cara de ese peso', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { bold_spans: ['El precio de la cosecha está bajando'] } }), PAL, ITOK());
+  const m = { 'Fuente Titular|400|normal': adv(0.5), 'Fuente Titular|700|normal': adv(0.9), 'Fuente Texto|400|normal': adv(0.5) };
+  const before = M.measureOverlayText(resolveI(), W, H, m), after = M.measureOverlayText(r.style, W, H, m);
+  assert.ok(after.height > before.height || after.width > before.width, JSON.stringify({ before, after }));
+  const sinCara = M.withItalicFallback(r.style, { [M.boldFallbackKey('Fuente Titular|400|normal')]: 'none' });
+  assert.deepEqual(M.measureOverlayText(sinCara, W, H, m), before, 'sin la cara, se mide con la regular');
+});
+test('12j · pickExactStyleFace con peso exacto: una hoja con sólo la regular no es la negrita', () => {
+  const faces = [{ family: 'Fuente Titular', weight: 400, italic: false, url: 'r' }];
+  assert.equal(M.pickExactStyleFace(faces, { family: 'Fuente Titular', weight: 700, italic: false }, true), null);
+  assert.equal(M.pickExactStyleFace(faces, { family: 'Fuente Titular', weight: 700, italic: false })?.url, 'r', 'sin exigir peso, cae a la más cercana (1.18.0)');
+  const both = [...faces, { family: 'Fuente Titular', weight: 700, italic: false, url: 'b' }];
+  assert.equal(M.pickExactStyleFace(both, { family: 'Fuente Titular', weight: 700, italic: false }, true)?.url, 'b');
+  assert.equal(M.googleFontsFaceCssUrl('Fuente Titular', 700, false), 'https://fonts.googleapis.com/css2?family=Fuente+Titular:ital,wght@0,700');
+});
+test('12k · lámina: titular (700) y bajada (400) invierten el peso, se miden con su cara y lo dicen', () => {
+  const r = M.applyCarouselTextStyle(chromeOf(), { ts: ts({ headline: { bold_spans: ['precio'] }, sub: { bold_spans: ['el vecino', 'granizo'] } }), legacy: NOLEG, palette: PAL, tokens: CTOK, declared: null });
+  assert.deepEqual(r.applied.headline.bold, ['precio']); assert.deepEqual(r.applied.sub.bold, ['el vecino']);
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_BOLD_SPAN_NOT_IN_SUBHEADLINE: «granizo»')));
+  const sc = cscene(r.chrome);
+  assert.equal(spanStyle(sc, 'precio').fontWeight, 400); assert.equal(spanStyle(sc, 'bajando').fontWeight, 700);
+  assert.equal(spanStyle(sc, 'vecino').fontWeight, 700); assert.equal(spanStyle(sc, 'clima.').fontWeight, 400);
+  assert.deepEqual(M.carouselItalicFacesNeeded(r.chrome).map((x) => [x.key, x.axis]), [['Fuente Titular|400|normal', 'bold'], ['Fuente Texto|700|normal', 'bold']]);
+  const CM = { 'Fuente Titular|700|normal': adv(0.5), 'Fuente Titular|400|normal': adv(0.5), 'Fuente Texto|400|normal': adv(0.5),
+    'Fuente Texto|700|normal': adv(0.9), 'Fuente Rotulo|600|normal': adv(0.5) };
+  const before = M.measureCarouselLayout(chromeOf(), CM), after = M.measureCarouselLayout(r.chrome, CM);
+  assert.ok(after.midWidth >= before.midWidth && (after.midWidth > before.midWidth || after.mid > before.mid), JSON.stringify({ before, after }));
+});
+test('12l · lámina sin `bold_spans`: EL MISMO cromo y el mismo titular por tramos', () => {
+  const c = chromeOf();
+  const r = M.applyCarouselTextStyle(c, { ts: ts(null), legacy: NOLEG, palette: PAL, tokens: CTOK, declared: null });
+  assert.equal(r.chrome, c); assert.equal(M.carouselHeadlineParts(c), c.headline);
+  assert.equal(M.carouselSpanFace(c.type.headline, {}), c.type.headline);
+});
+test('12m · versión e historia: 1.22.0 documentada; el bloque no nombra marcas ni familias', () => {
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.2[2-9]\.0'/);
+  const hist = SRC.slice(SRC.indexOf('//   1.22.0 (2026-10-30)'), SRC.indexOf("export const COMPOSITOR_VERSION = '"));
+  assert.ok(hist.includes('bold_spans') && hist.includes('Sin `bold_spans`, idéntico a 1.21.0'));
+  const ini = SRC.indexOf('// ── 1.22.0 · NEGRITA POR TRAMO');
+  const blk = SRC.slice(ini, SRC.indexOf('/**\n * 1.18.0 — el estilo FINAL de un tramo', ini));
+  assert.ok(blk.length > 2500, String(blk.length));
+  for (const t of [blk, hist]) assert.ok(!/neurone|forum|unrealville|lucien|panam|miami|pt sans|narrow|garamond|bebas|baskerville/i.test(t));
 });
 
 console.log(`\n${pass} ok · ${fails.length} fallos`);
