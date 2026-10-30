@@ -269,10 +269,10 @@ test('6a · `meta.sub_breaks` y `meta.carousel.sub_breaks` sólo si la bajada tr
   assert.match(SRC, /\.\.\.\(subBreaksIn != null \? \{ sub_breaks: fit\.chrome\.subheadline \? subBreaksIn : 0 \} : \{\}\),/);
   assert.ok(SRC.indexOf('const subBreaksIn = ') < SRC.indexOf('const [tokenRows, typography, palette] = await Promise.all(['), 'antes de leer dato');
 });
-test('6b · la versión sube a 1.20.0 y la historia lo cuenta', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.20\.0'/);
+test('6b · la versión sube a 1.20.0 (o después) y la historia lo cuenta', () => {
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.2\d\.0'/);
   assert.ok(SRC.includes('//   1.20.0 (2026-10-28) — LA BAJADA RESPETA SUS SALTOS DE LÍNEA'));
-  assert.equal(M.COMPOSITOR_VERSION, '1.20.0');
+  assert.match(M.COMPOSITOR_VERSION, /^1\.2\d\.0$/);
 });
 test('6c · el bloque nuevo no nombra marcas, ciudades ni familias, y nadie vosea', () => {
   const ini = SRC.indexOf('// ── 1.20.0 · LA BAJADA CON SALTOS DE LÍNEA');

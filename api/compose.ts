@@ -304,7 +304,19 @@ declare const process: { env: Record<string, string | undefined> };
 //         la lámina. Un tramo de `text_style.sub` (resaltado, sombra, cursiva) que cruza un salto no se encuentra y se dice
 //         con el aviso de siempre (`…_NOT_IN_SUBHEADLINE`, `CAROUSEL_SHADOW_SPAN_NOT_FOUND`). Eco: `meta.sub_breaks` y
 //         `meta.carousel.sub_breaks`, los saltos respetados, sólo si la bajada trae `\n`. Sin `\n`, idéntico a 1.19.0.
-export const COMPOSITOR_VERSION = '1.20.0';
+//   1.21.0 (2026-10-30) — COLOR POR TRAMO (Sam, 2026-10-29: en las tarjetas de aprobación, «aparte del resaltado por
+//         asteriscos que convierte el texto resaltado en mayúsculas cerradas, haya otra opción para que resalte solo en
+//         color»). El resaltado de la marca trae su tipografía (en algunas marcas, otra familia, mayúsculas y otro tamaño);
+//         ahora un tramo puede cambiar SÓLO de color, con la misma familia, caja y tamaño que el texto que lo rodea. Campo
+//         opcional `color_spans` en cada bloque de `text_style` (`headline` y `sub`), en el overlay y en la lámina del
+//         carrusel. El color es el del resaltado de ese bloque —el elegido (`emphasis_role`, de la lista permitida) o el de
+//         la marca—; con resaltado en el mismo bloque, exactamente el suyo, también cuando el corrector de contraste lo
+//         cambia; en el titular, el corrector de contraste (`layout.emphasis_contrast`) los protege también cuando no hay
+//         resaltado. Lo que no está literal no se aplica y se dice (`OVERLAY_COLOR_SPAN_NOT_IN_…`,
+//         `CAROUSEL_COLOR_SPAN_NOT_IN_…`); sin color de resaltado declarado, `OVERLAY_COLOR_SPAN_NO_COLOR`. No cambia
+//         ninguna medida. Lo aplicado viaja en `meta.text_style.applied.<bloque>.color` (y en la lámina,
+//         `meta.carousel.text_style.applied.<bloque>.color`). Sin `color_spans`, idéntico a 1.20.0.
+export const COMPOSITOR_VERSION = '1.21.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -537,14 +549,16 @@ export function withShadowFlip(
  */
 export function withSpanFlags<P extends { text: string; keyword: boolean }>(
   text: string, parts: P[] | null | undefined,
-  flags: { flip?: ReadonlyArray<[number, number]> | null; italic?: ReadonlyArray<[number, number]> | null },
-): Array<P & { flip?: boolean; italic?: boolean }> {
+  flags: { flip?: ReadonlyArray<[number, number]> | null; italic?: ReadonlyArray<[number, number]> | null;
+    color?: ReadonlyArray<[number, number]> | null },
+): Array<P & { flip?: boolean; italic?: boolean; color?: boolean }> {
   const base = (parts && parts.length ? parts : [{ text, keyword: false }]) as P[];
-  const keys = (['flip', 'italic'] as const).filter((k) => flags[k]);
+  // 1.21.0 — y `color` (sólo el color, «1.21.0 · COLOR POR TRAMO»).
+  const keys = (['flip', 'italic', 'color'] as const).filter((k) => flags[k]);
   const cuts = new Set<number>();
   for (const k of keys) for (const [a, b] of flags[k]!) { cuts.add(a); cuts.add(b); }
-  const inside = (k: 'flip' | 'italic', i: number) => flags[k]!.some(([a, b]) => i >= a && i < b);
-  const out: Array<P & { flip?: boolean; italic?: boolean }> = [];
+  const inside = (k: 'flip' | 'italic' | 'color', i: number) => flags[k]!.some(([a, b]) => i >= a && i < b);
+  const out: Array<P & { flip?: boolean; italic?: boolean; color?: boolean }> = [];
   let pos = 0;
   for (const p of base) {
     let start = 0;
@@ -554,7 +568,7 @@ export function withSpanFlags<P extends { text: string; keyword: boolean }>(
         if (seg) {
           const piece: Record<string, unknown> = { ...p, text: seg };
           for (const f of keys) { delete piece[f]; if (inside(f, pos + start)) piece[f] = true; }
-          out.push(piece as P & { flip?: boolean; italic?: boolean });
+          out.push(piece as P & { flip?: boolean; italic?: boolean; color?: boolean });
         }
         start = k;
       }
@@ -586,15 +600,17 @@ export interface TextBlockStyleIn {
   text_shadow: 'on' | 'off' | null; shadow_spans: string[]; shadow_strength: ShadowStrength | null;
   // 1.18.0 — tramos literales del bloque cuya cursiva se INVIERTE (ver «1.18.0 · CURSIVA POR TRAMO»). Vacío ⇒ 1.17.0.
   italic_spans: string[];
+  // 1.21.0 — tramos literales del bloque que cambian SÓLO de color (ver «1.21.0 · COLOR POR TRAMO»). Vacío ⇒ 1.20.0.
+  color_spans: string[];
 }
 export interface TextStyleIn { headline: TextBlockStyleIn; sub: TextBlockStyleIn }
 
-const EMPTY_TEXT_BLOCK: TextBlockStyleIn = Object.freeze({ role: null, emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: null, italic_spans: [] }) as TextBlockStyleIn;
+const EMPTY_TEXT_BLOCK: TextBlockStyleIn = Object.freeze({ role: null, emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: null, italic_spans: [], color_spans: [] }) as TextBlockStyleIn;
 
 /** ¿El bloque pide algo? PURO. */
 export function textBlockRequested(b: TextBlockStyleIn | null | undefined): boolean {
   return !!b && !!(b.role || b.emphasis.length || b.emphasis_role || b.text_shadow || b.shadow_spans.length || b.shadow_strength ||
-    b.italic_spans?.length);
+    b.italic_spans?.length || b.color_spans?.length);
 }
 
 /**
@@ -614,8 +630,8 @@ export function parseTextStyleRequest(raw: unknown): TextStyleIn {
     if (v == null) return { ...EMPTY_TEXT_BLOCK };
     if (!isPlain(v)) throw bad(`${name} debe ser un objeto`);
     const allowed = name === 'headline'
-      ? ['role', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans']
-      : ['role', 'emphasis', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans'];
+      ? ['role', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans', 'color_spans']
+      : ['role', 'emphasis', 'emphasis_role', 'text_shadow', 'shadow_spans', 'shadow_strength', 'italic_spans', 'color_spans'];
     const unknown = Object.keys(v).filter((k) => !allowed.includes(k));
     if (unknown.length) {
       throw bad(`${name} trae ${unknown.map((k) => `'${k}'`).join(', ')} (válidos: ${allowed.join(', ')})` +
@@ -644,6 +660,8 @@ export function parseTextStyleRequest(raw: unknown): TextStyleIn {
       shadow_strength: typeof st === 'string' && st ? st as ShadowStrength : null,
       // 1.18.0 — mismos límites que `shadow_spans`: hasta 3 tramos literales de ≤60 caracteres.
       italic_spans: list('italic_spans'),
+      // 1.21.0 — mismos límites: hasta 3 tramos literales de ≤60 caracteres.
+      color_spans: list('color_spans'),
     };
   };
   return { headline: block('headline'), sub: block('sub') };
@@ -799,6 +817,72 @@ export function applySlotItalic<S extends { slots: Record<string, any>; markers:
   return { style: { ...style, slots: { ...style.slots, [slot]: { ...s, italicFlip: ranges } }, markers }, applied: { italic: split.found } };
 }
 
+// ── 1.21.0 · COLOR POR TRAMO ──────────────────────────────────────────────────────────────────────────────────────
+// EL CASO (Sam, 2026-10-29, en las tarjetas de aprobación): «las opciones de corrección… aparte del resaltado por
+// asteriscos que convierte el texto resaltado en mayúsculas cerradas, haya otra opción para que resalte sólo en color».
+// Hasta 1.20.0 el único tramo de color era el RESALTADO de la marca, que en varias marcas trae además su tipografía
+// (otra familia, mayúsculas, otro tamaño).
+// EJE (código): QUÉ se pide —tramos literales del bloque (`text_style.<bloque>.color_spans`)— y CÓMO se aplica: el tramo
+// toma el COLOR del resaltado de su bloque y nada más; la familia, el peso, el tamaño, la caja y el tracking son los de la
+// ranura. INSTANCIA (dato): QUÉ color —el que la persona eligió para el resaltado de ese bloque (`emphasis_role`), si no
+// el resaltado de la marca (`palette.headline_emphasis`; en la bajada, `palette.subheadline_emphasis` y si no el del
+// titular)—, y con resaltado en el mismo bloque, exactamente el color del resaltado (también si el corrector de contraste
+// lo cambia; en el titular el corrector también corre sin resaltado, sobre `markColor`). El color no cambia ninguna
+// métrica: el texto mide lo mismo. Sin `color_spans`, la escena es la de 1.20.0.
+
+/**
+ * 1.21.0 — los tramos de una ranura que cambian sólo de color. PURO, gemelo de `applySlotItalic`: convierte los tramos
+ * literales en rangos `[a, b)` (`slot.colorMark`) y fija `slot.markColor`, el color que toman si la ranura no tiene
+ * resaltado (con resaltado, la escena usa el suyo). Lo que no está literal no se aplica y se dice; sin color de
+ * resaltado declarado, tampoco. Sin tramos pedidos devuelve EL MISMO estilo.
+ */
+export function applySlotColor<S extends { slots: Record<string, any>; markers: string[] }>(
+  style: S, slot: 'headline' | 'subheadline', block: Pick<TextBlockStyleIn, 'color_spans' | 'emphasis_role'> | null | undefined,
+  palette: Array<{ role?: unknown; hex?: unknown }>, tokens: Record<string, any> | null | undefined, headlineRole?: string | null,
+): { style: S; applied: { color: string[] } } {
+  const spans = block?.color_spans ?? [];
+  if (!spans.length) return { style, applied: { color: [] } };
+  const label = slot === 'headline' ? 'titular' : 'bajada';
+  const art = slot === 'headline' ? 'el' : 'la';
+  const code = slot === 'headline' ? 'HEADLINE' : 'SUBHEADLINE';
+  const s = style.slots?.[slot];
+  if (!s) {
+    return { style: { ...style, markers: [...style.markers, `OVERLAY_COLOR_SPAN_NOT_IN_${code}: ${spans.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label} (la composición no ${slot === 'headline' ? 'lo' : 'la'} lleva)`] }, applied: { color: [] } };
+  }
+  // El color: el del resaltado elegido para el bloque si está entre los permitidos; si no, el de la marca.
+  const hexOf = (role: unknown) => {
+    const hit = (palette ?? []).find((p) => String(p?.role ?? '') === String(role ?? '') && typeof p?.hex === 'string');
+    return hit ? hexToRgba(String(hit.hex), 1) : null;
+  };
+  const allowed = emphasisAllowedRoles(tokens);
+  const chosen = slot === 'headline' ? (block?.emphasis_role ?? headlineRole ?? null) : (block?.emphasis_role ?? null);
+  const own = chosen && allowed.includes(chosen) ? hexOf(chosen) : null;
+  const brandRole = slot === 'headline' ? tokens?.palette?.headline_emphasis
+    : (tokens?.palette?.subheadline_emphasis ?? tokens?.palette?.headline_emphasis);
+  const markColor = own ?? hexOf(brandRole);
+  const markers = [...style.markers];
+  if (!markColor && !s.emphasis) {
+    markers.push(`OVERLAY_COLOR_SPAN_NO_COLOR: la marca no declara el color de resaltado de ${art} ${label} (palette.${slot === 'headline' ? 'headline_emphasis' : 'subheadline_emphasis'}); ${spans.map((m) => `«${m}»`).join(', ')} no cambia de color`);
+    return { style: { ...style, markers }, applied: { color: [] } };
+  }
+  // 1.20.0 — en la bajada, un tramo que cruza un salto de línea no se encuentra.
+  const split = (slot === 'subheadline' ? splitSubheadlineSpans : splitEmphasis)(String(s.text ?? ''), [...spans]);
+  if (split.missing.length) markers.push(`OVERLAY_COLOR_SPAN_NOT_IN_${code}: ${split.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${art} ${label}; ese tramo no cambia de color`);
+  const ranges: Array<[number, number]> = [];
+  let pos = 0;
+  for (const p of split.parts) { if (p.keyword) ranges.push([pos, pos + p.text.length]); pos += p.text.length; }
+  if (!ranges.length) return { style: { ...style, markers }, applied: { color: [] } };
+  return { style: { ...style, slots: { ...style.slots, [slot]: { ...s, colorMark: ranges, ...(markColor ? { markColor } : {}) } }, markers },
+    applied: { color: split.found } };
+}
+
+/** 1.21.0 — el color de un tramo marcado: el del resaltado de la ranura si lo tiene; si no, `markColor`. PURO. */
+export function colorSpanCss(slot: { emphasis?: { color: string } | null; markColor?: string }, marked: boolean): Record<string, string> {
+  if (!marked) return {};
+  const c = slot.emphasis?.color ?? slot.markColor;
+  return c ? { color: c } : {};
+}
+
 /**
  * 1.18.0 — el estilo FINAL de un tramo: la cursiva de base (la de la ranura, o la del resaltado si el tramo es keyword)
  * invertida si el tramo la pide. PURO. Si la cara contraria no existe: 'skew' ⇒ cara recta inclinada; 'none' ⇒ como
@@ -911,6 +995,8 @@ export function italicFallbackFor(need: Pick<ItalicFaceNeed, 'family' | 'italic'
  */
 export function applyTextStyleBlocks<S extends ReturnType<typeof resolveOverlayStyle>>(
   style: S, ts: TextStyleIn, palette: Array<{ role?: unknown; hex?: unknown }>, tokens: Record<string, any> | null | undefined,
+  // 1.21.0 — el color de resaltado elegido para el titular por el campo suelto (1.8.0), para sus tramos de color.
+  headlineEmphasisRole?: string | null,
 ): { style: S; applied: null | Record<'headline' | 'sub', Record<string, unknown>> } {
   if (!textBlockRequested(ts.headline) && !textBlockRequested(ts.sub)) return { style, applied: null };
   const textRoles = textAllowedRoles(tokens, palette);
@@ -923,10 +1009,14 @@ export function applyTextStyleBlocks<S extends ReturnType<typeof resolveOverlayS
   // 1.18.0 — la cursiva por tramo de cada ranura.
   const h4 = applySlotItalic(out, 'headline', ts.headline); out = h4.style;
   const s4 = applySlotItalic(out, 'subheadline', ts.sub); out = s4.style;
+  // 1.21.0 — el color por tramo de cada ranura.
+  const h5 = applySlotColor(out, 'headline', ts.headline, palette, tokens, headlineEmphasisRole ?? null); out = h5.style;
+  const s5 = applySlotColor(out, 'subheadline', ts.sub, palette, tokens); out = s5.style;
   const sub = out.slots.subheadline;
   return { style: out, applied: {
-    headline: { role: h1.applied, shadow: h3.applied, italic: h4.applied.italic },
+    headline: { role: h1.applied, shadow: h3.applied, italic: h4.applied.italic, ...(h5.applied.color.length ? { color: h5.applied.color } : {}) },
     sub: { role: s1.applied, emphasis_role: s2.applied, shadow: s3.applied, italic: s4.applied.italic,
+      ...(s5.applied.color.length ? { color: s5.applied.color } : {}),
       highlighted: sub?.parts && sub.emphasis ? sub.parts.filter((p) => p.keyword).map((p) => p.text) : [] },
   } };
 }
@@ -1319,6 +1409,10 @@ export function resolveOverlayStyle(args: {
     shadowScale?: number;
     // 1.18.0 — tramos [inicio, fin) cuya cursiva va al revés de la que tienen debajo. Ausente ⇒ como 1.17.0.
     italicFlip?: Array<[number, number]>;
+    // 1.21.0 — tramos [inicio, fin) que cambian sólo de color, y el color que toman sin resaltado en la ranura. Ausentes
+    // ⇒ como 1.20.0.
+    colorMark?: Array<[number, number]>;
+    markColor?: string;
     // 1.5.0 — los escalones de `fit_steps` MÁS CHICOS que el elegido, de mayor a menor: el límite de área
     // baja por ellos. Lo usa sólo `fitOverlayTextArea`; la escena no lo lee.
     fitSmaller?: number[];
@@ -2208,7 +2302,7 @@ export function fitOverlayTextHeight(args: {
  * estilo, tamaño (escala del titular), tracking, transformación y color. Los demás heredan del padre.
  */
 function emphasisAtomsNode(
-  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>,
+  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean; color?: boolean }>,
   base: { sizePct: number },
   em: (EmphasisType & { color: string }) | null | undefined,
   width: number,
@@ -2218,6 +2312,8 @@ function emphasisAtomsNode(
   shadowOf?: (p: { flip?: boolean }) => string | undefined,
   // 1.18.0 — con tramos de cursiva al revés, cada tramo lleva su `fontStyle` explícito (y su inclinación, si se simula).
   italicOf?: (p: { keyword: boolean; italic?: boolean }) => Record<string, string>,
+  // 1.21.0 — con tramos de sólo color, cada tramo marcado lleva su `color` explícito.
+  colorOf?: (p: { color?: boolean }) => Record<string, string>,
 ): Array<Record<string, any>> {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const size = em ? r2((base.sizePct * em.sizeScale / 100) * width) : 0;
@@ -2226,9 +2322,10 @@ function emphasisAtomsNode(
     fontSize: size, letterSpacing: r2(em.letterSpacingEm * size), textTransform: em.transform, color: em.color,
     ...(textShadow && !shadowOf ? { textShadow } : {}),
   } : {};
-  const styleOf = (p: { keyword: boolean; flip?: boolean; italic?: boolean }) => {
+  const styleOf = (p: { keyword: boolean; flip?: boolean; italic?: boolean; color?: boolean }) => {
     const st0 = p.keyword && em ? emStyle : {};
-    const st = italicOf ? { ...st0, ...italicOf(p) } : st0;
+    const st1 = italicOf ? { ...st0, ...italicOf(p) } : st0;
+    const st = colorOf ? { ...st1, ...colorOf(p) } : st1;
     if (!shadowOf) return st;
     const sh = shadowOf(p);
     return sh ? { ...st, textShadow: sh } : st;
@@ -2248,11 +2345,13 @@ export function shadowForSpan(flip: boolean | undefined, baseShadow: string | un
   return baseShadow ? undefined : declaredShadow;
 }
 
-/** 1.9.0 / 1.18.0 — una ranura dibujada por tramos marcados: sus trozos y, si los hay, la sombra y la cursiva de cada uno. */
+/** 1.9.0 / 1.18.0 / 1.21.0 — una ranura dibujada por tramos marcados: sus trozos y, si los hay, la sombra, la cursiva y el color de cada uno. */
 type SpanFlagsNode = {
-  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>;
+  parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean; color?: boolean }>;
   shadowOf?: (p: { flip?: boolean }) => string | undefined;
   italicOf?: (p: { keyword: boolean; italic?: boolean }) => Record<string, string>;
+  // 1.21.0 — y el color de los tramos marcados.
+  colorOf?: (p: { color?: boolean }) => Record<string, string>;
 };
 
 /**
@@ -2263,7 +2362,7 @@ function headlineRowsNode(
   s: { text: string; lines?: Array<[number, number]>; parts?: Array<{ text: string; keyword: boolean }> | null; emphasis?: any; sizePct: number },
   width: number, textShadow: string | undefined, align: string,
   // 1.9.0 — tramos de sombra al revés: el titular entero va por átomos, cada uno con su sombra.
-  // 1.18.0 — y lo mismo con tramos de cursiva al revés: cada átomo con su estilo.
+  // 1.18.0 — y lo mismo con tramos de cursiva al revés: cada átomo con su estilo. 1.21.0 — y con tramos de sólo color.
   flip?: SpanFlagsNode,
 ): Array<Record<string, any>> {
   const justify = align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start';
@@ -2272,7 +2371,7 @@ function headlineRowsNode(
     props: {
       style: { display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: justify },
       children: flip
-        ? emphasisAtomsNode(partsInRange(flip.parts, a, b), s, s.emphasis, width, textShadow, flip.shadowOf, flip.italicOf)
+        ? emphasisAtomsNode(partsInRange(flip.parts, a, b), s, s.emphasis, width, textShadow, flip.shadowOf, flip.italicOf, flip.colorOf)
         : s.parts && s.emphasis
         ? emphasisAtomsNode(partsInRange(s.parts, a, b), s, s.emphasis, width, textShadow)
         : s.text.slice(a, b),
@@ -2399,10 +2498,14 @@ export function buildOverlayScene(args: {
     const declaredShadow = declaredShadowOf(s);
     const shadowFlip = s.shadowFlip?.length && declaredShadow ? s.shadowFlip : null;
     const italicFlip = s.italicFlip?.length ? s.italicFlip : null;
-    if (!shadowFlip && !italicFlip) return undefined;
+    // 1.21.0 — y tramos de sólo color.
+    const colorFlip = s.colorMark?.length ? s.colorMark : null;
+    if (!shadowFlip && !italicFlip && !colorFlip) return undefined;
     const em = s.parts && s.emphasis ? s.emphasis : null;
     return {
-      parts: withSpanFlags(s.text, s.parts, { ...(shadowFlip ? { flip: shadowFlip } : {}), ...(italicFlip ? { italic: italicFlip } : {}) }),
+      parts: withSpanFlags(s.text, s.parts, { ...(shadowFlip ? { flip: shadowFlip } : {}), ...(italicFlip ? { italic: italicFlip } : {}),
+        ...(colorFlip ? { color: colorFlip } : {}) }),
+      ...(colorFlip ? { colorOf: (p: { color?: boolean }) => colorSpanCss(s, !!p.color) } : {}),
       ...(shadowFlip ? { shadowOf: (p: { flip?: boolean }) => shadowForSpan(p.flip, shadow, declaredShadow!) } : {}),
       ...(italicFlip ? { italicOf: (p: { keyword: boolean; italic?: boolean }) => {
         const face = p.keyword && em ? em : s;
@@ -2441,7 +2544,7 @@ export function buildOverlayScene(args: {
         } : {}),
       },
       children: s.lines ? headlineRowsNode(s, width, shadow, style.layout.align, flip)
-        : flip ? emphasisAtomsNode(flip.parts, s, s.emphasis, width, shadow, flip.shadowOf, flip.italicOf)
+        : flip ? emphasisAtomsNode(flip.parts, s, s.emphasis, width, shadow, flip.shadowOf, flip.italicOf, flip.colorOf)
         : s.parts && s.emphasis ? emphasisAtomsNode(s.parts, s, s.emphasis, width, shadow) : s.text,
     },
   };
@@ -2898,6 +3001,11 @@ export function resolveCarouselChrome(args: {
   headlineItalic?: Array<[number, number]>;
   subItalic?: Array<[number, number]>;
   italicFallback?: Record<string, ItalicFallback>;
+  // 1.21.0 — tramos [inicio, fin) del titular y de la bajada que cambian sólo de color, y el color de los de la bajada
+  // (los del titular toman `colors.keyword`). Los pone SÓLO `applyCarouselTextStyle`; ausentes ⇒ la lámina de 1.20.0.
+  headlineColor?: Array<[number, number]>;
+  subColor?: Array<[number, number]>;
+  subColorValue?: string;
 } {
   const t = args.tokens ?? {};
   const ctRaw: unknown = t.carousel;
@@ -3168,13 +3276,20 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
   let out: CarouselChrome = { ...chrome, colors };
 
   // El resaltado de la bajada: color propio, o el del resaltado de la marca, o el de la palabra clave de la lámina.
+  // 1.21.0 — el mismo color toman los tramos de sólo color de la bajada; se elige una vez para los dos.
+  let subMark: { own: string | null; color: string } | null = null;
+  const subMarkColor = () => {
+    if (subMark) return subMark;
+    const own = pick('SUB_EMPHASIS', sb.emphasis_role, emRoles);
+    const markRole = tokens?.palette?.subheadline_emphasis ?? tokens?.palette?.headline_emphasis;
+    subMark = { own, color: own ?? (typeof markRole === 'string' ? hexOf(markRole) : null) ?? colors.keyword };
+    return subMark;
+  };
   if (sb.emphasis.length && chrome.subheadline) {
     const r = literalRanges(chrome.subheadline, sb.emphasis, true);
     if (r.missing.length) warnings.push(`CAROUSEL_SUB_EMPHASIS_NOT_IN_SUBHEADLINE: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en la bajada; ese tramo no se resalta`);
     if (r.found.length) {
-      const own = pick('SUB_EMPHASIS', sb.emphasis_role, emRoles);
-      const markRole = tokens?.palette?.subheadline_emphasis ?? tokens?.palette?.headline_emphasis;
-      const color = own ?? (typeof markRole === 'string' ? hexOf(markRole) : null) ?? colors.keyword;
+      const { own, color } = subMarkColor();
       out = { ...out, subParts: splitEmphasis(chrome.subheadline, r.found).parts, subKeywordColor: color };
       applied.sub.highlighted = r.found;
       if (own) applied.sub.emphasis_role = sb.emphasis_role;
@@ -3222,6 +3337,24 @@ export function applyCarouselTextStyle(chrome: CarouselChrome, args: {
   if (si.ranges.length) out = { ...out, subItalic: si.ranges };
   applied.headline.italic = hi.found;
   applied.sub.italic = si.found;
+
+  // 1.21.0 — el color por tramo: el titular toma el color de su resaltado (`colors.keyword`, ya con el elegido); la
+  // bajada, el de su resaltado. Ni la caja ni la tipografía cambian.
+  const colorOf = (spans: readonly string[] | undefined, text: string | null, code: 'HEADLINE' | 'SUBHEADLINE', label: string) => {
+    if (!spans?.length) return { ranges: [] as Array<[number, number]>, found: [] as string[] };
+    const r = literalRanges(text ?? '', spans, code === 'SUBHEADLINE');
+    if (r.missing.length) warnings.push(`CAROUSEL_COLOR_SPAN_NOT_IN_${code}: ${r.missing.map((m) => `«${m}»`).join(', ')} no está literal en ${label}; ese tramo no cambia de color`);
+    return { ranges: r.ranges, found: r.found };
+  };
+  const hcol = colorOf(hb.color_spans, chrome.headline.length ? headText : null, 'HEADLINE', 'el titular');
+  const scolr = colorOf(sb.color_spans, chrome.subheadline, 'SUBHEADLINE', 'la bajada');
+  if (hcol.ranges.length) { out = { ...out, headlineColor: hcol.ranges }; applied.headline.color = hcol.found; }
+  if (scolr.ranges.length) {
+    const { own, color } = subMarkColor();
+    out = { ...out, subColor: scolr.ranges, subColorValue: color };
+    applied.sub.color = scolr.found;
+    if (own) applied.sub.emphasis_role = sb.emphasis_role;
+  }
   return { chrome: out, warnings, applied };
 }
 
@@ -3599,9 +3732,11 @@ export function buildCarouselScene(args: {
         style: { display: 'flex', flexWrap: 'wrap', width: blockW, ...hf, color: c.headline, ...headFx.fx, ...(HE ? { alignItems: 'baseline' } : {}) },
         // 1.18.0 — los tramos de cursiva al revés se marcan junto con los de sombra (`withSpanFlags`); sin ninguno, el
         // titular de 1.17.0.
-        children: headlineAtoms(headFx.flip || chrome.headlineItalic?.length
+        // 1.21.0 — y los de sólo color.
+        children: headlineAtoms(headFx.flip || chrome.headlineItalic?.length || chrome.headlineColor?.length
           ? withSpanFlags(chrome.headline.map((p) => p.text).join(''), chrome.headline, {
-            ...(headFx.flip ? { flip: chrome.headlineShadow!.flip! } : {}), ...(chrome.headlineItalic?.length ? { italic: chrome.headlineItalic } : {}) })
+            ...(headFx.flip ? { flip: chrome.headlineShadow!.flip! } : {}), ...(chrome.headlineItalic?.length ? { italic: chrome.headlineItalic } : {}),
+            ...(chrome.headlineColor?.length ? { color: chrome.headlineColor } : {}) })
           : chrome.headline).flatMap((atom, k) => [
           // 1.13.0 — un corte a la fuerza es un hueco del ancho del bloque y alto cero: la fila se parte justo ahí.
           ...(chrome.headlineBreaks?.includes(k) ? [{ type: 'div', props: { style: { display: 'flex', width: blockW, height: 0 } } }] : []),
@@ -3613,7 +3748,8 @@ export function buildCarouselScene(args: {
               type: 'span',
               props: {
                 style: {
-                  textTransform: T.headline.transform, color: p.keyword ? c.keyword : c.headline, ...headFx.spanFx((p as { flip?: boolean }).flip),
+                  textTransform: T.headline.transform, ...headFx.spanFx((p as { flip?: boolean }).flip),
+                  color: p.keyword || (p as { color?: boolean }).color ? c.keyword : c.headline,
                   // 1.4.0 — el tramo resaltado con la tipografía de énfasis de la marca.
                   ...(HE && p.keyword ? { ...font(HE, r2(hs * HE.sizeScale)) } : {}),
                   // 1.18.0 — con tramos de cursiva al revés, cada tramo lleva su estilo explícito.
@@ -3638,11 +3774,14 @@ export function buildCarouselScene(args: {
   // fila por línea escrita, cada una con lo que la bajada lleva (texto llano o átomos). Sin `\n`, null y la bajada es la
   // de 1.19.0, nodo por nodo.
   const subLines = chrome.subheadline ? subheadlineLineRanges(chrome.subheadline) : null;
-  const subSpans = !!(chrome.subParts || subFx.flip || subItalic);
+  // 1.21.0 — y con tramos de sólo color.
+  const subColor = chrome.subColor?.length ? chrome.subColor : null;
+  const subSpans = !!(chrome.subParts || subFx.flip || subItalic || subColor);
   const subAllParts = () => {
     const base = chrome.subParts ?? [{ text: chrome.subheadline!, keyword: false }];
-    return subItalic
-      ? withSpanFlags(chrome.subheadline!, base, { ...(subFx.flip ? { flip: chrome.subShadow!.flip! } : {}), italic: subItalic })
+    return subItalic || subColor
+      ? withSpanFlags(chrome.subheadline!, base, { ...(subFx.flip ? { flip: chrome.subShadow!.flip! } : {}),
+        ...(subItalic ? { italic: subItalic } : {}), ...(subColor ? { color: subColor } : {}) })
       : subFx.flip ? withShadowFlip(chrome.subheadline!, base, chrome.subShadow!.flip!) : base;
   };
   const subNode = (marginTop: number): Record<string, any> => {
@@ -3661,7 +3800,7 @@ export function buildCarouselScene(args: {
     if (!subSpans) return text(chrome.subheadline!, { ...font(T.body, B), color: c.subheadline, marginTop, width: blockW, ...subFx.fx });
     return subRow(subAllParts(), marginTop);
   };
-  const subRow = (parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean }>, marginTop: number) => {
+  const subRow = (parts: Array<{ text: string; keyword: boolean; flip?: boolean; italic?: boolean; color?: boolean }>, marginTop: number) => {
     return {
       type: 'div',
       props: {
@@ -3671,7 +3810,8 @@ export function buildCarouselScene(args: {
           props: {
             style: { display: 'flex', flexDirection: 'row', alignItems: 'baseline' },
             children: atom.map((p) => ({ type: 'span', props: { style: {
-              color: p.keyword && chrome.subKeywordColor ? chrome.subKeywordColor : c.subheadline,
+              color: p.keyword && chrome.subKeywordColor ? chrome.subKeywordColor
+                : (p as { color?: boolean }).color && chrome.subColorValue ? chrome.subColorValue : c.subheadline,
               ...subFx.spanFx((p as { flip?: boolean }).flip),
               ...(subItalic ? italicSpanCss(T.body.italic, !!(p as { italic?: boolean }).italic, chrome.italicFallback?.[fitFontKey(T.body)]) : {}) }, children: p.text } })),
           },
@@ -5131,11 +5271,13 @@ export function decideEmphasisColor(args: {
     reason: `contraste ${r2(before)} < ${args.minContrast}: el énfasis pasa a ${best.role} (${r2(best.c)})` };
 }
 
-/** 1.6.3 — el estilo con el color del énfasis cambiado. PURO; devuelve el MISMO objeto si no hay énfasis. */
+/** 1.6.3 — el estilo con el color del énfasis cambiado. PURO; devuelve el MISMO objeto si no hay énfasis.
+ *  1.21.0 — y el de los tramos de sólo color del titular (`markColor`), que son el mismo color. */
 export function withEmphasisColor<S extends { slots: Record<string, any> }>(style: S, color: string): S {
   const hl = style.slots.headline;
-  if (!hl?.emphasis) return style;
-  return { ...style, slots: { ...style.slots, headline: { ...hl, emphasis: { ...hl.emphasis, color } } } } as S;
+  if (!hl?.emphasis && !hl?.colorMark?.length) return style;
+  return { ...style, slots: { ...style.slots, headline: { ...hl,
+    ...(hl.emphasis ? { emphasis: { ...hl.emphasis, color } } : {}), ...(hl.colorMark?.length ? { markColor: color } : {}) } } } as S;
 }
 
 // ── 1.6.2 — CUÁNDO SE APLICA LA SOMBRA: MEDIDO, NO DECLARADO POR PIEZA ──
@@ -6521,7 +6663,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const shadowApplied = textShadowIn || legacySpans.length
       ? applyTextShadowRequest(identityApplied.style, textShadowIn, legacySpans) : null;
     // 1.16.0 — CADA BLOQUE: color del texto, resaltado de la bajada y la sombra propia de cada ranura.
-    const block = applyTextStyleBlocks(shadowApplied ? shadowApplied.style : identityApplied.style, textStyleIn, palette as any[], picked.tokens);
+    const block = applyTextStyleBlocks(shadowApplied ? shadowApplied.style : identityApplied.style, textStyleIn, palette as any[], picked.tokens, emphasisRoleUsed);
     const style = block.style;
 
     // ── F3 · lámina de carrusel ── Sólo si llega `carousel` Y la marca declara `tokens.carousel`.
@@ -6915,7 +7057,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     let emphasisContrastMeta: Record<string, unknown> | null = null;
     let subContrastMeta: Record<string, unknown> | null = null;
     const teLow = finalStyle.textEffect?.when === 'low_contrast' ? finalStyle.textEffect : null;
-    const ec = finalStyle.layout.emphasisContrast && finalStyle.slots.headline?.emphasis ? finalStyle.layout.emphasisContrast : null;
+    // 1.21.0 — el corrector protege también los tramos de sólo color del titular (toman el mismo color).
+    const headMark = finalStyle.slots.headline?.emphasis?.color ?? (finalStyle.slots.headline?.colorMark?.length ? finalStyle.slots.headline.markColor : undefined);
+    const ec = finalStyle.layout.emphasisContrast && headMark ? finalStyle.layout.emphasisContrast : null;
     // 1.16.0 — la bajada se protege sola, salvo que una persona le haya elegido el color.
     const sc = finalStyle.layout.subContrast && finalStyle.slots.subheadline && !block.applied?.sub?.role ? finalStyle.layout.subContrast : null;
     if ((teLow || ec || sc) && finalStyle.slots.headline) {
@@ -6935,7 +7079,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const rectOut = { x0: Math.round(rect.x0), y0: Math.round(rect.y0), x1: Math.round(rect.x1), y1: Math.round(rect.y1) };
 
       if (ec) {
-        const d = decideEmphasisColor({ currentColor: finalStyle.slots.headline!.emphasis!.color, fallbacks: ec.fallbacks,
+        const d = decideEmphasisColor({ currentColor: headMark!, fallbacks: ec.fallbacks,
           bgLuminances: bg.luminances, minContrast: ec.minContrast,
           ...(ec.minContrastVsText != null ? { textColor: finalStyle.slots.headline!.color, minContrastVsText: ec.minContrastVsText } : {}) });
         emphasisContrastMeta = { ...d, samples: bg.luminances.length, rect: rectOut };
