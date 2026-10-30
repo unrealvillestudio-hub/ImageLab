@@ -17,6 +17,8 @@
 //   9. Marca N+1: el bloque nuevo no nombra marcas.
 //  10. 1.18.0 — CURSIVA POR TRAMO: `italic_spans` por bloque invierte la cursiva de lo que tiene debajo, en el overlay y
 //      en la lámina; la cara que falta se simula inclinando la recta; cada tramo se mide con la métrica de su estilo.
+//  11. 1.21.0 — COLOR POR TRAMO: `color_spans` por bloque cambia SÓLO el color (misma familia, caja y tamaño), con el
+//      color del resaltado de ese bloque; en el overlay y en la lámina; no cambia ninguna medida.
 //
 // Ejecutar:  node tests/texto_por_bloque_test.mjs     (Node ≥ 22.18)
 
@@ -75,9 +77,9 @@ test('1a · ausente ⇒ los dos bloques vacíos', () => {
 });
 test('1b · la forma válida se normaliza', () => {
   const r = ts({ headline: { role: 'tinta', shadow_strength: 'strong' }, sub: { emphasis: ['el vecino'], emphasis_role: 'hoja', role: 'lino', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy' } });
-  // 1.18.0 — la forma normalizada lleva además `italic_spans` (vacío si no llega).
-  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong', italic_spans: [] });
-  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy', italic_spans: [] });
+  // 1.18.0 — la forma normalizada lleva además `italic_spans` (vacío si no llega). 1.21.0 — y `color_spans`.
+  assert.deepEqual(r.headline, { role: 'tinta', emphasis: [], emphasis_role: null, text_shadow: null, shadow_spans: [], shadow_strength: 'strong', italic_spans: [], color_spans: [] });
+  assert.deepEqual(r.sub, { role: 'lino', emphasis: ['el vecino'], emphasis_role: 'hoja', text_shadow: 'on', shadow_spans: ['No fue'], shadow_strength: 'heavy', italic_spans: [], color_spans: [] });
   assert.deepEqual(Object.keys(M.SHADOW_STRENGTHS), ['soft', 'brand', 'strong', 'heavy']);
 });
 test('1c · lo que no es contrato es 400 con etiqueta, antes de leer dato', () => {
@@ -410,7 +412,7 @@ test('10l · cableado: las caras contrarias se bajan antes de cualquier ajuste, 
   const c = SRC.indexOf('const italicLoad = await loadOppositeFaces(carouselItalicFacesNeeded(chrome), new Set(Object.keys(metrics)));');
   const d = SRC.indexOf('const area = fitCarouselCoverArea({ chrome: withItalicFallback(chrome, italicLoad.fallback), metrics');
   assert.ok(c > 0 && d > c);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(18|19|20)\.0'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(18|19|2\d)\.0'/);
   assert.match(SRC, /googleFontsFaceCssUrl\(need\.family, need\.weight, need\.italic\)/);
 });
 test('10m · el bloque nuevo no nombra familias ni marcas', () => {
@@ -418,6 +420,107 @@ test('10m · el bloque nuevo no nombra familias ni marcas', () => {
   const fin = SRC.indexOf('/**\n * 1.16.0 — aplica lo elegido por bloque al estilo del overlay', ini);
   const blk = SRC.slice(ini, fin);
   assert.ok(blk.length > 2000);
+  assert.ok(!/neurone|forum|unrealville|lucien|panam|miami|pt sans|narrow|garamond|bebas|baskerville/i.test(blk));
+});
+
+console.log('\n── 11 · 1.21.0 · color por tramo ──');
+const TRIGO = M.hexToRgba('#D9A441', 1), HOJA = M.hexToRgba('#2F7A3D', 1);
+test('11a · contrato: `color_spans` se acepta en los dos bloques, con los límites de `shadow_spans`', () => {
+  const r = ts({ headline: { color_spans: ['cosecha'] }, sub: { color_spans: ['el clima', 'el vecino'] } });
+  assert.deepEqual(r.headline.color_spans, ['cosecha']); assert.deepEqual(r.sub.color_spans, ['el clima', 'el vecino']);
+  assert.equal(M.textBlockRequested(r.headline), true);
+  for (const v of [{ headline: { color_spans: ['a', 'b', 'c', 'd'] } }, { sub: { color_spans: 'x' } }, { sub: { color_spans: [3] } },
+    { headline: { color_spans: ['x'.repeat(61)] } }, { headline: { colour_spans: ['x'] } }]) {
+    assert.throws(() => ts(v), (e) => e.label === 'COMPOSITOR_TEXT_STYLE_INVALID' && e.status === 400, JSON.stringify(v));
+  }
+});
+test('11b · golden: sin `color_spans` la ranura no lleva tramos, `applied` no trae `color` y la escena es la misma', () => {
+  const s = resolveI();
+  const r = M.applyTextStyleBlocks(s, ts({ headline: { role: 'tinta' } }), PAL, ITOK());
+  assert.equal(r.style.slots.headline.colorMark, undefined); assert.equal(r.style.slots.subheadline.colorMark, undefined);
+  assert.ok(!('color' in r.applied.headline) && !('color' in r.applied.sub));
+});
+test('11c · el tramo cambia sólo de color: misma familia, estilo y caja que su vecino; `applied.color` lo dice', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['cosecha'] }, sub: { color_spans: ['el vecino'] } }), PAL, ITOK());
+  assert.deepEqual(r.applied.headline.color, ['cosecha']); assert.deepEqual(r.applied.sub.color, ['el vecino']);
+  const sc = scene(r.style);
+  const cos = spanStyle(sc, 'cosecha'), pre = spanStyle(sc, 'precio');
+  assert.equal(cos.color, TRIGO, 'el color del resaltado de la marca');
+  assert.equal(pre.color, undefined, 'el vecino hereda el color de la ranura');
+  for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'textTransform', 'fontStyle']) assert.equal(cos[k], pre[k], k);
+  assert.equal(spanStyle(sc, 'vecino').color, TRIGO, 'la bajada sin color propio toma el del resaltado del titular');
+});
+test('11d · con `emphasis_role` elegido (y permitido), el tramo toma ese color; fuera de la lista, el de la marca', () => {
+  const ok = M.applyTextStyleBlocks(resolveI(), ts({ sub: { color_spans: ['el vecino'], emphasis_role: 'hoja' } }), PAL, ITOK());
+  assert.equal(spanStyle(scene(ok.style), 'vecino').color, HOJA);
+  const h = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['cosecha'] } }), PAL, ITOK(), 'hoja');
+  assert.equal(spanStyle(scene(h.style), 'cosecha').color, HOJA, 'el resaltado elegido para el titular');
+  const no = M.applyTextStyleBlocks(resolveI(), ts({ sub: { color_spans: ['el vecino'], emphasis_role: 'tinta' } }), PAL, ITOK());
+  assert.equal(spanStyle(scene(no.style), 'vecino').color, TRIGO);
+});
+test('11e · con resaltado en el mismo bloque, el tramo toma exactamente el color del resaltado', () => {
+  const s = resolveI(ITOK(), { ...TEXT, emphasis: ['está bajando'] });
+  const r = M.applyTextStyleBlocks(s, ts({ headline: { color_spans: ['precio'] } }), PAL, ITOK());
+  const sc = scene(r.style);
+  assert.equal(spanStyle(sc, 'precio').color, r.style.slots.headline.emphasis.color);
+  assert.equal(spanStyle(sc, 'precio').fontFamily, undefined, 'el tramo de color no toma la tipografía del resaltado');
+  assert.equal(spanStyle(sc, 'precio').fontSize, undefined);
+  assert.equal(spanStyle(sc, 'bajando').fontStyle, 'italic', 'el resaltado conserva la suya');
+});
+test('11f · lo que no está literal no se aplica y se dice; sin color de resaltado declarado, tampoco', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['granizo'] }, sub: { color_spans: ['la lluvia'] } }), PAL, ITOK());
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_COLOR_SPAN_NOT_IN_HEADLINE: «granizo»')));
+  assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_COLOR_SPAN_NOT_IN_SUBHEADLINE: «la lluvia»')));
+  assert.ok(!('color' in r.applied.headline));
+  const tok = ITOK({ palette: { headline_emphasis: null } });
+  const n = M.applyTextStyleBlocks(resolveI(tok), ts({ headline: { color_spans: ['cosecha'] } }), PAL, tok);
+  assert.ok(n.style.markers.some((m) => m.startsWith('OVERLAY_COLOR_SPAN_NO_COLOR')), n.style.markers.join(' | '));
+});
+test('11g · color, cursiva y sombra al revés a la vez en el mismo tramo', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['cosecha'], italic_spans: ['cosecha'], shadow_spans: ['cosecha'] } }), PAL, ITOK());
+  const cos = spanStyle(scene(r.style), 'cosecha');
+  assert.equal(cos.color, TRIGO); assert.equal(cos.fontStyle, 'italic'); assert.equal(cos.textShadow, undefined);
+});
+test('11h · el color no cambia ninguna medida', () => {
+  const m = { 'Fuente Titular|400|normal': adv(0.5), 'Fuente Texto|400|normal': adv(0.5) };
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['cosecha'] }, sub: { color_spans: ['el vecino'] } }), PAL, ITOK());
+  assert.deepEqual(M.measureOverlayText(r.style, W, H, m), M.measureOverlayText(resolveI(), W, H, m));
+});
+test('11i · lámina: el titular toma el color de su palabra clave; la bajada, el de su resaltado; sin medida nueva', () => {
+  const r = M.applyCarouselTextStyle(chromeOf(), { ts: ts({ headline: { color_spans: ['precio'] }, sub: { color_spans: ['el vecino', 'granizo'], emphasis_role: 'hoja' } }), legacy: NOLEG, palette: PAL, tokens: CTOK, declared: null });
+  assert.deepEqual(r.applied.headline.color, ['precio']); assert.deepEqual(r.applied.sub.color, ['el vecino']);
+  assert.equal(r.applied.sub.emphasis_role, 'hoja');
+  assert.ok(r.warnings.some((w) => w.startsWith('CAROUSEL_COLOR_SPAN_NOT_IN_SUBHEADLINE: «granizo»')));
+  const sc = cscene(r.chrome);
+  assert.equal(spanStyle(sc, 'precio').color, r.chrome.colors.keyword); assert.equal(spanStyle(sc, 'bajando').color, r.chrome.colors.headline);
+  assert.equal(spanStyle(sc, 'vecino').color, HOJA); assert.equal(spanStyle(sc, 'clima.').color, r.chrome.colors.subheadline);
+  const CM = { 'Fuente Titular|700|normal': adv(0.5), 'Fuente Texto|400|normal': adv(0.5), 'Fuente Rotulo|600|normal': adv(0.5), 'Fuente Titular|400|normal': adv(0.5) };
+  assert.deepEqual(M.measureCarouselLayout(r.chrome, CM), M.measureCarouselLayout(chromeOf(), CM));
+});
+test('11j · lámina sin `color_spans`: EL MISMO cromo (golden de 7a)', () => {
+  const c = chromeOf();
+  const r = M.applyCarouselTextStyle(c, { ts: ts(null), legacy: NOLEG, palette: PAL, tokens: CTOK, declared: null });
+  assert.equal(r.chrome, c);
+});
+test('11m · el corrector de contraste cambia también el color de los tramos del titular sin resaltado', () => {
+  const r = M.applyTextStyleBlocks(resolveI(), ts({ headline: { color_spans: ['cosecha'] } }), PAL, ITOK());
+  const st = M.withEmphasisColor(r.style, HOJA);
+  assert.equal(st.slots.headline.markColor, HOJA); assert.equal(st.slots.headline.emphasis, undefined);
+  assert.equal(spanStyle(scene(st), 'cosecha').color, HOJA);
+  const plain = resolveI(); assert.equal(M.withEmphasisColor(plain, HOJA), plain, 'sin resaltado ni tramos, EL MISMO estilo');
+  assert.match(SRC, /const headMark = finalStyle\.slots\.headline\?\.emphasis\?\.color \?\? \(finalStyle\.slots\.headline\?\.colorMark\?\.length \? finalStyle\.slots\.headline\.markColor : undefined\);/);
+  assert.match(SRC, /decideEmphasisColor\(\{ currentColor: headMark!,/);
+});
+test('11k · versión e historia: 1.21.0 documentada en la cabecera', () => {
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.2[1-9]\.0'/);
+  const hist = SRC.slice(SRC.indexOf('//   1.21.0 (2026-10-30)'), SRC.indexOf("export const COMPOSITOR_VERSION = '"));
+  assert.ok(hist.includes('color_spans') && hist.includes('Sin `color_spans`, idéntico a 1.20.0'));
+});
+test('11l · el bloque nuevo no nombra familias ni marcas', () => {
+  const ini = SRC.indexOf('// ── 1.21.0 · COLOR POR TRAMO');
+  const fin = SRC.indexOf('/**\n * 1.18.0 — el estilo FINAL de un tramo', ini);
+  const blk = SRC.slice(ini, fin);
+  assert.ok(blk.length > 1500, String(blk.length));
   assert.ok(!/neurone|forum|unrealville|lucien|panam|miami|pt sans|narrow|garamond|bebas|baskerville/i.test(blk));
 });
 

@@ -264,7 +264,7 @@ test('7a · el handler ya no reajusta una banda y la escena del overlay no la di
   assert.equal(SRC.includes('overlayBandRect'), false);
   assert.equal(/if \(style\.band\)/.test(SRC), false);
   assert.equal(SRC.includes('OVERLAY_BAND_FOR_PERSON'), false);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.1|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.1|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0|21\.0)'/);
 });
 test('7b · la elección de 1.12.0 es la de siempre: chooseOverlayAnchorCore y chooseCarouselPlacementCore', () => {
   assert.match(SRC, /const r12 = chooseOverlayAnchorCore\(\{ \.\.\.args, style: \{ \.\.\.style, layout: layoutSinCuerpo \}, people: null \}\);/);

@@ -390,7 +390,7 @@ test('6c · el corte va después de la elección del ancla, y viaja en meta', ()
   assert.match(SRC, /\.\.\.\(orphan\.report\.length \? \{ orphan_lines: orphan\.report \} : \{\}\),/);
   assert.match(SRC, /fit = carouselAvoidOrphan\(fit, metrics\);\n\s*warnings\.push\(\.\.\.fit\.warnings\);/);
   assert.match(SRC, /\.\.\.\(wantPeople \? \{ people_boxes: fc\.people \} : \{\}\)/);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.[01]|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.[01]|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0|21\.0)'/);
 });
 
 console.log('\n── 7 · marca N+1 ──');
