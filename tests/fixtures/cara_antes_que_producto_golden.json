@@ -1,0 +1,1119 @@
+{
+ "1.22.0": {
+  "ref": "ce88b3d",
+  "overlay": {
+   "06a5180c": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": true,
+    "scene_sha256": "d9f0d204b3d50a650379a948e835919ee171bb77f9efb6de720ba28e314de058",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "0cd8f005": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "1e2e665bc6e4ab92783eff503bdce35667d3da01c916a0d2bd2e74d606e35c26",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "2383b96f": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "17def47130102d5d4d06411e69890f765f6811c37ba7f41e8ba78f17377e7aa2",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0.34
+   },
+   "7085ece4": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "0a2643fe4c6674d90ca225160e876a6b60f2bdbb684368f5d9f4377283211bc7",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "b24cdc5f": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "7433d5323793030d9e30c2475ff068ac3a0d213fc5186be1cdc9dae04a4fde4b",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_EXCEEDED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 75.11,
+    "product_covered_pct": 0
+   },
+   "da5bafa1": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "d5add808d63516d498d41f9f18df3d6d4390d01eb1910fe34e2d3224de12c381",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "f0955319": {
+    "anchor": "middle_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "6c32ad3cd7ce906567ceed85f0639eb0981669aab5e8c3daacb4be9effd2734e",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "fe9847d5": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "8596d1b8372672c2d6553046e9aa144e188f8e0bd9b38f68bbc0c4f02187ea36",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_TEXT_REDUCED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 14.77,
+    "product_covered_pct": 0
+   },
+   "733c033a": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "714449b3c06826390f25588291e727a3b073ca46516b947c0557855b64c546db",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "b95fd1c9": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 5.4,
+    "subheadline": false,
+    "scene_sha256": "9aa03d9bfce1840e64a730bcf9b4a28b59e0a92ce4e20dd048727ee0d94b9569",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": null
+   },
+   "d9e97f57": {
+    "anchor": "bottom_left",
+    "max_width_pct": 74,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "da67d00e3712aeed2f0c404ad028404ec37f3643ee2f4dfe1c57e2d52143bf2f",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "candidates",
+     "faces",
+     "moved",
+     "overlap_pct",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": null
+   }
+  },
+  "overlay_avoid_people": {
+   "06a5180c": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": true,
+    "scene_sha256": "d9f0d204b3d50a650379a948e835919ee171bb77f9efb6de720ba28e314de058",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "0cd8f005": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "adb66c463c6ec6f18a5d9c1f43e5ce4fba60bf1d6dface0d8133a221757f3aec",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "2383b96f": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "17def47130102d5d4d06411e69890f765f6811c37ba7f41e8ba78f17377e7aa2",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0.34
+   },
+   "7085ece4": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "0a2643fe4c6674d90ca225160e876a6b60f2bdbb684368f5d9f4377283211bc7",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "b24cdc5f": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "7433d5323793030d9e30c2475ff068ac3a0d213fc5186be1cdc9dae04a4fde4b",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_EXCEEDED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 75.11,
+    "product_covered_pct": 0
+   },
+   "da5bafa1": {
+    "anchor": "bottom_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "d5add808d63516d498d41f9f18df3d6d4390d01eb1910fe34e2d3224de12c381",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "f0955319": {
+    "anchor": "middle_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "6c32ad3cd7ce906567ceed85f0639eb0981669aab5e8c3daacb4be9effd2734e",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "fe9847d5": {
+    "anchor": "top_left",
+    "max_width_pct": 76,
+    "headline_size_pct": 5.3,
+    "subheadline": false,
+    "scene_sha256": "8596d1b8372672c2d6553046e9aa144e188f8e0bd9b38f68bbc0c4f02187ea36",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_ANCHOR_MOVED_FOR_FACE",
+     "OVERLAY_TEXT_REDUCED_FOR_FACE",
+     "OVERLAY_FACE_OVERLAP_UNAVOIDABLE",
+     "OVERLAY_BODY_UNAVOIDABLE"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 14.77,
+    "product_covered_pct": 0
+   },
+   "733c033a": {
+    "anchor": "bottom_left",
+    "max_width_pct": 46.5,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "764b3aa63f3cb40b3d459a5f888967dd166b23e6f68a1ccc01c0156ef59bb7da",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_TEXT_NARROWED_FOR_PERSON"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": 0
+   },
+   "b95fd1c9": {
+    "anchor": "bottom_left",
+    "max_width_pct": 43,
+    "headline_size_pct": 5.4,
+    "subheadline": false,
+    "scene_sha256": "50f9275d751a16860838cf183b2ee126c36eae4de7c9ab3c1eecac9e86dd28be",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_AREA_REDUCED",
+     "OVERLAY_TEXT_NARROWED_FOR_PERSON"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": null
+   },
+   "d9e97f57": {
+    "anchor": "bottom_left",
+    "max_width_pct": 30.5,
+    "headline_size_pct": 6.8,
+    "subheadline": false,
+    "scene_sha256": "31e2ee937895d21c3591915349832f91030a59ed9852b5b074fab4945e1bb467",
+    "markers": [
+     "OVERLAY_HEADLINE_LINES",
+     "OVERLAY_TEXT_AREA_ESTIMATED",
+     "OVERLAY_TEXT_NARROWED_FOR_PERSON"
+    ],
+    "report_keys": [
+     "anchor_declared",
+     "anchor_used",
+     "body_overlap_pct",
+     "candidates",
+     "faces",
+     "fallback",
+     "moved",
+     "narrowed",
+     "overlap_pct",
+     "people",
+     "products",
+     "reduced"
+    ],
+    "face_covered_pct": 0,
+    "product_covered_pct": null
+   }
+  },
+  "lamina": {
+   "sin_recurso|cara_y_envase|auto": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 7179.2
+   },
+   "sin_recurso|cara_y_envase|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 36400
+   },
+   "sin_recurso|cara_y_envase|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 7179.2
+   },
+   "sin_recurso|cara_y_envase_arriba|auto": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 25625
+   },
+   "sin_recurso|cara_y_envase_arriba|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 11061.8
+   },
+   "sin_recurso|cara_y_envase_arriba|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 25625
+   },
+   "sin_recurso|sin_producto|auto": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_recurso|sin_producto|top": {
+    "placement": "top_right",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "1487084e5016b0058e471f5255e9e438798b2540a3634dfe330a6d6ad68d9b5a",
+    "face_area_px": 6500
+   },
+   "sin_recurso|sin_producto|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_recurso|cara_toda|auto": {
+    "placement": "center",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE"
+    ],
+    "fit_sha256": "f303fd7c7c8433bcb19504d6cc3c1be8f6cb03ebad154e005f07f0e5163f7e9b",
+    "face_area_px": 242380.8
+   },
+   "sin_recurso|cara_toda|top": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 242380.8
+   },
+   "sin_recurso|cara_toda|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 242380.8
+   },
+   "inset|cara_y_envase|auto": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": "inset",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_PHOTO_INSET_FOR_SUBJECT"
+    ],
+    "fit_sha256": "e5df0805be677a9674e97638605cfffd0f29804048a750a9240f1940f4b215c1",
+    "face_area_px": 0
+   },
+   "inset|cara_y_envase|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 36400
+   },
+   "inset|cara_y_envase|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 7179.2
+   },
+   "inset|cara_y_envase_arriba|auto": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": "inset",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_PHOTO_INSET_FOR_SUBJECT"
+    ],
+    "fit_sha256": "e5df0805be677a9674e97638605cfffd0f29804048a750a9240f1940f4b215c1",
+    "face_area_px": 0
+   },
+   "inset|cara_y_envase_arriba|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 11061.8
+   },
+   "inset|cara_y_envase_arriba|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 25625
+   },
+   "inset|sin_producto|auto": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "inset|sin_producto|top": {
+    "placement": "top_right",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "1487084e5016b0058e471f5255e9e438798b2540a3634dfe330a6d6ad68d9b5a",
+    "face_area_px": 6500
+   },
+   "inset|sin_producto|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "inset|cara_toda|auto": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": "inset",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_PHOTO_INSET_FOR_SUBJECT"
+    ],
+    "fit_sha256": "e5df0805be677a9674e97638605cfffd0f29804048a750a9240f1940f4b215c1",
+    "face_area_px": 0
+   },
+   "inset|cara_toda|top": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 242380.8
+   },
+   "inset|cara_toda|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 242380.8
+   },
+   "banda|cara_y_envase|auto": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": "band",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BAND_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0d2886766e20f25aebfdc44b4948db8aec6ee3456f6a38c1722cba64f512aadf",
+    "face_area_px": 7179.2
+   },
+   "banda|cara_y_envase|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 36400
+   },
+   "banda|cara_y_envase|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 7179.2
+   },
+   "banda|cara_y_envase_arriba|auto": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": "band",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BAND_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0d2886766e20f25aebfdc44b4948db8aec6ee3456f6a38c1722cba64f512aadf",
+    "face_area_px": 25625
+   },
+   "banda|cara_y_envase_arriba|top": {
+    "placement": "top_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "154d88f0c91a7cb671ccd020e5cd6371d8ec57021f21894e9a2abe27a67d1430",
+    "face_area_px": 11061.8
+   },
+   "banda|cara_y_envase_arriba|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 25625
+   },
+   "banda|sin_producto|auto": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "banda|sin_producto|top": {
+    "placement": "top_right",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "1487084e5016b0058e471f5255e9e438798b2540a3634dfe330a6d6ad68d9b5a",
+    "face_area_px": 6500
+   },
+   "banda|sin_producto|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "banda|cara_toda|auto": {
+    "placement": "center",
+    "column_pct": null,
+    "fallback": "band",
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BAND_FOR_SUBJECT"
+    ],
+    "fit_sha256": "b2a80f61e1308624f095ad2e178cfaca545c7662247461633449131fa445b2c1",
+    "face_area_px": 242380.8
+   },
+   "banda|cara_toda|top": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 242380.8
+   },
+   "banda|cara_toda|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 242380.8
+   },
+   "sin_producto_en_la_politica|cara_y_envase|auto": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|cara_y_envase|top": {
+    "placement": "top_right",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "1487084e5016b0058e471f5255e9e438798b2540a3634dfe330a6d6ad68d9b5a",
+    "face_area_px": 6500
+   },
+   "sin_producto_en_la_politica|cara_y_envase|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|cara_y_envase_arriba|auto": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|cara_y_envase_arriba|top": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|cara_y_envase_arriba|bottom": {
+    "placement": "bottom_left",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "889e253009e6745902f48697531762a073340bb78d8403ddd2ba51aaf79e0323",
+    "face_area_px": 25625
+   },
+   "sin_producto_en_la_politica|sin_producto|auto": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_BLOCK_MOVED_FOR_SUBJECT"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|sin_producto|top": {
+    "placement": "top_right",
+    "column_pct": 50,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "1487084e5016b0058e471f5255e9e438798b2540a3634dfe330a6d6ad68d9b5a",
+    "face_area_px": 6500
+   },
+   "sin_producto_en_la_politica|sin_producto|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 0
+   },
+   "sin_producto_en_la_politica|cara_toda|auto": {
+    "placement": "center",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE"
+    ],
+    "fit_sha256": "f303fd7c7c8433bcb19504d6cc3c1be8f6cb03ebad154e005f07f0e5163f7e9b",
+    "face_area_px": 242380.8
+   },
+   "sin_producto_en_la_politica|cara_toda|top": {
+    "placement": "top",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "5d471b914fffcfed5f2c96d236604983924cde6159b770b55ccb535b868a07c3",
+    "face_area_px": 242380.8
+   },
+   "sin_producto_en_la_politica|cara_toda|bottom": {
+    "placement": "bottom",
+    "column_pct": null,
+    "fallback": null,
+    "headline_size_pct": null,
+    "warnings": [
+     "CAROUSEL_TEXT_PLACE_COVERS"
+    ],
+    "fit_sha256": "0c940cfe85d14a1238216380117277690493da091ca11cb9120fe034bcc9fb89",
+    "face_area_px": 242380.8
+   }
+  }
+ }
+}
