@@ -2574,6 +2574,31 @@ export function edgePlateRetryClause(p: EdgePlate): string {
 }
 // ── PLACA:END ──
 
+// 2026-10-31 — EL LIENZO, sobre los píxeles reales y con el plan puro (`planDeLienzo`). sharp se carga al usarse, como
+// en la placa. Sale PNG, como sale el modelo.
+async function ajustarAlLienzo(dataUrl: string, lienzo: Lienzo):
+  Promise<{ ok: true; dataUrl: string; meta: Record<string, unknown> } | { ok: false; error: string }> {
+  try {
+    const comma = dataUrl.indexOf(',');
+    if (!dataUrl.startsWith('data:') || comma < 0) throw new Error('no es una data URL');
+    const bytes = Buffer.from(dataUrl.slice(comma + 1), 'base64');
+    const { default: sharp } = await import('sharp');
+    const info = await sharp(bytes).metadata();
+    const w = Number(info.width), h = Number(info.height);
+    if (!(w > 0 && h > 0)) throw new Error('la imagen no declara su tamaño');
+    if (w === lienzo.width && h === lienzo.height) {
+      return { ok: true, dataUrl, meta: { applied: true, width: w, height: h, from: { width: w, height: h }, cropped_px: 0 } };
+    }
+    const plan = planDeLienzo(w, h, lienzo);
+    const out = await sharp(bytes).resize(plan.scaleW, plan.scaleH, { fit: 'fill' })
+      .extract({ left: plan.left, top: plan.top, width: lienzo.width, height: lienzo.height }).png().toBuffer();
+    return { ok: true, dataUrl: `data:image/png;base64,${out.toString('base64')}`,
+      meta: { applied: true, width: lienzo.width, height: lienzo.height, from: { width: w, height: h }, cropped_px: plan.cropped_px } };
+  } catch (err) {
+    return { ok: false, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) };
+  }
+}
+
 // La placa se mide sobre los píxeles REALES: sharp se carga al usarse (el arnés de tests no lo resuelve
 // desde su directorio temporal, y una imagen que no se puede leer no es una imagen sin placa: se dice).
 async function edgePlateOfImage(dataUrl: string): Promise<{ plate: EdgePlate | null; error: string | null }> {
@@ -2728,6 +2753,41 @@ export interface EstadoDeImagen {
   image_urls: string[];      // en el orden en que viajan: la actual (editar), personas, lugar, producto
   psycho_id: string | null;
   respuesta: RespuestaBaseDeImagen;
+  // 2026-10-31 — el lienzo exacto que se entrega (`params.canvas`, `leerLienzo`). Ausente ⇒ el tamaño del modelo.
+  canvas?: Lienzo;
+}
+
+/**
+ * EL LIENZO (2026-10-31, Sam: «las publicaciones, a lo más vertical posible»; imagen de feed en 4:5, 1080×1350).
+ * El modelo genera en SU tabla de tamaños: su «4:5» sale a 896×1152 [reportado: tabla de Google], que no es 4:5
+ * exacto. Quien pide la imagen (el carril, con el dato de la superficie) puede declarar el lienzo que se entrega;
+ * ImageLab escala hasta cubrirlo y recorta lo que sobra, centrado. El recorte es pequeño cuando la proporción pedida al
+ * modelo es la del lienzo (896×1152 → 1080×1350: 38 px de alto, un 2,8 %). Sin `canvas`, la imagen sale como siempre.
+ */
+export type Lienzo = { width: number; height: number };
+export const LIENZO_MIN = 256;
+export const LIENZO_MAX = 4096;
+
+/** `params.canvas`. Ausente ⇒ `null`. Mal formado ⇒ error dicho (no se entrega otro tamaño en silencio). */
+export function leerLienzo(raw: unknown): { lienzo: Lienzo | null } | { error: string } {
+  if (raw === undefined || raw === null) return { lienzo: null };
+  const o = raw as Record<string, unknown>;
+  const w = Number(o?.width), h = Number(o?.height);
+  if (typeof raw !== 'object' || Array.isArray(raw) || !Number.isInteger(w) || !Number.isInteger(h)
+    || w < LIENZO_MIN || h < LIENZO_MIN || w > LIENZO_MAX || h > LIENZO_MAX) {
+    return { error: `IMAGELAB_CANVAS_INVALIDO: canvas debe ser { width, height } enteros entre ${LIENZO_MIN} y ${LIENZO_MAX}; llegó ${JSON.stringify(raw).slice(0, 80)}` };
+  }
+  return { lienzo: { width: w, height: h } };
+}
+
+/** Cómo se llega del tamaño del modelo al lienzo: escala que CUBRE y recorte centrado. PURO. */
+export function planDeLienzo(srcW: number, srcH: number, dst: Lienzo): { scaleW: number; scaleH: number; left: number; top: number; cropped_px: number } {
+  const k = Math.max(dst.width / srcW, dst.height / srcH);
+  const scaleW = Math.max(dst.width, Math.round(srcW * k));
+  const scaleH = Math.max(dst.height, Math.round(srcH * k));
+  const left = Math.floor((scaleW - dst.width) / 2);
+  const top = Math.floor((scaleH - dst.height) / 2);
+  return { scaleW, scaleH, left, top, cropped_px: (scaleW - dst.width) + (scaleH - dst.height) };
 }
 
 /** El texto que va al modelo de imagen ANTES del negativo: la corrección (segundo intento), el prompt y, con fotos,
@@ -2808,6 +2868,8 @@ export function leerEstadoDeImagen(raw: unknown): { ok: true; estado: EstadoDeIm
   if (e.v !== LOTE_IMAGEN_VERSION) return { ok: false, error: `versión ${JSON.stringify(e.v ?? null)} (se espera ${LOTE_IMAGEN_VERSION})` };
   const falta: string[] = [];
   for (const k of ['prompt', 'role_clause', 'negative_prompt', 'aspect_ratio']) if (typeof e[k] !== 'string') falta.push(k);
+  // 2026-10-31 — un estado anterior no lleva lienzo y se lee igual; uno con lienzo mal formado no se lee.
+  if (e.canvas !== undefined && 'error' in leerLienzo(e.canvas)) falta.push('canvas');
   if (!Array.isArray(e.image_urls) || e.image_urls.some((u: unknown) => typeof u !== 'string')) falta.push('image_urls');
   if (e.psycho_id !== null && typeof e.psycho_id !== 'string') falta.push('psycho_id');
   const r = e.respuesta;
@@ -3183,7 +3245,18 @@ async function entregarImagen(
     }
   }
   const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
-  return { payload: payloadDeImagen(e, imageDataUrl, usage, plateTrace), cobro: { entregada: cobroEntregada, descartados: cobroDescartados } };
+  // 2026-10-31 — EL LIENZO: con `canvas` en el estado, la imagen entregada mide eso exacto (bloque LOTE-IMAGEN,
+  // `planDeLienzo`). Si no se puede ajustar, se entrega la del modelo y se DICE en `canvas.applied = false`.
+  let lienzoTrace: Record<string, unknown> = {};
+  if (e.canvas) {
+    const aj = await ajustarAlLienzo(imageDataUrl, e.canvas);
+    if ('error' in aj) {
+      console.warn(`[ImageLab][LIENZO] CANVAS_NOT_APPLIED brand=${brandId}: ${aj.error}`);
+      lienzoTrace = { canvas: { applied: false, width: e.canvas.width, height: e.canvas.height, error: aj.error } };
+    } else { imageDataUrl = aj.dataUrl; lienzoTrace = { canvas: aj.meta }; }
+  }
+  // La traza del lienzo va DETRÁS de la respuesta de siempre: sin `canvas`, el objeto es el mismo, clave a clave.
+  return { payload: { ...payloadDeImagen(e, imageDataUrl, usage, plateTrace), ...lienzoTrace }, cobro: { entregada: cobroEntregada, descartados: cobroDescartados } };
 }
 
 /**
@@ -3327,6 +3400,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   // LOTE-IMAGEN (2026-10-21) — el modo lote del carril. Sin `lote`, `modo` es null y nada de esto corre.
   const lote = leerModoLote(body.lote);
   if (lote.modo === 'error') { res.status(400).json({ status: 'error', error: (lote as { error: string }).error }); return; }
+  // 2026-10-31 — el lienzo se valida ANTES de pagar el constructor: uno mal formado es un error dicho.
+  const lienzoIn = leerLienzo(body.params?.canvas);
+  if ('error' in lienzoIn) { res.status(400).json({ status: 'error', error: lienzoIn.error }); return; }
   if (lote.modo === 'terminar') { await terminarImagenDelLote(body, lote as { modo: 'terminar'; estado: unknown; respuesta: Record<string, unknown> }, res); return; }
   // «preparar» sin bucket no puede dejar las fotos donde el lote las lee: se dice ANTES de pagar el constructor.
   if (lote.modo === 'preparar' && !bucketDelLote()) {
@@ -3559,6 +3635,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       aspect_ratio: built.aspectRatio,
       image_urls: imageUrls,
       psycho_id: built.psychoId ?? null,
+      // 2026-10-31 — sólo si se pidió: sin `params.canvas`, el estado es el de antes.
+      ...(lienzoIn.lienzo ? { canvas: lienzoIn.lienzo } : {}),
       respuesta: {
         output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
         preset_used:    built.presetUsed,
