@@ -326,7 +326,23 @@ declare const process: { env: Record<string, string | undefined> };
 //         falta, el tramo cae a la que exista. Lo que no está literal no se aplica y se dice (`OVERLAY_BOLD_SPAN_NOT_IN_…`,
 //         `CAROUSEL_BOLD_SPAN_NOT_IN_…`). Lo aplicado viaja en `meta.text_style.applied.<bloque>.bold` (y en la lámina,
 //         `meta.carousel.text_style.applied.<bloque>.bold`). Sin `bold_spans`, idéntico a 1.21.0.
-export const COMPOSITOR_VERSION = '1.22.0';
+//   1.23.0 (2026-10-31) — LA CARA ANTES QUE EL PRODUCTO (Sam, 2026-10-31: «sí» a cambiar la regla que dejó abierta 1.13.1).
+//         Medido en la pieza b24cdc5f, publicada el 27-oct con el titular rozando el mentón y el cuello: ninguna colocación
+//         libraba cara y envases a la vez, y la elección de siempre (1.6.1) desempataba SUMANDO los dos solapes en el mismo
+//         porcentaje; ganaba la que menos sumaba aunque tapara la cara. Con las cajas medidas a mano, 1.22.0 la componía en
+//         `top_left` tapando 75 % de la cara. Jerarquía estricta, en el overlay y en la lámina:
+//         1. La cara es inviolable. 2. El producto, sólo si se puede. 3. El cuerpo, sólo para desempatar (1.13.1).
+//         Cuando ninguna colocación (ancla o colocación × escalón) libra cara y producto a la vez y la elección de siempre
+//         tapa una cara, se elige entre las que libran la CARA (con su margen) la que menos área de producto tapa; a
+//         igualdad, la de menor ajuste y luego el orden de las candidatas (`pickFaceFreeLeastProduct`). Se dice
+//         (`OVERLAY_PRODUCT_COVERED_TO_FREE_FACE`, `CAROUSEL_PRODUCT_COVERED_TO_FREE_FACE`) y `meta` lleva
+//         `product_overlap_pct` (cuánto de la caja del texto cae sobre los productos). Si ninguna libra la cara, la
+//         elección de siempre, con su marcador (`OVERLAY_FACE_OVERLAP_UNAVOIDABLE`, `CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE`).
+//         En la lámina, el 'inset' de 1.11.0 sigue primero: libra la cara Y el producto; la nueva regla decide dónde van la
+//         fila o la columna pedidas, la banda y el caso sin último recurso. Con los letreros de 1.6.3, el desempate sólo
+//         mira anclas que libran la cara. Donde una colocación libra cara y producto, o la elección de siempre ya libra la
+//         cara, o la marca no declara `avoid_products`, idéntico a 1.22.0.
+export const COMPOSITOR_VERSION = '1.23.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -4788,6 +4804,40 @@ function fitCarouselCoverAreaCore(args: { chrome: CarouselChrome; metrics?: FitM
 // visión fuera de este bloque; aquí entran como dato (0..1 sobre el ancho y el alto).
 export interface FaceBox { x0: number; y0: number; x1: number; y1: number }
 
+// ── 1.23.0 · LA CARA ANTES QUE EL PRODUCTO ────────────────────────────────────────────────────────────────────────────
+// EJE (código): la jerarquía de lo que el texto no tapa —la cara es inviolable; el producto, sólo si se puede; el
+// cuerpo, sólo para desempatar (1.13.1)— y cómo se elige cuando ninguna colocación libra cara y producto a la vez:
+// entre las que libran la CARA, la que menos área de producto tapa; a igualdad, la de menor ajuste y luego el orden de
+// las candidatas. INSTANCIA (dato): si se aplica (`avoid_products` de la marca o de la capa global), los márgenes y las
+// anclas o colocaciones candidatas. Las cajas las mide el detector fuera de este bloque. El código no nombra marcas.
+
+/** px² de la caja `r` que caen sobre las cajas dadas (px), sin redondeo ni tope. PURO. */
+export function rectOverlapArea(r: { x0: number; y0: number; x1: number; y1: number }, boxes: Array<{ x0: number; y0: number; x1: number; y1: number }>): number {
+  let inter = 0;
+  for (const b of boxes) {
+    const w = Math.min(r.x1, b.x1) - Math.max(r.x0, b.x0);
+    const h = Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0);
+    if (w > 0 && h > 0) inter += w * h;
+  }
+  return inter;
+}
+
+/** 1.23.0 — entre las colocaciones dadas (en orden de preferencia: menor ajuste primero), las que no tocan ninguna caja de
+ *  cara; de ellas, la que menos área de producto tapa; a igualdad, la primera. `null` si ninguna libra la cara: entonces
+ *  manda la elección de siempre, con su marcador. PURO. */
+export function pickFaceFreeLeastProduct<T extends { rect: { x0: number; y0: number; x1: number; y1: number } }>(
+  pool: T[], faceBoxes: Array<{ x0: number; y0: number; x1: number; y1: number }>, prodBoxes: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+): T | null {
+  let pick: T | null = null;
+  let pickArea = Infinity;
+  for (const c of pool) {
+    if (rectOverlapArea(c.rect, faceBoxes) > 0) continue;
+    const a = rectOverlapArea(c.rect, prodBoxes);
+    if (a < pickArea) { pick = c; pickArea = a; }
+  }
+  return pick;
+}
+
 /** Candidatas por defecto: la declarada y luego las otras dos filas de SU MISMA columna (la marca eligió un lado
  *  de la imagen; se respeta). Abajo ⇒ arriba, medio. Arriba ⇒ abajo, medio. Medio ⇒ arriba, abajo. PURO. */
 export function faceAnchorCandidates(anchor: string): string[] {
@@ -4888,6 +4938,8 @@ type OverlayAnchorResult = { style: ReturnType<typeof resolveOverlayStyle>; repo
   signs?: number; sign_overlap_pct?: number; signs_under_text?: FaceBox[];
   // 1.11.0 — sólo con el token encendido.
   products?: number;
+  // 1.23.0 — sólo cuando se tapó un producto para librar una cara: cuánto de la caja del texto cae sobre los productos.
+  product_overlap_pct?: number;
   // 1.13.0 — sólo con `avoid_people` encendido: cuántas figuras y si el bloque se estrechó. `fallback` queda siempre
   // en null desde 1.13.1 (la banda se retiró); `body_overlap_pct`: cuánto de la caja del texto cae sobre las figuras.
   people?: number; narrowed?: null | { max_width_pct_declared: number; max_width_pct_used: number };
@@ -4929,7 +4981,7 @@ export function chooseOverlayAnchor(args: OverlayAnchorArgs): OverlayAnchorResul
   }
   const body = Math.round((10000 * Math.min(inter, area)) / area) / 100;
   const markers = body > 0
-    ? [...r12.style.markers, `OVERLAY_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${style.layout.avoidProducts ? ' o un producto' : ''}, ni estrechado al lado libre; se compone donde libra la cara (${r12.style.layout.anchor}, la elección de 1.12.0), sin banda: el texto cae sobre ${body} % de la figura`]
+    ? [...r12.style.markers, `OVERLAY_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${style.layout.avoidProducts ? ' o un producto' : ''}, ni estrechado al lado libre; se compone donde libra la cara (${r12.style.layout.anchor}, la elección ${r12.report.product_overlap_pct != null ? 'de 1.23.0: la cara antes que el producto' : 'de 1.12.0'}), sin banda: el texto cae sobre ${body} % de la figura`]
     : r12.style.markers;
   // 1.19.0 — la bajada la pidió una persona y lo que tapa es el cuerpo (si tapara una cara, ya lo dijo la elección de
   // 1.12.0): se compone igual y se dice. Sin `keep_subheadline`, nada de esto existe.
@@ -4955,12 +5007,16 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
   const declared = style.layout.anchor;
   const pad = (af.marginPct / 100) * Math.min(width, height);
   const boxes = args.faces.map((f) => ({ x0: f.x0 * width - pad, y0: f.y0 * height - pad, x1: f.x1 * width + pad, y1: f.y1 * height + pad }));
+  // 1.23.0 — las caras y los productos, también por separado: la cara manda sobre el producto.
+  const faceBoxes = boxes.slice();
+  const prodBoxes: typeof boxes = [];
   // 1.11.0 — los productos se suman a las cajas que el texto no toca, con su propio margen. Sin el token, nada cambia.
   const ap = style.layout.avoidProducts ?? null;
   const prodList = ap ? (args.products ?? []) : [];
   if (ap) {
     const pp = (ap.marginPct / 100) * Math.min(width, height);
-    for (const f of prodList) boxes.push({ x0: f.x0 * width - pp, y0: f.y0 * height - pp, x1: f.x1 * width + pp, y1: f.y1 * height + pp });
+    for (const f of prodList) prodBoxes.push({ x0: f.x0 * width - pp, y0: f.y0 * height - pp, x1: f.x1 * width + pp, y1: f.y1 * height + pp });
+    boxes.push(...prodBoxes);
   }
   // 1.13.0 — las figuras humanas completas se suman a las cajas que el texto no toca, con su propio margen.
   const apl = style.layout.avoidPeople ?? null;
@@ -5022,6 +5078,8 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
   let what: string[] = [];
   let narrowInfo: null | { max_width_pct_declared: number; max_width_pct_used: number } = null;
   let best = scored.find((c) => c.overlap_pct === 0) ?? null;
+  // 1.23.0 — verdadero sólo cuando se tapó un producto para librar una cara.
+  let productCovered = false;
   // 1.13.0 — un bloque estrechado se alarga, y en una columna angosta es fácil que la última línea quede con UNA palabra
   // que no se puede acompañar («twelve» / «months.»). Se prefiere, en este orden: estrechado sin palabra sola al tamaño
   // de siempre; un escalón más chico (a todo el ancho libre, o estrechado sin palabra sola); y sólo después, el primer
@@ -5040,8 +5098,16 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
     // 1.6.1 — sin ancla libre al tamaño de siempre: el menor ajuste que la libera; si ninguno la libera, el MENOR
     // solape entre todas las combinaciones (ancla × escalón) y, a igual solape, el menor ajuste.
     let low = { c: scored.reduce((m, c) => (c.overlap_pct < m.overlap_pct ? c : m), scored[0]), st: style, what: [] as string[] };
+    // 1.23.0 — cada combinación (escalón × ancla) probada, en orden de menor ajuste: de aquí sale la que libra la cara.
+    type Probe = { c: { anchor: string; overlap_pct: number }; st: ReturnType<typeof resolveOverlayStyle>; what: string[]; rect: { x0: number; y0: number; x1: number; y1: number } };
+    const probed: Probe[] = [];
+    const probe = (sc: Array<{ anchor: string; overlap_pct: number }>, st: ReturnType<typeof resolveOverlayStyle>, w: string[]) => {
+      if (ap && prodBoxes.length) for (const c of sc) probed.push({ c, st, what: w, rect: overlayTextRect(st, width, height, args.metrics, c.anchor) });
+    };
+    probe(scored, style, []);
     for (const step of faceFitLadder(style)) {
       const sc = score(step.style);
+      probe(sc, step.style, step.what);
       const free = sc.find((c) => c.overlap_pct === 0);
       if (free) { best = free; base = step.style; what = step.what; break; }
       // 1.13.0 — en cada escalón, también el bloque estrechado al lado libre de la figura.
@@ -5052,6 +5118,16 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
       if (m && m.overlap_pct < low.c.overlap_pct) low = { c: m, st: step.style, what: step.what };
     }
     if (!best && narrowWithLone) tomarEstrecho(narrowWithLone.n, narrowWithLone.what);
+    // 1.23.0 — LA CARA ANTES QUE EL PRODUCTO. Ninguna combinación libra cara y producto a la vez. Si la de menor solape
+    // conjunto (la de siempre) tapa una CARA y hay alguna que la libra, se elige entre las que la libran la que menos
+    // producto tapa (`pickFaceFreeLeastProduct`). Si la de siempre ya libra la cara, o ninguna la libra, la de siempre,
+    // EXACTAMENTE, con su marcador.
+    // ⛔ NO OPERATIVO — regla anterior (1.6.1–1.22.0): siempre la de menor solape conjunto, sumando cara y producto
+    // en el mismo porcentaje; con una cara y un envase cerca, ganaba la que menos sumaba aunque tapara la cara.
+    if (!best && probed.length && rectOverlapArea(overlayTextRect(low.st, width, height, args.metrics, low.c.anchor), faceBoxes) > 0) {
+      const p = pickFaceFreeLeastProduct(probed, faceBoxes, prodBoxes);
+      if (p) { best = p.c; base = p.st; what = p.what; productCovered = true; }
+    }
     if (!best) { best = low.c; base = low.st; what = low.what; }
   }
   // 1.6.3 — LETREROS. Las caras ya decidieron el tamaño (`base`) y el solape mínimo de caras (`best`). Entre las
@@ -5077,7 +5153,9 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
       return Math.round((10000 * inter) / area) / 100;
     };
     const atBase = score(base);
-    const tied = atBase.filter((c) => c.overlap_pct <= best!.overlap_pct)
+    // 1.23.0 — si se tapó un producto para librar la cara, el desempate por letreros sólo mira anclas que la libran.
+    const tied = atBase.filter((c) => c.overlap_pct <= best!.overlap_pct
+      && (!productCovered || rectOverlapArea(overlayTextRect(base, width, height, args.metrics, c.anchor), faceBoxes) === 0))
       .map((c) => ({ ...c, sign: overlapWith(overlayTextRect(base, width, height, args.metrics, c.anchor), sboxes) }));
     const current = tied.find((c) => c.anchor === best!.anchor);
     const minSign = Math.min(...tied.map((c) => c.sign));
@@ -5100,7 +5178,11 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
     markers.push(`OVERLAY_ANCHOR_MOVED_FOR_FACE: en ${declared} el texto tapaba ${tapa} (${declaredScore} % de su caja); se compone en ${faceAnchor}`);
   }
   if (what.length) markers.push(`OVERLAY_TEXT_REDUCED_FOR_FACE: para que el texto quepa en ${best.anchor} ${best.overlap_pct > 0 ? 'tapando lo menos posible' : `sin tapar ${tapa}`}: ${what.join(' · ')}`);
-  if (best.overlap_pct > 0) {
+  // 1.23.0 — cuánto de la caja del texto cae sobre los productos, en el ancla final (después de los letreros).
+  const productPct = productCovered ? rectOverlapPct(overlayTextRect(base, width, height, args.metrics, best.anchor), prodBoxes) : 0;
+  if (productCovered) {
+    markers.push(`OVERLAY_PRODUCT_COVERED_TO_FREE_FACE: ninguna ancla candidata (${cands.join(', ')}) deja el texto ${libre} ni al tamaño mínimo; la cara manda: se compone en ${best.anchor}, que no toca ninguna cara y tapa un producto (${productPct} % de su caja)`);
+  } else if (best.overlap_pct > 0) {
     markers.push(`OVERLAY_FACE_OVERLAP_UNAVOIDABLE: ninguna ancla candidata (${cands.join(', ')}) deja el texto ${libre} ni al tamaño mínimo; se usa ${best.anchor}, que tapa ${best.overlap_pct} %`);
   }
   // 1.19.0 — la bajada la pidió una persona: la escalera no la quitó y el bloque tapa algo. Se compone igual y se dice.
@@ -5130,6 +5212,7 @@ function chooseOverlayAnchorCore(args: OverlayAnchorArgs): OverlayAnchorResult {
     overlap_pct: best.overlap_pct, candidates: scored, reduced: what,
     ...(signList ? { signs: signList.length, sign_overlap_pct: signOverlap, signs_under_text: signsUnder } : {}),
     ...(ap ? { products: prodList.length } : {}),
+    ...(productCovered ? { product_overlap_pct: productPct } : {}),
     ...(apl ? { people: peopleList.length, narrowed: narrowInfo, fallback: null, body_overlap_pct: 0 } : {}),
   } };
 }
@@ -5739,7 +5822,7 @@ export function chooseCarouselPlacement(args: Parameters<typeof chooseCarouselPl
     body = rectOverlapPct(rect, people.map((f) => ({ x0: f.x0 * W - p, y0: f.y0 * H - p, x1: f.x1 * W + p, y1: f.y1 * H + p })));
   }
   const warnings = body > 0
-    ? [...r12.warnings, `CAROUSEL_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${args.avoid.products ? ' o un producto' : ''}, ni en una columna estrechada; se compone donde libra la cara (${r12.report.placement_used}${r12.report.column_pct != null ? `, columna ${r12.report.column_pct} %` : ''}, la elección de 1.12.0), sin último recurso por el cuerpo: el texto cae sobre ${body} % de la figura`]
+    ? [...r12.warnings, `CAROUSEL_BODY_UNAVOIDABLE: ninguna colocación deja el texto libre del cuerpo de la persona sin tapar una cara${args.avoid.products ? ' o un producto' : ''}, ni en una columna estrechada; se compone donde libra la cara (${r12.report.placement_used}${r12.report.column_pct != null ? `, columna ${r12.report.column_pct} %` : ''}, la elección ${r12.report.product_overlap_pct != null ? 'de 1.23.0: la cara antes que el producto' : 'de 1.12.0'}), sin último recurso por el cuerpo: el texto cae sobre ${body} % de la figura`]
     : r12.warnings;
   return { fit: r12.fit, warnings, report: { ...r12.report, people: people.length, narrowed_column_pct: narrowed, body_overlap_pct: body } };
 }
@@ -5779,6 +5862,8 @@ function chooseCarouselPlacementCore(args: {
     text_column?: TextColumn;
     // 1.13.0 — sólo con `carousel.avoid_people`. 1.13.1 — `body_overlap_pct`: cuánto del bloque cae sobre las figuras.
     people?: number; narrowed_column_pct?: { left: number | null; right: number | null }; body_overlap_pct?: number;
+    // 1.23.0 — sólo cuando se tapó un producto para librar una cara: cuánto de la caja del bloque cae sobre los productos.
+    product_overlap_pct?: number;
   };
 } {
   const { chrome, avoid } = args;
@@ -5881,11 +5966,14 @@ function chooseCarouselPlacementCore(args: {
   }
   // 3 bis. El titular, un escalón más chico de su `fit_steps` cada vez, en cada colocación: la foto se ve entera antes
   // de llegar al último recurso. El primer escalón y la primera colocación que libran ganan, y se dice.
+  // 1.23.0 — lo probado con el titular más chico, por si hay que librar la cara tapando un producto (ver abajo).
+  const shrunkProbed: Array<ReturnType<typeof evalC> & { h: number }> = [];
   for (const h of chrome.fitLadder.headline) {
     const shrunk: CarouselChrome = { ...chrome, type: { ...chrome.type, headline: { ...chrome.type.headline, sizePct: h } },
       fitLadder: { headline: chrome.fitLadder.headline.filter((x) => x < h) } };
     for (const sl of [baseSlot, ...slots]) {
       const c = evalC(sl, shrunk);
+      shrunkProbed.push({ ...c, h });
       if (ok(c)) {
         const reason = `ninguna colocación libra ${what} al tamaño de siempre (la menor tapa ${Math.min(...all.map((x) => x.overlap_pct))} %); ` +
           `con el titular ${chrome.type.headline.sizePct}→${h} % se compone en ${label(c)}`;
@@ -5895,20 +5983,34 @@ function chooseCarouselPlacementCore(args: {
   }
   // La que menos tapa, entre las que no omiten pasos (el centro siempre está entre ellas).
   const keep = all.filter((c) => c === base || (c.fit.report.steps_dropped <= base.fit.report.steps_dropped && !c.m.wordOverflow));
-  const least = keep.reduce((acc, c) => (c.overlap_pct < acc.overlap_pct ? c : acc), keep[0]);
+  const leastSiempre = keep.reduce((acc, c) => (c.overlap_pct < acc.overlap_pct ? c : acc), keep[0]);
+  // 1.23.0 — LA CARA ANTES QUE EL PRODUCTO, como en el overlay. Si la que menos tapa (la de siempre) tapa una CARA y alguna
+  // colocación la libra —al tamaño de siempre o con el titular más chico, sin omitir más pasos que el centro, sin
+  // desbordarse ni partir una palabra—, se elige entre las que la libran la que menos producto tapa. La usan la fila o la
+  // columna pedidas, la banda y el caso sin último recurso. El 'inset' sigue igual: libra la cara Y el producto.
+  // ⛔ NO OPERATIVO — regla anterior (1.11.0–1.22.0): siempre la de menor solape conjunto, cara y producto sumados.
+  let least: typeof leastSiempre & { h?: number } = leastSiempre;
+  let productCovered = false;
+  if (prodBoxes.length && rectOverlapArea(leastSiempre.rect, faceBoxes) > 0) {
+    const sinPerder = (c: typeof base) => c.fit.report.steps_dropped <= base.fit.report.steps_dropped && !c.m.wordOverflow && !c.fit.report.overflow;
+    const pick = pickFaceFreeLeastProduct([...keep.filter((c) => c === base || sinPerder(c)), ...shrunkProbed.filter(sinPerder)], faceBoxes, prodBoxes);
+    if (pick) { least = pick; productCovered = true; }
+  }
+  const covered = productCovered ? [`CAROUSEL_PRODUCT_COVERED_TO_FREE_FACE: ninguna colocación libra ${what} a la vez; se compone en ${label(least)}${least.h != null ? ` con el titular ${chrome.type.headline.sizePct}→${least.h} %` : ''}, que no toca ninguna cara y tapa un producto (${least.product_overlap_pct} % de su caja)`] : [];
+  const extraCovered = (): Record<string, unknown> => productCovered ? { product_overlap_pct: least.product_overlap_pct, ...(least.h != null ? { headline_size_pct: least.h } : {}) } : {};
   // 1.12.0 — la fila la pidió una persona: ni 'inset' ni 'band' (moverían o taparían lo que se pidió). Se compone en la
   // columna de esa fila que menos tapa, y se dice.
   if (forced && !column) {
     const reason = `se pidió el texto ${TEXT_PLACE_LABEL[forced]}; ninguna colocación de esa fila (${all.map(label).join(', ')}) libra ${what}; ` +
       `se compone igual en ${label(least)}, que tapa ${least.overlap_pct} %`;
-    return { fit: least.fit, warnings: [`CAROUSEL_TEXT_PLACE_COVERS: ${reason}`], report: report(least, null, reason) };
+    return { fit: least.fit, warnings: [`CAROUSEL_TEXT_PLACE_COVERS: ${reason}`, ...covered], report: report(least, null, reason, extraCovered()) };
   }
   // 1.17.0 — la columna la pidió una persona: tampoco hay último recurso. Se compone en la colocación de esa columna que
   // menos tapa, y se dice.
   if (column) {
     const reason = `se pidió el texto ${where.replace(/, donde se pidió,$/, '')}; ninguna colocación (${all.map(label).join(', ')}) libra ${what}; ` +
       `se compone igual en ${label(least)}, que tapa ${least.overlap_pct} %`;
-    return { fit: least.fit, warnings: [`CAROUSEL_TEXT_COLUMN_COVERS: ${reason}`], report: report(least, null, reason) };
+    return { fit: least.fit, warnings: [`CAROUSEL_TEXT_COLUMN_COVERS: ${reason}`, ...covered], report: report(least, null, reason, extraCovered()) };
   }
   for (const mode of avoid.fallback) {
     if (mode === 'inset') {
@@ -5924,7 +6026,7 @@ function chooseCarouselPlacementCore(args: {
       const pct = Math.round((10000 * (y1 - y0)) / H) / 100;
       if (c0.fit.report.overflow || pct < avoid.insetMinPct) continue;
       const inset = { x0: M, y0, x1: r2(W - M), y1 };
-      const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; la menor tapa ${least.overlap_pct} %. ` +
+      const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; la menor tapa ${leastSiempre.overlap_pct} %. ` +
         (abajo
           ? `Último recurso 'inset': el texto abajo sobre la superficie de la marca y la foto reducida arriba (${pct} % del alto)`
           : `Último recurso 'inset': el texto arriba sobre la superficie de la marca y la foto reducida debajo (${pct} % del alto)`);
@@ -5936,11 +6038,12 @@ function chooseCarouselPlacementCore(args: {
       const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what}; se usa ${label(least)}, que tapa ${least.overlap_pct} %. ` +
         `Último recurso 'band': una banda de la superficie de la marca bajo el texto (alfa ${avoid.bandAlpha})`;
       return { fit: { ...least.fit, chrome: { ...least.fit.chrome, band: { ...band, color: withAlphaRgb(chrome.surface, avoid.bandAlpha) } } },
-        warnings: [`CAROUSEL_BAND_FOR_SUBJECT: ${reason}`], report: report(least, 'band', reason, { band }) };
+        warnings: [`CAROUSEL_BAND_FOR_SUBJECT: ${reason}`, ...covered], report: report(least, 'band', reason, { band, ...extraCovered() }) };
     }
   }
   const reason = `ninguna colocación (${all.map(label).join(', ')}) libra ${what} y no hay último recurso aplicable; se usa ${label(least)}, que tapa ${least.overlap_pct} %`;
-  return { fit: least.fit, warnings: [`CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE: ${reason}`], report: report(least, null, reason) };
+  // 1.23.0 — si se tapó un producto para librar la cara, eso es lo que se dice; si no, lo de siempre.
+  return { fit: least.fit, warnings: productCovered ? covered : [`CAROUSEL_SUBJECT_OVERLAP_UNAVOIDABLE: ${reason}`], report: report(least, null, reason, extraCovered()) };
 }
 
 /** 1.12.0 — la lámina SIN la política (o sin foto, o con la detección caída) y con una fila pedida: el bloque se

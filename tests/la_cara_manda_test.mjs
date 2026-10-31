@@ -20,6 +20,11 @@
 //   7. Cableado: ni banda en la escena ni `refitOverlayBand` en el handler; versión 1.13.1.
 //   8. Marca N+1 y voseo: el bloque nuevo no nombra marcas ni ciudades, y este test y sus casos no vosean.
 //
+// 1.23.0 (2026-10-31) — LA CARA ANTES QUE EL PRODUCTO. En las tres piezas donde ninguna colocación libra cara y envases
+// y 1.12.0 tocaba la cara (`CARA_ANTES`), la elección ya no es la de 1.12.0: se libra la cara tapando el producto. Lo
+// afirma `tests/cara_antes_que_producto_test.mjs`, con su propio golden contra 1.22.0. Aquí esas tres salen de los
+// golden de 1.12.0/1.13.0 (1a, 2a) y la invariante 4 se endurece: ahora ninguna pieza tapa la cara.
+//
 // Ejecutar:  node tests/la_cara_manda_test.mjs     (Node ≥ 22.18)
 
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
@@ -54,12 +59,15 @@ const BANDA_1130 = 'rgba(0, 0, 0, 0.55)';
 // Donde 1.12.0, con estas cajas, no libra la cara ni al tamaño mínimo (las tres anclas de la columna izquierda tapan la
 // cara o los envases y gana el menor solape conjunto). Es un límite de 1.12.0, no de 1.13.x; ver el test 4b.
 const LIMITE_1120 = new Set(['b24cdc5f', 'fe9847d5']);
+// 1.23.0 — donde ninguna colocación libra cara y envases y 1.12.0 tocaba la cara (o su margen): se libra la cara y se
+// tapa el producto. Incluye las dos de `LIMITE_1120`.
+const CARA_ANTES = new Set(['b24cdc5f', 'fe9847d5', 'f0955319']);
 // Donde una colocación libra cara, producto y cuerpo: se prefiere esa (jerarquía, punto 2).
 const CUERPO_LIBRE = new Set(['0cd8f005']);
 
 console.log('\n── 1 · golden: sin avoid_people, lo de hoy ──');
-test('1a · sin avoid_people, cada pieza compone EXACTAMENTE como 1.13.0 (y 1.12.0)', () => {
-  for (const c of CASOS) {
+test('1a · sin avoid_people, cada pieza compone EXACTAMENTE como 1.13.0 (y 1.12.0), salvo las de 1.23.0', () => {
+  for (const c of CASOS.filter((x) => !CARA_ANTES.has(x.id))) {
     const d = digestOverlay(M, c, GLOBAL_HOY);
     assert.deepEqual(d, GOLDEN['1.13.0'].casos[c.id], `${c.tira} ${c.id}`);
     assert.deepEqual(d, GOLDEN['1.12.0'].casos[c.id], `${c.tira} ${c.id}`);
@@ -69,11 +77,11 @@ test('1a · sin avoid_people, cada pieza compone EXACTAMENTE como 1.13.0 (y 1.12
 console.log('\n── 2 · golden: persona centrada, con avoid_people ──');
 test('2a · donde nada libra el cuerpo: la colocación, el tamaño, el ancho y la escena de 1.12.0', () => {
   let n = 0;
-  for (const c of CENTRADA.filter((x) => !CUERPO_LIBRE.has(x.id))) {
+  for (const c of CENTRADA.filter((x) => !CUERPO_LIBRE.has(x.id) && !CARA_ANTES.has(x.id))) {
     assert.deepEqual(digestOverlay(M, c, CON), GOLDEN['1.12.0'].casos[c.id], `${c.tira} ${c.id}`);
     n++;
   }
-  assert.equal(n, 7);
+  assert.equal(n, 4);
 });
 test('2b · sin banda: ni en el estilo, ni en la escena, ni en el informe', () => {
   for (const c of CENTRADA) {
@@ -94,7 +102,12 @@ test('2c · si el texto cae sobre el cuerpo, se dice y meta lleva cuánto', () =
     assert.equal(r.report.body_overlap_pct > 0, tapaCuerpo, c.id);
     const m = r.style.markers.find((x) => x.startsWith('OVERLAY_BODY_UNAVOIDABLE'));
     assert.equal(!!m, tapaCuerpo, c.id);
-    if (m) { dichos++; assert.ok(m.includes('la elección de 1.12.0') && m.includes('sin banda'), m); }
+    if (m) {
+      dichos++;
+      // 1.23.0 — donde se tapó el producto para librar la cara, el aviso nombra esa elección.
+      const eleccion = CARA_ANTES.has(c.id) ? 'la elección de 1.23.0: la cara antes que el producto' : 'la elección de 1.12.0';
+      assert.ok(m.includes(eleccion) && m.includes('sin banda'), m);
+    }
     assert.equal(r.style.layout.avoidPeople.minWidthPct, 28, 'la política sigue en el estilo');
   }
   assert.ok(dichos >= 5, `dichos=${dichos}`);
@@ -126,24 +139,28 @@ test('3a · sigue estrechándose al lado libre: idéntica a 1.13.0', () => {
 });
 
 console.log('\n── 4 · la invariante: el texto no cae sobre una cara ──');
-test('4a · ningún caso pone texto sobre una caja de cara que 1.12.0 libraba (sin el token, con 1.13.1 y con el alias)', () => {
+test('4a · ningún caso pone texto sobre una caja de cara (sin el token, con 1.13.1 y con el alias); desde 1.23.0, tampoco las de LIMITE_1120', () => {
   let n = 0;
-  for (const c of CASOS.filter((x) => !LIMITE_1120.has(x.id))) {
+  for (const c of CASOS) {
     for (const g of [GLOBAL_HOY, CON, globalCon(AVOID_PEOPLE_1130_LAYOUT)]) {
       const r = composeOverlay(M, c, g);
       assert.equal(cruza(rectOf(c, r.style), px(c, c.face)), false, `${c.tira} ${c.id} tapa la cara`);
       n++;
     }
   }
-  assert.equal(n, 27);
+  assert.equal(n, 33);
 });
-test('4b · donde 1.12.0 no puede librarla, 1.13.1 nunca tapa MÁS cara que 1.12.0, ni con banda', () => {
+test('4b · donde 1.12.0 no puede librarla, 1.23.0 la libra tapando el producto, con y sin avoid_people, y lo dice', () => {
+  // ⛔ NO OPERATIVO — afirmación anterior (1.13.1–1.22.0): «1.13.1 nunca tapa MÁS cara que 1.12.0», con el marcador
+  // OVERLAY_FACE_OVERLAP_UNAVOIDABLE en los dos. Sam, 2026-10-31: la cara manda también sobre el producto.
   for (const c of CENTRADA.filter((x) => LIMITE_1120.has(x.id))) {
-    const hoy = composeOverlay(M, c, GLOBAL_HOY);
-    const con = composeOverlay(M, c, CON);
-    assert.equal(solape(rectOf(c, con.style), px(c, c.face)), solape(rectOf(c, hoy.style), px(c, c.face)), c.id);
-    assert.ok(hoy.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')), 'precondición: 1.12.0 lo dice');
-    assert.ok(con.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')), 'y 1.13.1 también');
+    assert.ok(GOLDEN['1.12.0'].casos[c.id].anchor.startsWith('top_'), 'precondición: 1.12.0 subía el titular a la cara');
+    for (const g of [GLOBAL_HOY, CON]) {
+      const r = composeOverlay(M, c, g);
+      assert.equal(solape(rectOf(c, r.style), px(c, c.face)), 0, c.id);
+      assert.ok(r.style.markers.some((m) => m.startsWith('OVERLAY_PRODUCT_COVERED_TO_FREE_FACE')), c.id);
+      assert.equal(r.style.markers.some((m) => m.startsWith('OVERLAY_FACE_OVERLAP_UNAVOIDABLE')), false, c.id);
+    }
   }
 });
 test('4c · 1.13.0 sí la tapaba: el caso que motivó 1.13.1 (precondición, medida con el golden de la banda)', () => {
@@ -264,7 +281,7 @@ test('7a · el handler ya no reajusta una banda y la escena del overlay no la di
   assert.equal(SRC.includes('overlayBandRect'), false);
   assert.equal(/if \(style\.band\)/.test(SRC), false);
   assert.equal(SRC.includes('OVERLAY_BAND_FOR_PERSON'), false);
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.1|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0|21\.0|22\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(13\.1|14\.0|15\.0|16\.0|17\.0|18\.0|19\.0|20\.0|21\.0|22\.0|23\.0)'/);
 });
 test('7b · la elección de 1.12.0 es la de siempre: chooseOverlayAnchorCore y chooseCarouselPlacementCore', () => {
   assert.match(SRC, /const r12 = chooseOverlayAnchorCore\(\{ \.\.\.args, style: \{ \.\.\.style, layout: layoutSinCuerpo \}, people: null \}\);/);

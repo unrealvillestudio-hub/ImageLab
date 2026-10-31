@@ -266,7 +266,7 @@ test('8b · la fila llega a las dos elecciones y vuelve en meta', () => {
   assert.match(SRC, /\.\.\.\(textPlaceIn \? \{ text_place: \{ requested: textPlaceIn, placement_used: fit\.chrome\.block\?\.place \?\? 'center',/);
 });
 test('8c · la versión sube a 1.12.0 (o a una posterior)', () => {
-  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(1(2\.0|3\.[01]|4\.0|5\.0|6\.0|7\.0|8\.0|9\.0)|2[0-2]\.0)'/);
+  assert.match(SRC, /COMPOSITOR_VERSION = '1\.(1(2\.0|3\.[01]|4\.0|5\.0|6\.0|7\.0|8\.0|9\.0)|2[0-3]\.0)'/);
 });
 
 console.log('\n── 9 · marca N+1 ──');
