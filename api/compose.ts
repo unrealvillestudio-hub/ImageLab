@@ -43,10 +43,12 @@
  *     products?: [{ image_url, name? }],    ← capa de producto (2026-09-27), PNG real con alfa
  *     carousel?: { index, total, role, background?, eyebrow?, keyword?, figure?, steps?, cta? },
  *                                           ← F3 (2026-10-02), lámina de carrusel; ver el bloque F3
- *     emphasis?: [subcadena literal del titular, …] }   ← 1.4.0 (2026-10-13), hasta 3 tramos
+ *     emphasis?: [subcadena literal del titular, …],    ← 1.4.0 (2026-10-13), hasta 3 tramos
+ *     output?: 'image' | 'text_layer' }                  ← 1.24.0 (2026-11-07), capa sin fondo para video
  *   → 200 { status:'ok', image_data_url, compositor_version, tokens_source, width, height,
  *           fonts:[…], markers:[…], text:{ headline, subheadline, emphasis? },
- *           meta:{ carousel_applied, warnings:[…], carousel?:{ …, fit } } }
+ *           meta:{ carousel_applied, warnings:[…], carousel?:{ …, fit } },
+ *           output?, layer_data_url?, text_rect? }   ← 1.24.0: sólo con output 'text_layer'
  *                                           ← `fit` (1.3.3): qué redujo el ajuste vertical, si actuó
  *   → 4xx/5xx { error, error_label, status:'error' }  ← `error_label` es lo que lee execLab.
  */
@@ -342,7 +344,11 @@ declare const process: { env: Record<string, string | undefined> };
 //         fila o la columna pedidas, la banda y el caso sin último recurso. Con los letreros de 1.6.3, el desempate sólo
 //         mira anclas que libran la cara. Donde una colocación libra cara y producto, o la elección de siempre ya libra la
 //         cara, o la marca no declara `avoid_products`, idéntico a 1.22.0.
-export const COMPOSITOR_VERSION = '1.23.0';
+//   1.24.0 (2026-11-07) — LA CAPA DE TEXTO PARA VIDEO: con `output: 'text_layer'` el compositor decide TODO igual que
+//         siempre sobre la imagen limpia (zona segura, caras, producto, contraste, tamaños) y entrega la escena SIN la foto
+//         de fondo, en PNG con alfa (`layer_data_url`). VideoLab la pone encima del video sin rehacer ninguna regla de marca
+//         (contrato VideoLab v1.0.0). Sin el campo, la respuesta y los bytes son los de 1.23.0. No aplica a carrusel.
+export const COMPOSITOR_VERSION = '1.24.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -2518,13 +2524,15 @@ export function buildOverlayScene(args: {
   width: number; height: number; backgroundSrc: string;
   products?: ProductImageIn[];
   productLayer?: ReturnType<typeof resolveProductLayer>['layer'];
+  /** 1.24.0 — sin la foto de fondo: la capa que VideoLab pone sobre el video. Todo lo demás, idéntico. */
+  omitBackground?: boolean;
 }): Record<string, any> {
   const { style, width, height, backgroundSrc } = args;
   const px = (pct: number, base: number) => Math.round((pct / 100) * base * 100) / 100;
   const a = ANCHORS[style.layout.anchor];
   const children: Array<Record<string, any>> = [];
 
-  children.push({
+  if (!args.omitBackground) children.push({
     type: 'img',
     props: {
       src: backgroundSrc, width, height,
@@ -5225,6 +5233,16 @@ export type TextPlace = 'top' | 'bottom' | 'auto';
 export const TEXT_PLACES: readonly TextPlace[] = ['top', 'bottom', 'auto'];
 
 /** 1.12.0 — `text_place`: 'top' | 'bottom' | 'auto'. Ausente = null (lo de siempre). Otro valor es 400. PURO. */
+/** 1.24.0 — qué entrega el compositor: la imagen compuesta (`image`, por defecto) o la capa sin la foto de fondo
+ *  (`text_layer`, para video). Enumeración cerrada con fail-loud. PURO. */
+export const COMPOSE_OUTPUTS = ['image', 'text_layer'] as const;
+export type ComposeOutput = typeof COMPOSE_OUTPUTS[number];
+export function parseOutputRequest(raw: unknown): ComposeOutput {
+  if (raw == null || raw === '') return 'image';
+  if (typeof raw === 'string' && (COMPOSE_OUTPUTS as readonly string[]).includes(raw)) return raw as ComposeOutput;
+  throw new CompositorError('COMPOSITOR_OUTPUT_INVALID', "output debe ser 'image' o 'text_layer' (o no venir)", 400);
+}
+
 export function parseTextPlaceRequest(raw: unknown): TextPlace | null {
   if (raw == null || raw === '') return null;
   if (typeof raw === 'string' && (TEXT_PLACES as readonly string[]).includes(raw)) return raw as TextPlace;
@@ -6872,6 +6890,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // F3 — el campo `carousel` se valida contra el contrato ANTES de leer nada: un 400 es un error
     // del llamador y no depende de los datos de la marca.
     const carouselIn = parseCarouselRequest(body.carousel);
+    // 1.24.0 — la capa de texto para video. Sólo en la composición de una imagen, no en la lámina de carrusel.
+    const outputIn = parseOutputRequest(body.output);
+    if (outputIn === 'text_layer' && carouselIn) {
+      throw new CompositorError('COMPOSITOR_OUTPUT_INVALID', "output 'text_layer' no aplica a carrusel", 400);
+    }
     // 1.4.0 — tramos de énfasis del titular. Se validan con el resto del contrato, antes de leer dato.
     const emphasisIn = parseEmphasisRequest(body.emphasis);
     const emphasisRoleIn = parseEmphasisRoleRequest(body.emphasis_role);
@@ -7397,6 +7420,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
     const png = new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng();
 
+    // 1.24.0 — la capa para video: la MISMA escena y el MISMO estilo final, sin la foto de fondo. Se rasteriza con alfa.
+    let layerOut: Record<string, unknown> | null = null;
+    if (outputIn === 'text_layer') {
+      const layerScene = buildOverlayScene({
+        style: finalStyle, width: dims.width, height: dims.height,
+        backgroundSrc: bgSrc, products: productImgs, productLayer: prodPick.layer, omitBackground: true,
+      });
+      const layerSvg = await satori(layerScene as any, {
+        width: dims.width, height: dims.height,
+        fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })),
+      });
+      const layerPng = new Resvg(layerSvg, { fitTo: { mode: 'original' } }).render().asPng();
+      const rect = finalStyle.slots.headline ? overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor) : null;
+      layerOut = {
+        output: 'text_layer',
+        layer_data_url: `data:image/png;base64,${b64(new Uint8Array(layerPng))}`,
+        text_rect: rect ? { x0: Math.round(rect.x0), y0: Math.round(rect.y0), x1: Math.round(rect.x1), y1: Math.round(rect.y1) } : null,
+      };
+    }
+
     console.log(
       `[Compositor][BRIEF7] brand=${brandId} canal=${canal ?? '∅'} piece=${body.piece_id ?? '∅'} ` +
       `tokens=${picked.source} (capas: ${picked.layers.join(' < ')}) ${dims.width}x${dims.height} ` +
@@ -7413,6 +7456,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       tokens_source: picked.source,
       tokens_layers: picked.layers,
       width: dims.width, height: dims.height,
+      // 1.24.0 — sólo con `output: 'text_layer'`: la capa sin fondo (PNG con alfa) y el rectángulo del texto.
+      ...(layerOut ?? {}),
       fonts: fonts.map((f) => ({ slot: f.slot, family: f.name, weight: f.weight, source: f.source })),
       // BRIEF 8 · D — el eco del sello: qué se dibujó y con qué grosor REAL en píxeles, calculado
       // sobre el lado corto. Sin este número no se puede verificar que el sello se lee igual en los
