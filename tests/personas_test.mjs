@@ -295,6 +295,8 @@ await ok('directSlotsPlan: sujeto A, Slot C, fondo, producto y estilo, en ese or
   assert.ok(una.clause.includes('Image 1: SUBJECT A, Teodora. Image 2: BACKGROUND') && una.clause.includes('Whenever Teodora appears, keep that exact face'));
   assert.ok(!una.clause.includes('different people'));
   assert.match(M.directSlotsPlan({ subjects: [s('a'), s('b'), s('c'), s('d')] }).error, /^PERSONAS_TOO_MANY/);
+  assert.match(M.directSlotsPlan({ subjects: [s('Teodora'), s(' teodora ')] }).error, /^PERSONAS_DUPLICATED/, 'una persona en dos imágenes se rechaza: va en una tarjeta');
+  assert.equal(M.directSlotsPlan({ subjects: [s(''), s('')] }).error, null, 'sin rótulo no se puede saber si es la misma persona');
   assert.deepEqual(M.directSlotsPlan({ subjects: [{ dataUrl: 'https://x/y.png', label: 'x' }] }).images, [], 'sólo data: (la UI manda sus archivos)');
   const sinNombre = M.directSlotsPlan({ subjects: [{ dataUrl: PX, label: '' }, { dataUrl: PX }] });
   assert.ok(sinNombre.clause.includes('SUBJECT A, subject A') && sinNombre.clause.includes('SUBJECT B, subject B'));
