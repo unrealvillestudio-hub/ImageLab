@@ -3030,6 +3030,14 @@ export function directSlotsPlan(slots: DirectSlots): { images: Array<{ mimeType:
   if (subjects.length > MAX_PERSONAS_PER_IMAGE) {
     return { images: [], clause: '', error: `PERSONAS_TOO_MANY: ${subjects.length} sujetos; el motor acepta hasta ${MAX_PERSONAS_PER_IMAGE} por imagen` };
   }
+  // UNA TARJETA POR PERSONA (2026-11-12, medido en las pruebas de VideoLab del 2026-11-11): cada imagen de `subjects` es
+  // una persona distinta para el modelo. Dos fotos de la misma persona en dos espacios salen como dos personas (ninguna
+  // fiel). Las vistas de una persona viajan juntas en UNA imagen compuesta; dos sujetos con el mismo rótulo se rechazan.
+  const labels = subjects.map((x) => (x.label ?? '').trim().toLowerCase()).filter(Boolean);
+  const dup = labels.find((l, i) => labels.indexOf(l) !== i);
+  if (dup) {
+    return { images: [], clause: '', error: `PERSONAS_DUPLICATED: «${dup}» llega en más de una imagen; una persona va en UNA tarjeta compuesta con sus vistas` };
+  }
   const background = ok(slots.background) ? [slots.background!] : [];
   const product = (slots.product ?? []).filter(ok);
   const style = (slots.style ?? []).filter(ok);
