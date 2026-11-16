@@ -217,6 +217,29 @@ await ok('sin cambio: MARK_NOT_VISIBLE; un intento que falla queda en el log con
   assert.deepEqual(r2.json.mark_pass.attempts.map((a) => a.outcome), ['failed', 'failed']);
   assert.ok(c2.lines.filter((l) => /intento \d: la edición falló/.test(l)).length === 2, 'el error de cada intento se escribe');
 });
+await ok('429 de cuota: se espera antes del segundo intento y el logo se aplica; otro error no espera', async () => {
+  assert.equal(M.markQuotaWaitMs('Gemini image (multimodal) error 429: {"error":{"code":429}}', 1000), M.MARK_QUOTA_WAIT_MS);
+  assert.equal(M.markQuotaWaitMs('RESOURCE_EXHAUSTED', 0), M.MARK_QUOTA_WAIT_MS);
+  assert.equal(M.markQuotaWaitMs('error 400: rechazada', 0), 0, 'sólo la cuota espera');
+  assert.equal(M.markQuotaWaitMs('error 429', M.MARK_START_MAX_ELAPSED_MS - M.MARK_QUOTA_WAIT_MS + 1), 0, 'sin tiempo después de esperar, no espera');
+  const rapido = SRC.replace('export const MARK_QUOTA_WAIT_MS = 20_000;', 'export const MARK_QUOTA_WAIT_MS = 50;');
+  assert.notEqual(rapido, SRC);
+  const h = (await cargar(rapido)).default;
+  let n429 = 0;
+  const it = async (u) => {
+    if (u === LOGO_DARK) return new Response(LOGO_PNG, { status: 200, headers: { 'content-type': 'image/png' } });
+    if (u.includes('generateContent')) {
+      if (n429++ === 0) return new Response('{"error":{"code":429,"message":"Resource exhausted"}}', { status: 429 });
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: H_OK } }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1290 } }), { status: 200 });
+    }
+    return undefined;
+  };
+  const c = capture();
+  let r; try { r = await run(h, pasada(), { db: DB, intercept: it }); } finally { c.restore(); }
+  assert.equal(r.json.mark_pass.applied, true, JSON.stringify(r.json.mark_pass).slice(0, 300));
+  assert.deepEqual(r.json.mark_pass.attempts.map((x) => x.outcome), ['failed', 'applied']);
+  assert.ok(c.lines.some((l) => /429 de cuota: se espera 50 ms antes del intento 2/.test(l)), 'la espera queda en el log');
+});
 await ok('petición mal formada: 400 sin llamar al modelo', async () => {
   const it = interceptor([H_OK], null); const c = capture();
   let r; try { r = await run(handler, pasada({ plan: { persona: 'X' } }), { db: DB, intercept: it }); } finally { c.restore(); }
