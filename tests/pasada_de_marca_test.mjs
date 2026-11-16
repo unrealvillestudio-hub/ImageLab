@@ -176,6 +176,20 @@ await ok('lote: la pasada corre en «terminar» (la imagen llega del lote; sólo
   assert.ok(r.json.image_data_url.endsWith(H_OK));
 });
 
+await ok('sin tiempo: ninguna edición, imagen sin logo y MARK_NOT_APPLIED por time_budget (la pieza no se pierde)', async () => {
+  assert.equal(M.markPassAllowed(0), true); assert.equal(M.markPassAllowed(25_000), true);
+  assert.equal(M.markPassAllowed(25_001), false); assert.equal(M.markPassAllowed(NaN), false);
+  const sinTiempo = SRC.replace('export const MARK_START_MAX_ELAPSED_MS = 25_000;', 'export const MARK_START_MAX_ELAPSED_MS = -1;');
+  assert.notEqual(sinTiempo, SRC);
+  const h = (await cargar(sinTiempo)).default;
+  const it = interceptor([H_OK]); const c = capture();
+  let r; try { r = await run(h, pedido(), { db: DB, intercept: it }); } finally { c.restore(); }
+  assert.equal(r.status, 200);
+  assert.equal(it.count(), 1, 'sólo la generación');
+  assert.equal(r.json.mark_pass.applied, false); assert.equal(r.json.mark_pass.error, 'time_budget');
+  assert.ok(r.json.image_data_url.endsWith(BASE_IMG));
+});
+
 console.log('── 5 · sin marca ──');
 await ok('sin opción con marca: ni mark_pass ni segunda llamada', async () => {
   const it = interceptor([H_OK]); const c = capture();

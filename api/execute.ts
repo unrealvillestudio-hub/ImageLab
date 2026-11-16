@@ -1477,6 +1477,14 @@ export const MARK_DIFF_THRESHOLD = 25;
 export const MARK_DIFF_MAX_PCT = 1;
 /** Ancho al que se comparan antes y después. */
 export const MARK_MEASURE_WIDTH = 432;
+/** Una edición del logo (o su reintento) sólo empieza si desde el inicio de la petición no han pasado más de esto: el
+ *  carril espera 60 s y una imagen tarda ~15 s (p50) y hasta 47 s (`EDGE_PLATE_RETRY_MAX_ELAPSED_MS`, misma medida).
+ *  Sin tiempo, la imagen sin logo y `MARK_NOT_APPLIED` con `time_budget`: nunca se pierde la pieza por el logo. */
+export const MARK_START_MAX_ELAPSED_MS = 25_000;
+/** ¿Hay tiempo para empezar una edición del logo? PURO. */
+export function markPassAllowed(elapsedMs: number): boolean {
+  return Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs <= MARK_START_MAX_ELAPSED_MS;
+}
 /** Lugar por defecto del logo, si la variante no lo declara. */
 export const MARK_DEFAULT_PLACEMENT = 'on the LEFT chest of the wearer (the image RIGHT side when they face the camera), at the usual chest-logo height';
 /** Fondo liso sobre el que se compone el logo, por tono de la prenda, si la variante no lo declara. */
@@ -2826,7 +2834,7 @@ async function edgePlateOfImage(dataUrl: string): Promise<{ plate: EdgePlate | n
 // con la imagen entregada y el logo (compuesto sobre fondo liso); se mide la imagen entera contra la de antes; > 1 % →
 // un reintento; si vuelve a pasar, la imagen sin logo y `MARK_NOT_APPLIED`. Cada intento viaja con su consumo: se
 // generó y se cobró, y el carril lo asienta.
-async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRatio: string, brandId: string):
+async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRatio: string, brandId: string, t0: number):
   Promise<{ image_data_url: string; trace: Record<string, unknown> }> {
   const attempts: Array<{ model: string; usage: Record<string, number> | null; changed_pct: number | null; error?: string }> = [];
   const base = { mark: plan.mark, garment_tone: plan.garment_tone, persona: plan.persona };
@@ -2848,6 +2856,11 @@ async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRati
       return changedPixelPct(new Uint8Array(a.buffer, a.byteOffset, a.length), new Uint8Array(b.buffer, b.byteOffset, b.length), 3);
     };
     for (let intento = 1; intento <= 2; intento++) {
+      const elapsed = Date.now() - t0;
+      if (!markPassAllowed(elapsed)) {
+        console.warn(`[ImageLab][MARCA] MARK_NOT_APPLIED brand=${brandId}: ${elapsed} ms gastados, sin tiempo para el intento ${intento}`);
+        return { image_data_url: imageDataUrl, trace: { mark_pass: { ...base, applied: false, reason: 'MARK_NOT_APPLIED', error: 'time_budget', elapsed_ms: elapsed, attempts } } };
+      }
       let r: ImageWithUsage;
       try {
         r = await vertexPredictImagenCapability({ prompt: markEditPrompt(plan), aspectRatio, images: [actual, logo] });
@@ -3525,7 +3538,7 @@ async function entregarImagen(
   // estado, nada cambia; sin plan, la respuesta dice por qué no corrió.
   let marcaTrace: Record<string, unknown> = {};
   if (e.marca?.plan) {
-    const m = await pasadaDeMarca(imageDataUrl, e.marca.plan, e.aspect_ratio, brandId);
+    const m = await pasadaDeMarca(imageDataUrl, e.marca.plan, e.aspect_ratio, brandId, t0);
     imageDataUrl = m.image_data_url; marcaTrace = m.trace;
   } else if (e.marca?.status) {
     console.warn(`[ImageLab][MARCA] ${e.marca.status} brand=${brandId}`);
