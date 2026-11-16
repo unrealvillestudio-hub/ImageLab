@@ -6098,6 +6098,23 @@ export function insetCropRect(imgW: number, imgH: number, boxW: number, boxH: nu
   return { left: clamp(left, imgW - width), top: clamp(top, imgH - height), width, height };
 }
 
+/** 2026-11-16 — MODO `faces`: sólo detectar caras. El pedido: `{ mode: 'faces', brand_id, image_url | image_data_url }`.
+ *  Lo usa VideoLab para no tapar caras con el texto de un video (el detector es de ImageLab: un lab no construye el motor
+ *  de otro). Falla con nombre si falta la imagen o la marca. PURO. */
+export function parseFacesRequest(body: any): { brandId: string; imageUrl: string | null; imageDataUrl: string | null } {
+  const brandId = String(body?.brand_id ?? '').trim();
+  if (!brandId) throw new CompositorError('COMPOSITOR_BRAND_MISSING', 'brand_id es obligatorio (el gasto del detector se asienta por marca)', 400);
+  const imageUrl = typeof body?.image_url === 'string' && /^https?:\/\//.test(body.image_url.trim()) ? body.image_url.trim() : null;
+  const imageDataUrl = typeof body?.image_data_url === 'string' && body.image_data_url.startsWith('data:image/') ? body.image_data_url : null;
+  if (!imageUrl && !imageDataUrl) throw new CompositorError('COMPOSITOR_IMAGE_MISSING', "mode 'faces' necesita image_url (http/https) o image_data_url", 400);
+  return { brandId, imageUrl, imageDataUrl };
+}
+
+/** Las cajas del detector (fracciones 0..1 de la imagen), redondeadas a 4 decimales para el contrato. PURO. */
+export function facesForContract(faces: FaceBox[] | null): Array<{ x0: number; y0: number; x1: number; y1: number }> {
+  const r = (v: number) => Math.round(v * 10000) / 10000;
+  return (faces ?? []).map((f) => ({ x0: r(f.x0), y0: r(f.y0), x1: r(f.x1), y1: r(f.y1) }));
+}
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -6892,6 +6909,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   const t0 = Date.now();
+  // 2026-11-16 — MODO `faces`: sólo las cajas de las caras, sin componer nada. El gasto se asienta como el del compositor.
+  if (body.mode === 'faces') {
+    try {
+      const fr = parseFacesRequest(body);
+      const bytes = fr.imageDataUrl ? dataUrlToBytes(fr.imageDataUrl) : await fetchBytes(String(fr.imageUrl), 'COMPOSITOR_IMAGE_FETCH_FAILED');
+      const dims = imageDimensions(bytes);
+      const fc = await detectFaces(bytes, dims.mime, { calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
+      if (fc.called) {
+        try {
+          await ledgerRecordDirect(body, [ledgerCallRow({ outputType: 'image_overlay_faces', model: fc.model, usage: fc.usage,
+            ok: !fc.error, httpStatus: fc.http_status, billable: 'estructura', durationMs: fc.duration_ms,
+            markers: fc.error ? [String(fc.error).slice(0, 240)] : [] })], { platform: null, durationMs: fc.duration_ms, tag: 'faces' });
+        } catch (err) {
+          console.error(`[ImageLab][LIBRO] faces asiento omitido: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`);
+        }
+      }
+      if (!fc.faces) {
+        res.status(502).json({ status: 'error', error_label: 'COMPOSITOR_FACE_CHECK_UNAVAILABLE', error: fc.error ?? 'sin respuesta del detector',
+          model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status });
+        return;
+      }
+      res.status(200).json({ status: 'ok', mode: 'faces', faces: facesForContract(fc.faces), image: { width: dims.width, height: dims.height },
+        model: fc.model, model_source: fc.model_source ?? null, usage: fc.usage, duration_ms: Date.now() - t0 });
+    } catch (err) {
+      const e = err instanceof CompositorError ? err : null;
+      res.status(e?.status ?? 500).json({ status: 'error', error_label: e?.label ?? 'COMPOSITOR_FAILED', error: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
   try {
     const brandId = String(body.brand_id ?? '').trim();
     const canal = body.canal == null ? null : String(body.canal).trim().toUpperCase();
