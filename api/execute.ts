@@ -541,6 +541,8 @@ interface ExecuteRequest {
     persona?: PromptPersona | null;      // ALIAS LEGACY (2026-10-03): una persona. Si llega `personas`, manda `personas`
     personas?: PromptPersona[] | null;   // 2026-10-03 — hasta MAX_PERSONAS_PER_IMAGE, en orden A, B…; dato del carril
     gaze?: PersonaGaze | null;           // 2026-10-03 — camera | each_other | subject_of_scene; sin dato, el defecto por N
+    card_class?: string | null;          // 2026-11-15 — close | medium | wide | hands (la toma del lugar); sin dato, la del encuadre
+    marks?: Record<string, unknown> | null; // 2026-11-15 — variantes del logo por marca (`brand_assets` garment_mark); sin dato, sin pasada
     generation_mode?: GenerationMode;    // 'edit_from_current' exige `source_image_url`
     source_image_url?: string;           // la imagen actual, para editar en vez de repintar
     prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
@@ -1211,13 +1213,18 @@ export interface PromptPersona {
   aliases?: string[];
   description: string;
   reference_image_urls?: string[];
+  // 2026-11-15 — TARJETAS DE IDENTIDAD (dato del carril, `person_blueprints.raw_config.identity_cards`): una imagen por
+  // clase de encuadre (`close`, `medium`, `wide`, `hands`) con varias vistas de ESTA persona. Con dato, la persona viaja en
+  // UNA imagen, la de la clase de la imagen (`identityCardClassFor`). Sin dato, `reference_image_urls` como siempre.
+  identity_cards?: Record<string, unknown> | null;
   // Catálogo de gestos de ESTA persona (dato del carril, `person_blueprints.raw_config.expression_catalog`).
   expressions?: Array<{ when: string; face: string }>;
   expression_avoid?: string[];
   // Vestuario de ESTA persona (dato del carril, `person_blueprints.raw_config.wardrobe_catalog`).
   // 2026-10-11 — `options`: las prendas de ese ambiente, una por opción; el MOTOR elige una por imagen
   // (`wardrobeOptionFor`). Sin `options`, la línea `outfit` de siempre.
-  wardrobe?: Array<{ when: string; outfit: string; options?: string[] }>;
+  // 2026-11-15 — una opción también puede ser `{ outfit, mark?, garment_tone? }` (`wardrobeOptionObjectsOf`).
+  wardrobe?: Array<{ when: string; outfit: string; options?: Array<string | { outfit: string; mark?: string; garment_tone?: string }> }>;
   // 2026-10-11 — la ropa que lleva en sus fotos de referencia (`wardrobe_catalog.reference_outfit`). Con
   // ella, el motor repone que no la lleve (`personaReferenceOutfitClause`). Sin ella, nada cambia.
   wardrobe_reference_outfit?: string | null;
@@ -1391,16 +1398,167 @@ export function seedIndex(seed: string, n: number): number {
   return (h >>> 0) % n;
 }
 
-/** Las opciones válidas de una entrada del catálogo: cadenas no vacías, en su orden. */
-export function wardrobeOptionsOf(entry: { options?: unknown } | null | undefined): string[] {
-  return Array.isArray(entry?.options) ? (entry!.options as unknown[]).filter((o): o is string => typeof o === 'string' && !!o.trim()).map((o) => o.trim()) : [];
+// ── LA OPCIÓN PUEDE SER UN OBJETO (2026-11-15) ───────────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-11-14, `wardrobeOptionsOf`): una opción que no fuera cadena se DESCARTABA
+// en silencio, y si todas eran objetos el bloque volvía al «varía de imagen en imagen» sin error. La marca en
+// la prenda (decisión D2 de Sam, 2026-11-14) necesita que la opción diga qué marca lleva y sobre qué tono.
+//
+// LA REGLA: una opción es una cadena o `{ outfit, mark?, garment_tone? }`. El texto sale de `outfit`; la
+// opción elegida vuelve entera (`wardrobeChoicesFor`); si lleva `mark`, el constructor pide la prenda LISA:
+// el logo no lo dibuja el generador, se aplica después. Con sólo cadenas, todo es exactamente lo de antes
+// (misma lista, mismo índice por semilla). EJE: `mark` es una clave de `brand_assets`; aquí no hay marcas.
+
+/** Una opción de vestuario normalizada. */
+export interface WardrobeOption { outfit: string; mark?: string; garment_tone?: string }
+
+/** Las opciones válidas de una entrada, normalizadas: cadena → `{ outfit }`; objeto con `outfit` no vacío →
+ *  `{ outfit, mark?, garment_tone? }`; lo demás se ignora. En su orden. PURO. */
+export function wardrobeOptionObjectsOf(entry: { options?: unknown } | null | undefined): WardrobeOption[] {
+  if (!Array.isArray(entry?.options)) return [];
+  const out: WardrobeOption[] = [];
+  for (const o of entry!.options as unknown[]) {
+    if (typeof o === 'string') { if (o.trim()) out.push({ outfit: o.trim() }); continue; }
+    if (!o || typeof o !== 'object' || Array.isArray(o)) continue;
+    const outfit = typeof (o as any).outfit === 'string' ? (o as any).outfit.trim() : '';
+    if (!outfit) continue;
+    const mark = typeof (o as any).mark === 'string' && (o as any).mark.trim() ? (o as any).mark.trim() : null;
+    const tone = typeof (o as any).garment_tone === 'string' && (o as any).garment_tone.trim() ? (o as any).garment_tone.trim() : null;
+    out.push({ outfit, ...(mark ? { mark } : {}), ...(tone ? { garment_tone: tone } : {}) });
+  }
+  return out;
 }
 
-/** La prenda de esta imagen para una entrada: una de sus opciones por la semilla; sin opciones, `outfit`. */
+/** Los textos de las opciones válidas de una entrada (cadenas u objetos con `outfit`), en su orden. */
+export function wardrobeOptionsOf(entry: { options?: unknown } | null | undefined): string[] {
+  return wardrobeOptionObjectsOf(entry).map((o) => o.outfit);
+}
+
+/** La opción elegida para una entrada por la semilla; sin opciones, `null`. PURO. */
+export function wardrobeChoiceFor(entry: { options?: unknown }, seed: string): WardrobeOption | null {
+  const opts = wardrobeOptionObjectsOf(entry);
+  return opts.length ? opts[seedIndex(seed, opts.length)] : null;
+}
+
+/** La prenda de una opción con marca: lisa, porque el logo se aplica después de generar. */
+export function plainGarmentText(outfit: string): string {
+  return `${outfit.trim()} (plain fabric: no logo, emblem, print or lettering on it)`;
+}
+
+/** La prenda de esta imagen para una entrada: una de sus opciones por la semilla; sin opciones, `outfit`. Si la
+ *  opción elegida lleva marca, se pide lisa. */
 export function wardrobeOptionFor(entry: { outfit: string; options?: unknown }, seed: string): string {
-  const opts = wardrobeOptionsOf(entry);
-  if (!opts.length) return entry.outfit.trim();
-  return opts[seedIndex(seed, opts.length)];
+  const choice = wardrobeChoiceFor(entry, seed);
+  if (!choice) return entry.outfit.trim();
+  return choice.mark ? plainGarmentText(choice.outfit) : choice.outfit;
+}
+
+// ── LA MARCA SE APLICA DESPUÉS DE GENERAR (2026-11-15) ──────────────────────────────────────────────
+//
+// POR QUÉ (decisión D2 de Sam, 2026-11-14): el generador no dibuja un logo fiel. Se genera la prenda LISA y el
+// logo se aplica con UNA edición sobre la imagen entregada, con el logo como referencia; después se mide que la
+// edición no cambió nada más.
+//
+// LÍNEA BASE MEDIDA (sesión de identidad, 2026-11-14; brief corregido en `608f8ba`): con el prompt de
+// `markEditPrompt`, 0,1 % de píxeles cambiados en 9 de 10 ediciones y 2,8 % en 1 (descartada). Método:
+// antes y después a la misma resolución (432 px de ancho), RGB, diferencia media de los 3 canales > 25,
+// sobre la imagen ENTERA, logo incluido. De ahí el umbral: > 1 % → un reintento; si vuelve a pasar,
+// se entrega la imagen sin logo con `MARK_NOT_APPLIED`.
+//
+// CUÁNDO NO CORRE, y la respuesta lo dice: sin variante del logo en la petición (`MARK_NOT_AVAILABLE`); con
+// más de una persona con marca (`MARK_MULTI_PERSONA`: el prompt nombra UNA prenda); o si la persona tiene
+// opciones con y sin marca en entradas distintas del catálogo, porque el constructor elige la entrada por la
+// escena y no se sabe cuál vistió (`MARK_UNDETERMINED`). EJE: la marca, sus variantes, su tamaño y su lugar
+// son dato (`params.marks`, que el carril lee de `brand_assets`).
+
+/** Diferencia de canal a partir de la cual un píxel cuenta como cambiado. */
+export const MARK_DIFF_THRESHOLD = 25;
+/** Porcentaje máximo de píxeles cambiados que admite la edición del logo. */
+export const MARK_DIFF_MAX_PCT = 1;
+/** Ancho al que se comparan antes y después. */
+export const MARK_MEASURE_WIDTH = 432;
+/** Una edición del logo (o su reintento) sólo empieza si desde el inicio de la petición no han pasado más de esto: el
+ *  carril espera 60 s y una imagen tarda ~15 s (p50) y hasta 47 s (`EDGE_PLATE_RETRY_MAX_ELAPSED_MS`, misma medida).
+ *  Sin tiempo, la imagen sin logo y `MARK_NOT_APPLIED` con `time_budget`: nunca se pierde la pieza por el logo. */
+export const MARK_START_MAX_ELAPSED_MS = 25_000;
+/** ¿Hay tiempo para empezar una edición del logo? PURO. */
+export function markPassAllowed(elapsedMs: number): boolean {
+  return Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs <= MARK_START_MAX_ELAPSED_MS;
+}
+/** Lugar por defecto del logo, si la variante no lo declara. */
+export const MARK_DEFAULT_PLACEMENT = 'on the LEFT chest of the wearer (the image RIGHT side when they face the camera), at the usual chest-logo height';
+/** Fondo liso sobre el que se compone el logo, por tono de la prenda, si la variante no lo declara. */
+export const MARK_DEFAULT_BACKGROUND: Record<string, string> = { light: '#FFFFFF', dark: '#141414' };
+
+/** Una variante del logo: para qué tono de prenda, su imagen y cómo se coloca. */
+export interface MarkVariant { for_tone: string; image_url: string; width_cm?: number | null; placement?: string | null; background?: string | null }
+/** El plan de la pasada de marca: quién, qué prenda y qué variante. */
+export interface PlanDeMarca { persona: string; outfit: string; mark: string; garment_tone: string | null; variant: MarkVariant }
+
+/** Las variantes válidas de una marca en `params.marks`. PURO. */
+export function markVariantsOf(marks: unknown, mark: string): MarkVariant[] {
+  const raw = marks && typeof marks === 'object' && !Array.isArray(marks) ? (marks as Record<string, unknown>)[mark] : null;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v: any) => v && typeof v.for_tone === 'string' && typeof v.image_url === 'string' && /^(https?:\/\/|data:image\/)/.test(v.image_url))
+    .map((v: any) => ({ for_tone: v.for_tone.trim(), image_url: v.image_url.trim(),
+      ...(Number.isFinite(Number(v.width_cm)) && Number(v.width_cm) > 0 ? { width_cm: Number(v.width_cm) } : {}),
+      ...(typeof v.placement === 'string' && v.placement.trim() ? { placement: v.placement.trim() } : {}),
+      ...(typeof v.background === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.background.trim()) ? { background: v.background.trim() } : {}) }));
+}
+
+/** El plan de la pasada para esta imagen, o el motivo por el que no corre. `null`/`null`: nadie lleva marca. PURO. */
+export function markPlanFor(choices: Array<{ name: string; choices: Array<{ when: string } & WardrobeOption> }>, marks: unknown):
+  { plan: PlanDeMarca | null; status: 'MARK_NOT_AVAILABLE' | 'MARK_MULTI_PERSONA' | 'MARK_UNDETERMINED' | null } {
+  const marcadas = choices.filter((w) => w.choices.some((c) => !!c.mark));
+  if (!marcadas.length) return { plan: null, status: null };
+  if (marcadas.length > 1) return { plan: null, status: 'MARK_MULTI_PERSONA' };
+  const w = marcadas[0];
+  const keys = new Set(w.choices.map((c) => c.mark ?? ''));
+  if (keys.size !== 1) return { plan: null, status: 'MARK_UNDETERMINED' };
+  const c = w.choices[0];
+  const variants = markVariantsOf(marks, c.mark!);
+  const tone = c.garment_tone ?? null;
+  const variant = (tone ? variants.find((v) => v.for_tone === tone) : null) ?? (variants.length === 1 ? variants[0] : null);
+  if (!variant) return { plan: null, status: 'MARK_NOT_AVAILABLE' };
+  return { plan: { persona: w.name, outfit: c.outfit, mark: c.mark!, garment_tone: tone, variant }, status: null };
+}
+
+/** El prompt de la edición del logo (el probado el 2026-11-14, sin nombres de marca). PURO. */
+export function markEditPrompt(plan: PlanDeMarca): string {
+  const width = plan.variant.width_cm ?? 7;
+  const where = plan.variant.placement ?? MARK_DEFAULT_PLACEMENT;
+  return `The FIRST attached image is the current approved image: edit it. The SECOND attached image is a logo. ` +
+    `Embroider that logo onto ${plan.persona}'s ${plan.outfit}: small, ${where}, about ${width} cm wide, ` +
+    'following the fabric folds, perspective and lighting of the garment, with a real embroidered thread texture. ' +
+    "Exactly the logo's letters, shapes and colours; legible; no other text. " +
+    'Change NOTHING else: same face, expression, hair, body, pose, hands, background, light and framing.';
+}
+
+/** Porcentaje de píxeles cuya diferencia media de canal supera el umbral. Dos buffers RGB del mismo tamaño. PURO. */
+export function changedPixelPct(a: Uint8Array, b: Uint8Array, channels: number, threshold = MARK_DIFF_THRESHOLD): number {
+  if (a.length !== b.length || channels < 3) throw new Error('MARK_DIFF_SIZE_MISMATCH');
+  const px = a.length / channels;
+  let changed = 0;
+  for (let i = 0; i < a.length; i += channels) {
+    const d = (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2])) / 3;
+    if (d > threshold) changed++;
+  }
+  return px ? Math.round((changed / px) * 10000) / 100 : 0;
+}
+
+/** Las opciones elegidas de una persona en esta imagen, con la misma semilla que `personaWardrobeBlock`: una
+ *  por entrada del catálogo que declara opciones. Al editar no se dicta ropa: lista vacía. PURO. */
+export function wardrobeChoicesFor(persona: PromptPersona | null | undefined, mode: GenerationMode | null | undefined, seed: string | null | undefined):
+  Array<{ when: string } & WardrobeOption> {
+  if (!persona || mode === 'edit_from_current') return [];
+  const name = String(persona.name ?? '').trim();
+  const entries = (persona.wardrobe ?? []).filter((w) => w?.when?.trim() && w?.outfit?.trim());
+  const out: Array<{ when: string } & WardrobeOption> = [];
+  entries.forEach((w, k) => {
+    const c = wardrobeChoiceFor(w, `${seed ?? ''}|${name}|${k}`);
+    if (c) out.push({ when: w.when.trim(), ...c });
+  });
+  return out;
 }
 
 /** La cláusula del motor: la persona no lleva la ropa de sus fotos. En inglés, como el resto. */
@@ -1910,6 +2068,64 @@ export function resolveSubjectFraming(layout: any): { framing: SubjectFraming; d
   const v = String(raw).trim().toLowerCase();
   if ((SUBJECT_FRAMINGS as readonly string[]).includes(v)) return { framing: v as SubjectFraming, declared: true, warning: null };
   return { framing: 'tight', declared: false, warning: `layout.subject_framing=${JSON.stringify(raw)} no es uno de ${SUBJECT_FRAMINGS.join(', ')}: se usa tight` };
+}
+
+// ── TARJETA DE IDENTIDAD POR ENCUADRE (2026-11-15) ──────────────────────────────────────────────────
+//
+// EL DEFECTO QUE CIERRA (medido 2026-11-12/14, sesión de identidad): en el constructor las vistas de una
+// persona viajaban como imágenes sueltas, y el modelo las leía como personas distintas (dos Irjas). La regla
+// «una tarjeta por persona» sólo existía en modo directo (`SLOTS`).
+//
+// LA REGLA (Sam, 2026-11-15, «apruebo la regla de clase de tarjeta»): la clase de la imagen es la que declara
+// el dato (`params.card_class`, que el carril toma de la toma del lugar) y, sin dato, la del encuadre:
+// `tight` → `close`, `scene` → `medium`. Si la persona no tiene tarjeta de esa clase, viaja la de `medium` y
+// el log lo dice; si tampoco la tiene, sus fotos sueltas de siempre. EJE: las clases son del sistema; qué
+// tarjeta tiene cada persona es dato.
+
+/** Las clases de tarjeta de identidad. Composición en BluePrints `tools/identity/card_plan.json` (D1). */
+export const IDENTITY_CARD_CLASSES = ['close', 'medium', 'wide', 'hands'] as const;
+export type IdentityCardClass = typeof IDENTITY_CARD_CLASSES[number];
+/** La clase que viaja cuando la persona no tiene tarjeta de la clase pedida. */
+export const IDENTITY_CARD_FALLBACK: IdentityCardClass = 'medium';
+
+/** La clase de tarjeta de esta imagen: la declarada por el dato si es válida; si no, la del encuadre. PURO. */
+export function identityCardClassFor(framing: SubjectFraming | null | undefined, declared: unknown):
+  { card_class: IdentityCardClass; declared: boolean; warning: string | null } {
+  const v = typeof declared === 'string' ? declared.trim().toLowerCase() : '';
+  if (v && (IDENTITY_CARD_CLASSES as readonly string[]).includes(v)) return { card_class: v as IdentityCardClass, declared: true, warning: null };
+  const byFraming: IdentityCardClass = framing === 'scene' ? 'medium' : 'close';
+  const warning = declared === undefined || declared === null || declared === ''
+    ? null : `card_class=${JSON.stringify(declared)} no es uno de ${IDENTITY_CARD_CLASSES.join(', ')}: se usa ${byFraming} (encuadre ${framing ?? 'tight'})`;
+  return { card_class: byFraming, declared: false, warning };
+}
+
+/** Las tarjetas válidas de una persona: clase conocida → URL https o data:image. Lo demás se ignora. PURO. */
+export function identityCardsOf(persona: PromptPersona | null | undefined): Partial<Record<IdentityCardClass, string>> {
+  const raw = persona?.identity_cards;
+  const out: Partial<Record<IdentityCardClass, string>> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const c of IDENTITY_CARD_CLASSES) {
+    const u = (raw as Record<string, unknown>)[c];
+    if (typeof u === 'string' && /^(https?:\/\/|data:image\/)/.test(u.trim())) out[c] = u.trim();
+  }
+  return out;
+}
+
+/** Con qué imágenes viaja una persona en esta clase: su tarjeta (una), la de `medium` si no tiene esa, o sus
+ *  fotos sueltas de siempre si no tiene tarjetas. PURO. */
+export function personaIdentityRefs(persona: PromptPersona, cls: IdentityCardClass):
+  { refs: string[]; card: IdentityCardClass | null; fallback: boolean } {
+  const cards = identityCardsOf(persona);
+  if (cards[cls]) return { refs: [cards[cls]!], card: cls, fallback: false };
+  if (cards[IDENTITY_CARD_FALLBACK]) return { refs: [cards[IDENTITY_CARD_FALLBACK]!], card: IDENTITY_CARD_FALLBACK, fallback: true };
+  return { refs: persona.reference_image_urls ?? [], card: null, fallback: false };
+}
+
+/** La cláusula de la tarjeta: UNA imagen con varias vistas de UNA persona. Sólo cuando viaja alguna tarjeta. */
+export function identityCardClause(names: string[]): string {
+  const n = names.map((x) => String(x ?? '').trim()).filter(Boolean);
+  return `The reference image of ${n.join(', ')} is ONE identity card with several views of the same person: ` +
+    'each card shows a single person, never several people — never paint that person twice';
 }
 
 /** ENCUADRE DE ESCENA. La cláusula ceñida dice dos cosas: (a) el sujeto llena el cuadro y (b) sin una
@@ -2614,6 +2830,62 @@ async function edgePlateOfImage(dataUrl: string): Promise<{ plate: EdgePlate | n
   }
 }
 
+// 2026-11-15 — LA PASADA DE MARCA sobre los píxeles reales (reglas y umbral en el bloque PB, `markPlanFor`). Una edición
+// con la imagen entregada y el logo (compuesto sobre fondo liso); se mide la imagen entera contra la de antes; > 1 % →
+// un reintento; si vuelve a pasar, la imagen sin logo y `MARK_NOT_APPLIED`. Cada intento viaja con su consumo: se
+// generó y se cobró, y el carril lo asienta.
+async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRatio: string, brandId: string, t0: number):
+  Promise<{ image_data_url: string; trace: Record<string, unknown> }> {
+  const attempts: Array<{ model: string; usage: Record<string, number> | null; changed_pct: number | null; error?: string }> = [];
+  const base = { mark: plan.mark, garment_tone: plan.garment_tone, persona: plan.persona };
+  try {
+    const { default: sharp } = await import('sharp');
+    const comma = imageDataUrl.indexOf(',');
+    const antesBytes = Buffer.from(imageDataUrl.slice(comma + 1), 'base64');
+    const logoIn = await fetchImageInline(plan.variant.image_url);
+    const fondo = plan.variant.background ?? MARK_DEFAULT_BACKGROUND[plan.garment_tone ?? ''] ?? '#FFFFFF';
+    const logoPng = await sharp(Buffer.from(logoIn.data, 'base64')).flatten({ background: fondo }).png().toBuffer();
+    const actual: InlineImage = { mimeType: imageDataUrl.slice(5, imageDataUrl.indexOf(';')) || 'image/png', data: imageDataUrl.slice(comma + 1) };
+    const logo: InlineImage = { mimeType: 'image/png', data: logoPng.toString('base64') };
+    const medir = async (despuesDataUrl: string): Promise<number> => {
+      const meta = await sharp(antesBytes).metadata();
+      const w = MARK_MEASURE_WIDTH, h = Math.max(1, Math.round((meta.height ?? w) * w / (meta.width ?? w)));
+      const raw = (b: Buffer) => sharp(b).removeAlpha().resize(w, h, { fit: 'fill' }).raw().toBuffer();
+      const d = Buffer.from(despuesDataUrl.slice(despuesDataUrl.indexOf(',') + 1), 'base64');
+      const [a, b] = await Promise.all([raw(antesBytes), raw(d)]);
+      return changedPixelPct(new Uint8Array(a.buffer, a.byteOffset, a.length), new Uint8Array(b.buffer, b.byteOffset, b.length), 3);
+    };
+    for (let intento = 1; intento <= 2; intento++) {
+      const elapsed = Date.now() - t0;
+      if (!markPassAllowed(elapsed)) {
+        console.warn(`[ImageLab][MARCA] MARK_NOT_APPLIED brand=${brandId}: ${elapsed} ms gastados, sin tiempo para el intento ${intento}`);
+        return { image_data_url: imageDataUrl, trace: { mark_pass: { ...base, applied: false, reason: 'MARK_NOT_APPLIED', error: 'time_budget', elapsed_ms: elapsed, attempts } } };
+      }
+      let r: ImageWithUsage;
+      try {
+        r = await vertexPredictImagenCapability({ prompt: markEditPrompt(plan), aspectRatio, images: [actual, logo] });
+      } catch (err) {
+        const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+        attempts.push({ model: GEMINI_IMAGE_MODEL, usage: (err as any)?.usage ?? null, changed_pct: null, error: msg });
+        continue;
+      }
+      const pct = await medir(r.image_data_url);
+      attempts.push({ model: GEMINI_IMAGE_MODEL, usage: r.usage, changed_pct: pct });
+      if (pct <= MARK_DIFF_MAX_PCT) {
+        console.log(`[ImageLab][MARCA] brand=${brandId} ${plan.mark} aplicada en el intento ${intento}: ${pct} % de píxeles cambiados`);
+        return { image_data_url: r.image_data_url, trace: { mark_pass: { ...base, applied: true, attempts } } };
+      }
+      console.warn(`[ImageLab][MARCA] brand=${brandId} intento ${intento}: ${pct} % de píxeles cambiados (> ${MARK_DIFF_MAX_PCT} %)`);
+    }
+  } catch (err) {
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    console.warn(`[ImageLab][MARCA] MARK_NOT_APPLIED brand=${brandId}: ${msg}`);
+    return { image_data_url: imageDataUrl, trace: { mark_pass: { ...base, applied: false, reason: 'MARK_NOT_APPLIED', error: msg, attempts } } };
+  }
+  console.warn(`[ImageLab][MARCA] MARK_NOT_APPLIED brand=${brandId}: se entrega la imagen sin logo`);
+  return { image_data_url: imageDataUrl, trace: { mark_pass: { ...base, applied: false, reason: 'MARK_NOT_APPLIED', attempts } } };
+}
+
 // ── RESPUESTA-IMAGEN:BEGIN ── bloque puro (sin red): lo extrae `tests/contrato_de_fallo_test.mjs`.
 /**
  * Pull the first inline image out of a Gemini :generateContent response.
@@ -2740,6 +3012,11 @@ export interface RespuestaBaseDeImagen {
   reference_images: number;
   personas: { personas_used: string[]; persona_refs: number[]; gaze: string | null; reference_budget: number; references_dropped: unknown } | null;
   overlay: { overlay_canal: string | null; subject_framing: string; text_zone: boolean } | null;
+  // 2026-11-15 — sólo cuando viajó alguna tarjeta de identidad; ausente, la respuesta de siempre.
+  identity_card_class?: string;
+  personas_refs_used?: Record<string, string[]>;
+  // 2026-11-15 — sólo cuando alguna opción de vestuario elegida lleva marca.
+  wardrobe_choices?: Record<string, Array<{ when: string } & WardrobeOption>>;
 }
 
 /** Todo lo que la imagen necesita después del prompt. Viaja por JSON (y por `jsonb`, que reordena claves): por eso
@@ -2755,6 +3032,8 @@ export interface EstadoDeImagen {
   respuesta: RespuestaBaseDeImagen;
   // 2026-10-31 — el lienzo exacto que se entrega (`params.canvas`, `leerLienzo`). Ausente ⇒ el tamaño del modelo.
   canvas?: Lienzo;
+  // 2026-11-15 — la pasada de marca (`markPlanFor`). Ausente ⇒ nadie lleva marca y nada cambia.
+  marca?: { plan: PlanDeMarca | null; status: string | null };
 }
 
 /**
@@ -2840,6 +3119,8 @@ export function payloadDeImagen(
       subject_framing: r.overlay.subject_framing,
       text_zone: r.overlay.text_zone,
     } : {}),
+    ...(r.wardrobe_choices ? { wardrobe_choices: r.wardrobe_choices } : {}),
+    ...(r.personas_refs_used ? { identity_card_class: r.identity_card_class, personas_refs_used: r.personas_refs_used } : {}),
     ...placa,
     status: 'ok',
   };
@@ -3253,6 +3534,16 @@ async function entregarImagen(
     }
   }
   const plateTrace = medida1.plate ? { edge_plate: edgePlate, discarded_attempts: discardedAttempts } : {};
+  // 2026-11-15 — LA MARCA, después de la placa y antes del lienzo: se edita la imagen que se entrega. Sin `marca` en el
+  // estado, nada cambia; sin plan, la respuesta dice por qué no corrió.
+  let marcaTrace: Record<string, unknown> = {};
+  if (e.marca?.plan) {
+    const m = await pasadaDeMarca(imageDataUrl, e.marca.plan, e.aspect_ratio, brandId, t0);
+    imageDataUrl = m.image_data_url; marcaTrace = m.trace;
+  } else if (e.marca?.status) {
+    console.warn(`[ImageLab][MARCA] ${e.marca.status} brand=${brandId}`);
+    marcaTrace = { mark_pass: { applied: false, reason: e.marca.status } };
+  }
   // 2026-10-31 — EL LIENZO: con `canvas` en el estado, la imagen entregada mide eso exacto (bloque LOTE-IMAGEN,
   // `planDeLienzo`). Si no se puede ajustar, se entrega la del modelo y se DICE en `canvas.applied = false`.
   let lienzoTrace: Record<string, unknown> = {};
@@ -3264,7 +3555,7 @@ async function entregarImagen(
     } else { imageDataUrl = aj.dataUrl; lienzoTrace = { canvas: aj.meta }; }
   }
   // La traza del lienzo va DETRÁS de la respuesta de siempre: sin `canvas`, el objeto es el mismo, clave a clave.
-  return { payload: { ...payloadDeImagen(e, imageDataUrl, usage, plateTrace), ...lienzoTrace }, cobro: { entregada: cobroEntregada, descartados: cobroDescartados } };
+  return { payload: { ...payloadDeImagen(e, imageDataUrl, usage, plateTrace), ...marcaTrace, ...lienzoTrace }, cobro: { entregada: cobroEntregada, descartados: cobroDescartados } };
 }
 
 /**
@@ -3504,14 +3795,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // 2026-10-15 — la imagen actual (editar) cuenta dentro del presupuesto, y con 2+ personas el producto
     // sólo entra si cabe su foto después de la identidad; si no cabe, SALE DE LA ESCENA (no se pinta
     // inventado ni desplaza fotos de identidad).
+    // 2026-11-15 — TARJETA DE IDENTIDAD: con `identity_cards` en el dato, cada persona viaja en UNA imagen, la de la
+    // clase de esta imagen. Sin dato, `reference_image_urls` como siempre: el reparto no cambia, byte a byte.
+    const cardR = identityCardClassFor(framingR.framing, params.card_class);
+    if (cardR.warning) console.warn(`[ImageLab][PERSONAS] brand=${request.brandId} ${cardR.warning}`);
+    const identityRefs = usedPersonas.map((p) => personaIdentityRefs(p, cardR.card_class));
+    identityRefs.forEach((r, i) => {
+      if (r.fallback) console.warn(`[ImageLab][PERSONAS] IDENTITY_CARD_FALLBACK: ${usedPersonas[i].name} no tiene tarjeta ${cardR.card_class}; viaja la de ${r.card}`);
+    });
     const alloc = allocateReferences({
-      personaRefs: usedPersonas.map((p) => p.reference_image_urls ?? []),
+      personaRefs: identityRefs.map((r) => r.refs),
       locationRefs: location ? (location.reference_image_urls ?? []).filter((u) => /^(https?:\/\/|data:image\/)/.test(u)) : [],
       productRefs: productWanted ? productWanted.items.map((i) => i.image_url) : [],
       reserved: mode === 'edit_from_current' ? 1 : 0,
       // 2026-10-22 — sólo con el lugar evocado: sin él, el reparto de siempre.
       ...(locationEvoke ? { locationEvoke: true } : {}),
     });
+    // 2026-11-15 — PERSONA_MULTI_IMAGE: una persona que viaja en más de una imagen sin tarjeta es la clase de defecto
+    // que la tarjeta cierra. Sólo aviso en el log: el rechazo es un PR posterior, cuando todas tengan tarjeta.
+    alloc.persona.forEach((r, i) => {
+      if (r.length > 1 && !identityRefs[i].card) {
+        console.warn(`[ImageLab][PERSONAS] PERSONA_MULTI_IMAGE: ${usedPersonas[i].name} viaja en ${r.length} imágenes sin tarjeta de identidad`);
+      }
+    });
+    const cardNames = usedPersonas.filter((p, i) => !!identityRefs[i].card && alloc.persona[i].length > 0).map((p) => p.name);
     const productInScene = alloc.product_left ? null : productWanted;
     if (alloc.product_left) {
       console.warn(`[ImageLab][PERSONAS] PRODUCT_LEFT_SCENE_FOR_IDENTITY: ${usedPersonas.length} personas y ${alloc.budget} plazas; el producto (${productWanted!.items.map((i) => i.name).join(', ')}) sale de la escena para que viajen las fotos de identidad`);
@@ -3520,6 +3827,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // hablan de ella: la cláusula de colocación, la de la franja de texto y el constructor. Sin persona, el
     // producto va sobre una superficie (nadie puede sostenerlo).
     const stagingSeed = String(params.title ?? params.image_hook ?? params.copy_full ?? '');
+    // 2026-11-15 — las opciones de vestuario elegidas, enteras (con su marca, si la llevan). Misma semilla que el bloque
+    // de vestuario del constructor. Sólo viajan en la respuesta si alguna lleva marca: sin eso, la respuesta de siempre.
+    const wardrobeChoices = usedPersonas.map((p) => ({ name: p.name, choices: wardrobeChoicesFor(p, mode, stagingSeed) }));
+    const markedChoices = wardrobeChoices.filter((w) => w.choices.some((c) => !!c.mark));
     const productStaging: ProductStaging | null = productInScene
       ? (personaUsed ? productStagingFor(productInScene.kind ?? null, productInScene.items.length, stagingSeed) : 'on_surface')
       : null;
@@ -3638,13 +3949,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         productNames: productInScene ? productInScene.items.slice(0, Math.max(1, productRefs.length)).map((i) => i.name) : null,
         productRefs: productRefs.length,
         ...(locationEvoke ? { locationEvoke: true } : {}),
-      }),
+      }) + (cardNames.length ? ` ${identityCardClause(cardNames)}.` : ''),
       negative_prompt: built.negativePrompt,
       aspect_ratio: built.aspectRatio,
       image_urls: imageUrls,
       psycho_id: built.psychoId ?? null,
       // 2026-10-31 — sólo si se pidió: sin `params.canvas`, el estado es el de antes.
       ...(lienzoIn.lienzo ? { canvas: lienzoIn.lienzo } : {}),
+      // 2026-11-15 — sólo si alguna opción elegida lleva marca: sin eso, el estado es el de antes.
+      ...(markedChoices.length ? { marca: markPlanFor(wardrobeChoices, params.marks) } : {}),
       respuesta: {
         output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
         preset_used:    built.presetUsed,
@@ -3684,6 +3997,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           references_dropped: alloc.dropped,
         } : null,
         overlay: (overlayTrace as any).subject_framing !== undefined ? overlayTrace as RespuestaBaseDeImagen['overlay'] : null,
+        // 2026-11-15 — lo que VIAJÓ de cada persona, para el inspector de identidad del carril. Sólo cuando viajó alguna
+        // tarjeta: sin dato, la respuesta es la de siempre, clave por clave.
+        ...(markedChoices.length ? { wardrobe_choices: Object.fromEntries(wardrobeChoices.map((w) => [w.name, w.choices])) } : {}),
+        ...(cardNames.length ? {
+          identity_card_class: cardR.card_class,
+          personas_refs_used: Object.fromEntries(usedPersonas.map((p, i) => [p.name, alloc.persona[i]])),
+        } : {}),
       },
     };
 
