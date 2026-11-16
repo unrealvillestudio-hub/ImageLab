@@ -143,4 +143,17 @@ await ok('multimarca: el bloque nuevo no nombra marcas ni personas reales', () =
   assert.ok(!/ForumPHs|NeuroneSCF|UnrealvilleStudio|SamPublisher|Irja|Itzel|Mariela|Mirjam/.test(nuevo));
 });
 
+// ── 2026-11-16 · la ropa de la tarjeta y el id de persona ─────────────────────────────────────────
+console.log('── la ropa de la tarjeta no se copia; el id viaja ──');
+await ok('la cláusula de la tarjeta dice que su ropa no es la de la imagen', () => {
+  const c = M.identityCardClause(['Teo']);
+  assert.match(c, /ONE identity card/); assert.match(c, /Take ONLY the face, hair and build from the card/);
+  assert.match(c, /clothing shown in the card is NOT this image's outfit, never copy it/);
+});
+await ok('personaIdsOf: sólo los ids bien formados; sin ids, lista vacía (la respuesta queda como siempre)', () => {
+  assert.deepEqual(M.personaIdsOf([{ ...PERSONA_A, person_id: ' 3f2a-uuid_1 ' }, { ...PERSONA_B }]), [{ name: PERSONA_A.name, person_id: '3f2a-uuid_1' }]);
+  assert.deepEqual(M.personaIdsOf([{ ...PERSONA_A, person_id: 'con espacio' }, { ...PERSONA_B, person_id: 7 }]), []);
+  assert.deepEqual(M.personaIdsOf([PERSONA_A, PERSONA_B]), []);
+});
+
 console.log(`\ntarjeta_por_encuadre: ${n} en verde`);

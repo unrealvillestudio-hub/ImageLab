@@ -330,6 +330,17 @@ ok('IDENTIDAD: con referencias, la escena va primero y cada foto con su rótulo;
   assert.deepEqual(parts, [{ inlineData: img }, { text: 'REFERENCE PHOTO — Persona A' }, { inlineData: { mimeType: 'image/jpeg', data: 'REF' } }, { text: 'u' }]);
 });
 
+ok('IDENTIDAD POR ID (2026-11-16): la referencia viaja y se rotula con su person_id; un id mal formado es 400', () => {
+  const v = M.validateInspectRequest({ ...VALID, references: [{ name: 'A', person_id: ' 3f2a-uuid_1 ', image_urls: ['https://x.test/a1.jpg'] }, { name: 'B', image_urls: ['https://x.test/b1.jpg'] }] });
+  assert.deepEqual(v.references, [{ name: 'A', person_id: '3f2a-uuid_1', image_urls: ['https://x.test/a1.jpg'] }, { name: 'B', image_urls: ['https://x.test/b1.jpg'] }]);
+  const u = M.buildInspectPrompt({ rules: RULES, copy: null, references: v.references }).user;
+  assert.match(u, /A \[person_id 3f2a-uuid_1\] \(1\), B \(1\)/);
+  assert.match(u, /Each labeled reference is ONE distinct individual/);
+  const parts = M.judgeParts({ mimeType: 'image/png', data: 'S' }, [{ name: 'A', person_id: '3f2a-uuid_1', mimeType: 'image/jpeg', data: 'R' }], 'u');
+  assert.equal(parts[1].text, 'REFERENCE PHOTO — A [person_id 3f2a-uuid_1]');
+  assert.deepEqual(labelOf(() => M.validateInspectRequest({ ...VALID, references: [{ name: 'A', person_id: 'no vale', image_urls: ['https://x.test/a1.jpg'] }] })), { label: 'INSPECT_BAD_REQUEST', status: 400 });
+});
+
 ok('IDENTIDAD: validación y tope de 3 fotos repartido (la primera de cada persona primero)', () => {
   const v = M.validateInspectRequest({ ...VALID, references: [
     { name: 'A', image_urls: ['https://x.test/a1.jpg', 'https://x.test/a2.jpg', 'https://x.test/a3.jpg'] },
