@@ -1517,35 +1517,42 @@ export function markVariantsOf(marks: unknown, mark: string): MarkVariant[] {
       ...(typeof v.background === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.background.trim()) ? { background: v.background.trim() } : {}) }));
 }
 
-/** Texto de prenda comparable: minúsculas, espacios colapsados, sin la nota de prenda lisa ni puntuación final. PURO. */
-export function garmentKey(s: string): string {
-  return String(s ?? '').toLowerCase().replace(/\(plain fabric:[^)]*\)/g, ' ').replace(/\s+/g, ' ').replace(/[\s.;,:]+$/, '').trim();
+/** Las palabras de una prenda o de un prompt: minúsculas, de 3 letras o más, sin la nota de prenda lisa. PURO. */
+export function garmentWords(s: string): Set<string> {
+  const t = String(s ?? '').toLowerCase().replace(/\(plain fabric:[^)]*\)/g, ' ');
+  return new Set((t.match(/[\p{L}\p{N}#-]{3,}/gu) ?? []).filter((w) => !GARMENT_STOPWORDS.has(w)));
 }
+const GARMENT_STOPWORDS = new Set(['and', 'the', 'with', 'her', 'his', 'their', 'over', 'under', 'into', 'from', 'for', 'only', 'one']);
+/** Fracción de las palabras de una prenda que tiene que estar en el prompt para contar como escrita. */
+export const GARMENT_WRITTEN_MIN = 0.85;
 
 /** LA PRENDA QUE SE ESCRIBIÓ (2026-11-16). MEDIDO en la prueba §6 del cableado (pieza 01, una persona con una opción con
  *  marca en 8 de sus entradas): `MARK_UNDETERMINED`, porque el constructor elige la ENTRADA por la escena y el motor no
- *  sabía cuál. El constructor recibe cada opción ya elegida con la orden de describirla «exactly as written»: la que
- *  aparece en el prompt final es la que vistió. Devuelve las elegidas cuyo texto está en el prompt; sin prompt, todas. PURO. */
+ *  sabía cuál. El constructor recibe cada opción ya elegida con la orden de describirla «exactly as written», y la
+ *  escribe CASI igual (medido el 2026-11-16 en 5 prompts reales: una coma cambiada por «and», un adjetivo
+ *  intercalado): por eso cuenta como escrita si al menos `GARMENT_WRITTEN_MIN` de sus palabras están en el
+ *  prompt. Devuelve las elegidas escritas; sin prompt, ninguna. PURO. */
 export function wornChoicesIn<T extends { outfit: string }>(choices: T[], prompt: string | null | undefined): T[] {
-  if (typeof prompt !== 'string' || !prompt.trim()) return choices;
-  const p = garmentKey(prompt);
-  return choices.filter((c) => { const k = garmentKey(c.outfit); return k.length >= 12 && p.includes(k); });
+  if (typeof prompt !== 'string' || !prompt.trim()) return [];
+  const p = garmentWords(prompt);
+  return choices.filter((c) => {
+    const w = [...garmentWords(c.outfit)];
+    return w.length >= 3 && w.filter((x) => p.has(x)).length / w.length >= GARMENT_WRITTEN_MIN;
+  });
 }
 
 /** El plan de la pasada para esta imagen, o el motivo por el que no corre. `null`/`null`: nadie lleva marca. Con
- *  `prompt` (el final), cuenta sólo la prenda que el constructor escribió (`wornChoicesIn`); si no escribió ninguna de
- *  las elegidas, se queda con todas, como antes. PURO. */
+ *  `prompt` (el final): si una prenda CON MARCA está escrita (`wornChoicesIn`), cuenta sólo esa. Si no, la regla de
+ *  antes: el plan sólo sale de una coincidencia positiva, porque bordar el logo en otra prenda es el error caro y la
+ *  prenda lisa sólo es un logo que falta (y se dice). PURO. */
 export function markPlanFor(choicesIn: Array<{ name: string; choices: Array<{ when: string } & WardrobeOption> }>, marks: unknown,
   prompt?: string | null):
   { plan: PlanDeMarca | null; status: 'MARK_NOT_AVAILABLE' | 'MARK_MULTI_PERSONA' | 'MARK_UNDETERMINED' | null } {
-  // Por persona: las que se escribieron (si el prompt lo dice) o todas. Con la prenda vista, cuentan sólo las con marca
-  // que se escribieron: el peinado y los accesorios (sin marca) también se escriben y no hacen indeterminada la prenda.
   const porPersona = choicesIn.map((w) => {
-    const vistas = wornChoicesIn(w.choices, prompt);
-    const vista = typeof prompt === 'string' && !!prompt.trim() && vistas.length > 0;
-    const conMarca = (vista ? vistas : w.choices).filter((c) => !!c.mark);
-    const mixta = vista ? new Set(conMarca.map((c) => c.mark)).size > 1 : new Set(w.choices.map((c) => c.mark ?? '')).size > 1;
-    return { name: w.name, conMarca, mixta };
+    const escritas = wornChoicesIn(w.choices.filter((c) => !!c.mark), prompt);
+    if (escritas.length) return { name: w.name, conMarca: escritas, mixta: new Set(escritas.map((c) => c.mark)).size > 1 };
+    const conMarca = w.choices.filter((c) => !!c.mark);
+    return { name: w.name, conMarca, mixta: new Set(w.choices.map((c) => c.mark ?? '')).size > 1 };
   });
   const marcadas = porPersona.filter((w) => w.conMarca.length > 0);
   if (!marcadas.length) return { plan: null, status: null };

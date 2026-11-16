@@ -246,17 +246,22 @@ await ok('sin tiempo: ninguna edición, la original y MARK_NOT_APPLIED por time_
 });
 
 console.log('── 4c · la prenda que se escribió ──');
-await ok('con el prompt final, la marca en varias entradas se resuelve; sin prompt, MARK_UNDETERMINED como antes', () => {
-  const polo = { outfit: 'a black pique polo shirt, slim dark trousers', mark: 'primary_logo', garment_tone: 'dark' };
-  const ch = [{ when: 'assembly', ...polo }, { when: 'office', outfit: 'a pale-blue cotton shirt' }, { when: 'hair', outfit: 'a sleek low ponytail at the nape' }];
+await ok('con el prompt final, la marca en varias entradas se resuelve; sin coincidencia positiva, la regla de antes', () => {
+  const polo = { outfit: 'a well-fitted short-sleeve pique polo shirt in black, slim dark trousers', mark: 'primary_logo', garment_tone: 'dark' };
+  const ch = [{ when: 'assembly', ...polo }, { when: 'office', outfit: 'a pale-blue cotton shirt, long sleeves rolled to the forearm' },
+    { when: 'hair', outfit: 'a sleek low ponytail at the nape' }];
   const per = [{ name: 'Ada', choices: ch }];
-  assert.equal(M.markPlanFor(per, MARKS).status, 'MARK_UNDETERMINED');
-  const conPolo = `Ada stands in the assembly hall wearing ${M.plainGarmentText(polo.outfit)}. Her hair in a sleek low ponytail at the nape.`;
-  assert.deepEqual(M.markPlanFor(per, MARKS, conPolo).plan?.outfit, polo.outfit);
-  const sinPolo = 'Ada at her desk wearing a pale-blue cotton shirt; a sleek low ponytail at the nape.';
-  assert.deepEqual(M.markPlanFor(per, MARKS, sinPolo), { plan: null, status: null }, 'no vistió la prenda con marca');
-  assert.equal(M.markPlanFor(per, MARKS, 'Ada in a red dress.').status, 'MARK_UNDETERMINED', 'no escribió ninguna: como antes');
-  assert.equal(M.garmentKey('A Black  polo (plain fabric: no logo, emblem, print or lettering on it).'), 'a black polo');
+  assert.equal(M.markPlanFor(per, MARKS).status, 'MARK_UNDETERMINED', 'sin prompt, como antes');
+  // Redacción REAL del constructor (2026-11-16): «, slim dark trousers» → «and slim dark trousers».
+  const conPolo = 'She wears a well-fitted short-sleeve pique polo shirt in black and slim dark trousers, tiny silver studs. A sleek low ponytail at the nape.';
+  assert.equal(M.markPlanFor(per, MARKS, conPolo).plan?.outfit, polo.outfit);
+  const sinPolo = 'She wears a pale-blue cotton shirt with long sleeves rolled to the forearm; a sleek low ponytail at the nape.';
+  assert.equal(M.markPlanFor(per, MARKS, sinPolo).status, 'MARK_UNDETERMINED', 'vistió otra prenda: sin logo (nunca un logo en otra prenda)');
+  assert.equal(M.markPlanFor(per, MARKS, sinPolo).plan, null);
+  // Otro polo con marca de otro color NO cuenta como escrito por compartir «polo»: el de jade pide sus propias palabras.
+  const jade = { outfit: 'a well-fitted short-sleeve pique polo shirt in jade with a thin carbon-navy tipped collar and cuffs, slim dark trousers', mark: 'primary_logo', garment_tone: 'dark' };
+  assert.deepEqual(M.wornChoicesIn([jade, polo], conPolo).map((c) => c.outfit), [polo.outfit]);
+  assert.deepEqual(M.wornChoicesIn(ch, null), [], 'sin prompt, ninguna escrita');
 });
 
 console.log('── 5 · sin marca ──');
