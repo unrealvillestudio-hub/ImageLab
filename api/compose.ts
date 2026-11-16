@@ -6678,7 +6678,9 @@ export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
   if (!payload || typeof payload !== 'object') return [];
   const p = payload as Record<string, any>;
   const rows: LedgerRow[] = [];
-  const delivered = typeof p.image_data_url === 'string' && p.image_data_url.length > 0;
+  // 2026-11-16 — en `mode: 'mark_pass'` la imagen que vuelve NO se generó aquí (es la guardada, con o sin parche): no
+  // hay fila de imagen entregada; las filas son los intentos de edición, abajo.
+  const delivered = typeof p.image_data_url === 'string' && p.image_data_url.length > 0 && p.source !== 'mark_pass';
   if (delivered) {
     rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: true }));
   } else if (p.status === 'error' && p.provider_called === true) {
@@ -6690,6 +6692,15 @@ export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
       const reason = typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim() : 'UNSPECIFIED';
       rows.push(ledgerCallRow({ outputType: 'image', model: d.model ?? p.model, usage: d.usage, ok: true,
         status: 'discarded', markers: [`IMAGE_ATTEMPT_DISCARDED:${reason}`], durationMs: 0 }));
+    }
+  }
+  // 2026-11-16 — cada intento de la pasada de marca es una llamada cobrada: la aplicada como éxito, las demás descartadas.
+  if (Array.isArray(p.mark_pass?.attempts)) {
+    for (const d of p.mark_pass.attempts) {
+      if (!d || typeof d !== 'object') continue;
+      const outcome = typeof d.outcome === 'string' && d.outcome.trim() ? d.outcome.trim() : 'UNSPECIFIED';
+      rows.push(ledgerCallRow({ outputType: 'image', model: d.model ?? p.model, usage: d.usage, ok: outcome !== 'failed' || !!d.usage,
+        ...(outcome === 'applied' ? {} : { status: 'discarded' }), markers: [`MARK_PASS_ATTEMPT:${outcome}`], durationMs: 0 }));
     }
   }
   const builderModel = typeof p.prompt_builder_model === 'string' ? p.prompt_builder_model.trim() : '';
