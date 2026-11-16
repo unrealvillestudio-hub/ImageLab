@@ -350,5 +350,16 @@ test('9d · 1.6.3 · cableado: una detección para caras y letreros, desenfoque 
   assert.match(SRC, /\.\.\.\(emphasisContrastMeta \? \{ emphasis_contrast: emphasisContrastMeta \} : \{\}\)/);
 });
 
+// 2026-11-16 — MODO `faces` (para VideoLab): pedido validado con nombre y cajas redondeadas para el contrato.
+test('modo faces: falta marca o imagen ⇒ 400 con etiqueta; cajas en fracción con 4 decimales', () => {
+  const e = (b) => { try { M.parseFacesRequest(b); return null; } catch (x) { return [x.label, x.status]; } };
+  assert.deepEqual(e({ image_url: 'https://x.test/a.png' }), ['COMPOSITOR_BRAND_MISSING', 400]);
+  assert.deepEqual(e({ brand_id: 'm' }), ['COMPOSITOR_IMAGE_MISSING', 400]);
+  assert.deepEqual(e({ brand_id: 'm', image_url: 'ftp://x' }), ['COMPOSITOR_IMAGE_MISSING', 400]);
+  assert.deepEqual(M.parseFacesRequest({ brand_id: ' m ', image_url: ' https://x.test/a.png ' }), { brandId: 'm', imageUrl: 'https://x.test/a.png', imageDataUrl: null });
+  assert.deepEqual(M.facesForContract([{ x0: 0.123456, y0: 0.2, x1: 0.5, y1: 0.66666 }]), [{ x0: 0.1235, y0: 0.2, x1: 0.5, y1: 0.6667 }]);
+  assert.deepEqual(M.facesForContract(null), []);
+});
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${pass} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);
