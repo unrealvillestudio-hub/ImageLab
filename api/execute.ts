@@ -1221,6 +1221,9 @@ export function builderArmSeed(params: { title?: unknown; copy_full?: unknown } 
 
 export interface PromptPersona {
   name: string;
+  // 2026-11-16 — el id de la persona (`person_blueprints.id`, dato del carril). La identidad es DATO, no el nombre: viaja
+  // de vuelta en `personas_used_ids` para que el inspector juzgue por id. Sin dato, nada cambia.
+  person_id?: string | null;
   aliases?: string[];
   description: string;
   reference_image_urls?: string[];
@@ -2274,11 +2277,21 @@ export function personaIdentityRefs(persona: PromptPersona, cls: IdentityCardCla
   return { refs: persona.reference_image_urls ?? [], card: null, fallback: false };
 }
 
+/** Las personas usadas que traen id, con su id. Un id mal formado no viaja (no se inventa ni se corrige). PURO. */
+export function personaIdsOf(personas: PromptPersona[]): Array<{ name: string; person_id: string }> {
+  return personas
+    .map((p) => ({ name: String(p?.name ?? '').trim(), person_id: typeof p?.person_id === 'string' ? p.person_id.trim() : '' }))
+    .filter((p) => p.name && /^[A-Za-z0-9_-]{1,64}$/.test(p.person_id));
+}
+
 /** La cláusula de la tarjeta: UNA imagen con varias vistas de UNA persona. Sólo cuando viaja alguna tarjeta. */
 export function identityCardClause(names: string[]): string {
   const n = names.map((x) => String(x ?? '').trim()).filter(Boolean);
   return `The reference image of ${n.join(', ')} is ONE identity card with several views of the same person: ` +
-    'each card shows a single person, never several people — never paint that person twice';
+    'each card shows a single person, never several people — never paint that person twice. ' +
+    // 2026-11-16 — una persona salió con la camiseta de su tarjeta aunque su ficha la prohíbe: la tarjeta muestra esa
+    // prenda y el modelo la copiaba. De la tarjeta sólo se toma la persona; la ropa la dicta la escena.
+    'Take ONLY the face, hair and build from the card: the clothing shown in the card is NOT this image\'s outfit, never copy it';
 }
 
 /** ENCUADRE DE ESCENA. La cláusula ceñida dice dos cosas: (a) el sujeto llena el cuadro y (b) sin una
@@ -3213,6 +3226,7 @@ export interface RespuestaBaseDeImagen {
   // 2026-11-15 — sólo cuando viajó alguna tarjeta de identidad; ausente, la respuesta de siempre.
   identity_card_class?: string;
   personas_refs_used?: Record<string, string[]>;
+  personas_used_ids?: Array<{ name: string; person_id: string }>;
   // 2026-11-15 — sólo cuando alguna opción de vestuario elegida lleva marca.
   wardrobe_choices?: Record<string, Array<{ when: string } & WardrobeOption>>;
 }
@@ -3319,6 +3333,7 @@ export function payloadDeImagen(
     } : {}),
     ...(r.wardrobe_choices ? { wardrobe_choices: r.wardrobe_choices } : {}),
     ...(r.personas_refs_used ? { identity_card_class: r.identity_card_class, personas_refs_used: r.personas_refs_used } : {}),
+    ...(r.personas_used_ids?.length ? { personas_used_ids: r.personas_used_ids } : {}),
     ...placa,
     status: 'ok',
   };
@@ -4206,6 +4221,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           identity_card_class: cardR.card_class,
           personas_refs_used: Object.fromEntries(usedPersonas.map((p, i) => [p.name, alloc.persona[i]])),
         } : {}),
+        // 2026-11-16 — quién salió, por id (`person_blueprints.id`). Sólo si el carril mandó ids: sin dato, como siempre.
+        ...(personaIdsOf(usedPersonas).length ? { personas_used_ids: personaIdsOf(usedPersonas) } : {}),
       },
     };
 

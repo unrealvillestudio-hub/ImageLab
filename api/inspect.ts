@@ -287,9 +287,17 @@ export interface InspectRequest {
   // sirven a las reglas de identidad: sin ellas, la petición y el prompt son los de siempre.
   references?: InspectReference[];
 }
-export interface InspectReference { name: string; image_urls: string[] }
+// 2026-11-16 — `person_id` (opcional): el id de la persona (`person_blueprints.id`). La identidad es DATO: el
+// juez rotula cada referencia con su id y la evidencia lo cita; el nombre queda como etiqueta legible.
+export interface InspectReference { name: string; image_urls: string[]; person_id?: string }
 // Tope de fotos de referencia por inspección, entre todas las personas: cada una es otra imagen inline.
 export const MAX_REFERENCE_IMAGES = 3;
+// La forma de un id de persona: el UUID de `person_blueprints.id` o un código corto. Nada de espacios ni signos.
+export const PERSON_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** La etiqueta de una referencia: el nombre y, si viene, su id de persona. PURO. */
+export function referenceLabel(r: Pick<InspectReference, 'name' | 'person_id'>): string {
+  return r.person_id ? `${r.name} [person_id ${r.person_id}]` : r.name;
+}
 // Una referencia es una URL http(s) o una imagen en línea (png, jpeg o webp en base64).
 export const REFERENCE_URL = /^(https?:\/\/|data:image\/(png|jpeg|webp);base64,)/;
 export interface Violation { code: string; evidence: string }
@@ -304,12 +312,13 @@ export const CLEAN_SCENE_CLAUSE =
 
 /** IDENTIDAD — qué son las fotos que siguen a la escena y para qué sirven. Sólo existe con referencias. */
 export function referencesClause(refs: InspectReference[]): string {
-  const names = refs.map((r) => `${r.name} (${r.image_urls.length})`).join(', ');
+  const names = refs.map((r) => `${referenceLabel(r)} (${r.image_urls.length})`).join(', ');
   return 'REFERENCE PHOTOS — the FIRST image is the scene to judge. After it come labeled reference photos of the ' +
     `people the scene was meant to show: ${names}. They are NOT the scene: never judge any rule on them. Use them ` +
     'ONLY for rules about whether a person in the scene is that same individual: compare facial structure, face ' +
     'shape and fullness, jaw, nose, eyes, eyebrows, apparent age, skin tone and distinctive marks such as moles. ' +
-    'Ignore clothing, hairstyle, makeup, lighting, angle and expression.';
+    'Ignore clothing, hairstyle, makeup, lighting, angle and expression. Each labeled reference is ONE distinct individual: ' +
+    'when a rule is about identity, say in the evidence which person_id (or name) you mean.';
 }
 
 export const JUDGE_SYSTEM =
@@ -388,7 +397,10 @@ export function validateReferences(raw: unknown): InspectReference[] {
     // reales de una persona, Sam 2026-10-17) viaja en el cuerpo de la petición y no vive en ninguna URL.
     const urls = Array.isArray(o?.image_urls) ? (o!.image_urls as unknown[]).filter((u): u is string => typeof u === 'string' && REFERENCE_URL.test(u.trim())).map((u) => u.trim()) : [];
     if (!name || !urls.length) throw new InspectError('INSPECT_BAD_REQUEST', `references[${i}] necesita name y al menos una image_url http(s) o data:image`, 400);
-    return { name, image_urls: urls };
+    if (o?.person_id !== undefined && o?.person_id !== null && (typeof o.person_id !== 'string' || !PERSON_ID.test(o.person_id.trim())))
+      throw new InspectError('INSPECT_BAD_REQUEST', `references[${i}].person_id debe ser un id de persona (letras, números, guion o guion bajo)`, 400);
+    const person_id = typeof o?.person_id === 'string' ? o.person_id.trim() : '';
+    return { name, image_urls: urls, ...(person_id ? { person_id } : {}) };
   });
   const take = refs.map(() => 0);
   let used = 0;
@@ -399,7 +411,7 @@ export function validateReferences(raw: unknown): InspectReference[] {
     }
     if (!grew) break;
   }
-  return refs.map((r, i) => ({ name: r.name, image_urls: r.image_urls.slice(0, take[i]) })).filter((r) => r.image_urls.length);
+  return refs.map((r, i) => ({ ...r, image_urls: r.image_urls.slice(0, take[i]) })).filter((r) => r.image_urls.length);
 }
 
 /** El texto que recibe el juez. Las reglas van numeradas con su código; el copy, si viene, sólo como
@@ -671,7 +683,7 @@ export function judgeParts(image: { mimeType: string; data: string },
   references: Array<{ name: string; mimeType: string; data: string }>, user: string): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ inlineData: { mimeType: image.mimeType, data: image.data } }];
   for (const r of references) {
-    parts.push({ text: `REFERENCE PHOTO — ${r.name}` });
+    parts.push({ text: `REFERENCE PHOTO — ${referenceLabel(r)}` });
     parts.push({ inlineData: { mimeType: r.mimeType, data: r.data } });
   }
   parts.push({ text: user });
@@ -1100,7 +1112,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const refErrors: string[] = [];
     for (const r of input.references ?? []) {
       for (const u of r.image_urls) {
-        try { const im = await fetchImage(u); refImages.push({ name: r.name, mimeType: im.mimeType, data: im.data }); }
+        try { const im = await fetchImage(u); refImages.push({ name: r.name, ...(r.person_id ? { person_id: r.person_id } : {}), mimeType: im.mimeType, data: im.data }); }
         catch (e) { refErrors.push(`${r.name}: ${e instanceof Error ? e.message.slice(0, 160) : String(e)}`); }
       }
     }
