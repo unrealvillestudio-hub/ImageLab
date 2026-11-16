@@ -348,6 +348,13 @@ declare const process: { env: Record<string, string | undefined> };
 //         siempre sobre la imagen limpia (zona segura, caras, producto, contraste, tamaños) y entrega la escena SIN la foto
 //         de fondo, en PNG con alfa (`layer_data_url`). VideoLab la pone encima del video sin rehacer ninguna regla de marca
 //         (contrato VideoLab v1.0.0). Sin el campo, la respuesta y los bytes son los de 1.23.0. No aplica a carrusel.
+//   1.24.0 + BLOQUES A MANO (2026-11-16, SIN cambio de número) — campo opcional `blocks` (contrato «Bloques de texto
+//         colocados a mano» v1): titular, bajada y placa de rol con `place: { x_pct, y_pct, zoom }`, centro dentro de la
+//         zona segura y zoom en el rango de `text_scale`. Avisos `TEXT_PLACE_CLAMPED`, `TEXT_PLACED_OVER_FACE`,
+//         `TEXT_PLACED_OVERLAP`; eco en `meta.blocks`; 400 `COMPOSITOR_BLOCK_PLACE_INVALID`; 400 en carrusel; con
+//         `output: 'text_layer'` la capa lleva los mismos bloques. Ver «BLOQUES A MANO» al final del bloque PURO. El
+//         número NO sube a propósito: el pedido exige que sin `blocks` la respuesta sea la misma byte a byte, y
+//         `compositor_version` viaja en cada respuesta. Sin `blocks`, nada de lo que se dibuja cambia.
 export const COMPOSITOR_VERSION = '1.24.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
@@ -2526,6 +2533,9 @@ export function buildOverlayScene(args: {
   productLayer?: ReturnType<typeof resolveProductLayer>['layer'];
   /** 1.24.0 — sin la foto de fondo: la capa que VideoLab pone sobre el video. Todo lo demás, idéntico. */
   omitBackground?: boolean;
+  /** BLOQUES A MANO (2026-11-16) — lo que `layoutBlocks` decidió: bloques colocados a mano y la placa de rol. Ausente ⇒
+   *  la escena es la de 1.24.0, nodo por nodo. */
+  placed?: BlocksLayout['scene'] | null;
 }): Record<string, any> {
   const { style, width, height, backgroundSrc } = args;
   const px = (pct: number, base: number) => Math.round((pct / 100) * base * 100) / 100;
@@ -2695,30 +2705,65 @@ export function buildOverlayScene(args: {
   };
   };
 
-  if (style.slots.headline) textChildren.push(slotNode(style.slots.headline, 0));
+  // BLOQUES A MANO — los hijos de un bloque de texto (titular, filete, bajada), para el bloque automático y para cada
+  // bloque colocado a mano. Para el automático es exactamente lo de siempre.
+  const textNodesOf = (st: ReturnType<typeof resolveOverlayStyle>): Array<Record<string, any>> => {
+  const textChildren: Array<Record<string, any>> = [];
+  if (st.slots.headline) textChildren.push(slotNode(st.slots.headline, 0));
   // El filete acompaña al TITULAR: sin titular no hay nada que subrayar. (La franja de identidad es
   // otra cosa y sí se dibuja sola — una firma la marca, un filete separa texto.)
-  if (style.rule && style.slots.headline) {
+  if (st.rule && st.slots.headline) {
     textChildren.push({
       type: 'div',
       props: {
         style: {
-          marginTop: px(style.rule.gapPct, width),
-          width: px(style.rule.widthPct, width),
-          height: style.rule.thicknessPx,
-          backgroundColor: style.rule.color,
+          marginTop: px(st.rule.gapPct, width),
+          width: px(st.rule.widthPct, width),
+          height: st.rule.thicknessPx,
+          backgroundColor: st.rule.color,
         },
       },
     });
   }
-  if (style.slots.subheadline) {
-    textChildren.push(slotNode(style.slots.subheadline, px(style.layout.gapPct, width)));
+  if (st.slots.subheadline) {
+    textChildren.push(slotNode(st.slots.subheadline, px(st.layout.gapPct, width)));
+  }
+  return textChildren;
+  };
+  textChildren.push(...textNodesOf(style));
+
+  // BLOQUES A MANO — cada bloque colocado a mano, con la esquina superior izquierda en su caja y el mismo ancho máximo
+  // que el bloque automático; y la placa de rol sobre su chip. Cada uno va dentro de un contenedor del tamaño del lienzo
+  // (como el bloque automático): con un padre de tamaño definido, satori corta las líneas igual que el medidor. Medido
+  // al escribirlo: un nodo absoluto suelto con `maxWidth` dejaba el filete entre las dos líneas del titular. Sin
+  // `placed`, ningún nodo.
+  const placedNodes: Array<Record<string, any>> = [];
+  const alignX = (al: 'left' | 'center' | 'right') => (al === 'center' ? 'center' : al === 'right' ? 'flex-end' : 'flex-start');
+  const atRect = (rect: { x0: number; y0: number }, inner: Record<string, any>, kids: Array<Record<string, any>>) => ({
+    type: 'div',
+    props: {
+      style: { position: 'absolute', top: 0, left: 0, width, height, display: 'flex', flexDirection: 'column',
+        justifyContent: 'flex-start', alignItems: 'flex-start' },
+      children: [{ type: 'div', props: { style: { display: 'flex', flexDirection: 'column', marginLeft: rect.x0, marginTop: rect.y0, ...inner }, children: kids } }],
+    },
+  });
+  for (const b of args.placed?.blocks ?? []) {
+    placedNodes.push(atRect(b.rect, { alignItems: alignX(style.layout.align), maxWidth: overlayTextBox(b.style, width, height).maxWidth }, textNodesOf(b.style)));
+  }
+  const role = args.placed?.role ?? null;
+  if (role) {
+    placedNodes.push(atRect(role.rect, {
+      alignItems: 'flex-start', paddingTop: role.padY, paddingBottom: role.padY, paddingLeft: role.padX, paddingRight: role.padX,
+      maxWidth: Math.round((box.maxWidth + 2 * role.padX) * 100) / 100,
+      ...(role.chip ? { backgroundColor: role.chip, borderRadius: role.radius } : {}),
+    }, [slotNode(role.slot, 0)]));
   }
 
   // Sin ninguna ranura de texto no se emite el contenedor: la escena queda SELLADA (franja) y sin
   // tipografía. Es el caso de una pieza cuyo título todavía no existe — se sella hoy y se recompone
   // con el titular cuando lo tenga, sin volver a generar la escena.
   if (textChildren.length === 0) {
+    children.push(...placedNodes);
     return { type: 'div', props: { style: { display: 'flex', position: 'relative', width, height }, children } };
   }
 
@@ -2746,6 +2791,7 @@ export function buildOverlayScene(args: {
       }],
     },
   });
+  children.push(...placedNodes);
 
   return { type: 'div', props: { style: { display: 'flex', position: 'relative', width, height }, children } };
 }
@@ -6115,6 +6161,331 @@ export function facesForContract(faces: FaceBox[] | null): Array<{ x0: number; y
   const r = (v: number) => Math.round(v * 10000) / 10000;
   return (faces ?? []).map((f) => ({ x0: r(f.x0), y0: r(f.y0), x1: r(f.x1), y1: r(f.y1) }));
 }
+// ── BLOQUES A MANO (2026-11-16) ─────────────────────────────────────────────────────────────────────────────────────
+// Contrato «Bloques de texto colocados a mano» v1 (Sam, 2026-11-16). Objetivo validado: «En el Orchestrator, una sola
+// ventana de texto para imagen y video. Cada bloque (título, subtítulo, títulos clave, CTA, rol) tiene X, Y y zoom de
+// 0,7× a 1,3×, dentro de la zona segura. […] El render de VideoLab y el compositor de ImageLab respetan esos valores, y
+// avisan si el bloque tapa una cara.» Campo opcional `blocks` de `POST /api/compose`:
+//
+//   blocks: { headline?: { place? }, subheadline?: { place? }, role?: { enabled, text, place? } }
+//   place:  { x_pct, y_pct, zoom }   x_pct, y_pct ∈ [0, 100]; zoom ∈ [TEXT_SCALE_MIN, TEXT_SCALE_MAX]
+//
+// · `x_pct`/`y_pct` son el CENTRO del bloque dentro de la ZONA SEGURA del texto (la caja de `overlayTextBox`: el margen
+//   de la marca o, si la declara, la zona segura de la plataforma; por encima de la franja de identidad inferior, como
+//   `overlayTextVerticalRoom`). No son % del lienzo. `zoom` multiplica el tamaño de partida de ese bloque y sus escalones.
+// · Con `place`, ese bloque se compone POR SEPARADO en su punto; el que no lo trae sigue en el bloque automático de
+//   siempre (ancla, `text_place`, `text_column`, `text_scale`, límite de área, alto y caras). Si el titular va a mano y la
+//   bajada no, la bajada queda sola en el bloque automático y ocupa su lugar (sin filete: el filete acompaña al titular).
+// · Con `place` manda el operador: el bloque NO esquiva caras ni pasa por las escaleras de área y alto. Se ACOTA para
+//   quedar entero dentro de la zona segura (`TEXT_PLACE_CLAMPED: <bloque>`); si tapa una cara detectada (sólo con
+//   `avoid_faces` activo: sin detección no se afirma nada) `TEXT_PLACED_OVER_FACE: <bloque>`; si pisa otro bloque de
+//   texto, `TEXT_PLACED_OVERLAP: <bloque>`. Nunca es un error.
+// · El ROL (`role.enabled: true` + `text`): una placa discreta con la tipografía y el color de la BAJADA de la marca, al
+//   escalón más chico que la marca declara para la bajada (× `zoom` si trae `place`), sobre un chip del color y la
+//   opacidad del velo de la marca si la marca lo declara (sin velo, sin chip). Sin `place`, en el tercio inferior
+//   izquierdo de la zona segura, esquivando caras detectadas y el resto del texto. `enabled` ausente o false ⇒ no hay rol.
+// · Mal formado o fuera de rango ⇒ 400 `COMPOSITOR_BLOCK_PLACE_INVALID`. En carrusel, 400: la lámina tiene su propia
+//   maqueta (cromo, filas y columnas) y no hay contrato de bloques para ella. Con `output: 'text_layer'`, los bloques se
+//   aplican igual (la capa es la misma escena sin la foto) y `text_rect` es la caja que envuelve todo el texto dibujado.
+// · Sin `blocks`, idéntico a 1.24.0 byte a byte (la escena no recibe bloques y ninguna rama nueva se ejecuta).
+// EJE (código): la forma de `place`, el rango, la zona segura como sistema de coordenadas, el acotado y los avisos.
+// INSTANCIA (dato): tipografías, colores, velo, márgenes, zona segura y escalones de cada marca. El código no nombra marcas.
+
+export const BLOCK_PLACE_KEYS = ['x_pct', 'y_pct', 'zoom'] as const;
+export interface BlockPlace { x_pct: number; y_pct: number; zoom: number }
+export interface BlocksIn {
+  headline: null | { place: BlockPlace | null };
+  subheadline: null | { place: BlockPlace | null };
+  role: null | { enabled: boolean; text: string; place: BlockPlace | null };
+}
+export interface PxRect { x0: number; y0: number; x1: number; y1: number }
+type OStyle = ReturnType<typeof resolveOverlayStyle>;
+type OSlot = NonNullable<OStyle['slots']['headline']>;
+
+const blockBad = (msg: string) => new CompositorError('COMPOSITOR_BLOCK_PLACE_INVALID', `blocks: ${msg}`, 400);
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Un `place`: objeto con exactamente `x_pct`, `y_pct` y `zoom`, números en rango. Otra cosa es 400. PURO. */
+export function parseBlockPlace(raw: unknown, path: string): BlockPlace {
+  if (!isObj(raw)) throw blockBad(`${path} debe ser un objeto { x_pct, y_pct, zoom }`);
+  const extra = Object.keys(raw).filter((k) => !(BLOCK_PLACE_KEYS as readonly string[]).includes(k));
+  if (extra.length) throw blockBad(`${path} trae claves que no existen: ${extra.join(', ')}`);
+  const num = (k: string, lo: number, hi: number) => {
+    const v = raw[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < lo || v > hi) throw blockBad(`${path}.${k} debe ser un número de ${lo} a ${hi}; llegó ${JSON.stringify(v)}`);
+    return v;
+  };
+  return { x_pct: num('x_pct', 0, 100), y_pct: num('y_pct', 0, 100), zoom: num('zoom', TEXT_SCALE_MIN, TEXT_SCALE_MAX) };
+}
+
+/** `blocks` de la petición. Ausente o null ⇒ null (todo como antes). Mal formado ⇒ 400 `COMPOSITOR_BLOCK_PLACE_INVALID`.
+ *  El rol se valida aunque venga apagado: un dato mal escrito se ve igual. PURO. */
+export function parseBlocksRequest(raw: unknown): BlocksIn | null {
+  if (raw == null) return null;
+  if (!isObj(raw)) throw blockBad('debe ser un objeto { headline?, subheadline?, role? }');
+  const extra = Object.keys(raw).filter((k) => !['headline', 'subheadline', 'role'].includes(k));
+  if (extra.length) throw blockBad(`bloques que no existen en la imagen: ${extra.join(', ')} (válidos: headline, subheadline, role)`);
+  const text = (k: 'headline' | 'subheadline'): BlocksIn['headline'] => {
+    const b = raw[k];
+    if (b == null) return null;
+    if (!isObj(b)) throw blockBad(`${k} debe ser un objeto { place? }`);
+    const bx = Object.keys(b).filter((x) => x !== 'place');
+    if (bx.length) throw blockBad(`${k} trae claves que no existen: ${bx.join(', ')}`);
+    return { place: b.place == null ? null : parseBlockPlace(b.place, `${k}.place`) };
+  };
+  let role: BlocksIn['role'] = null;
+  if (raw.role != null) {
+    const r = raw.role;
+    if (!isObj(r)) throw blockBad('role debe ser un objeto { enabled, text, place? }');
+    const rx = Object.keys(r).filter((x) => !['enabled', 'text', 'place'].includes(x));
+    if (rx.length) throw blockBad(`role trae claves que no existen: ${rx.join(', ')}`);
+    if (r.enabled != null && typeof r.enabled !== 'boolean') throw blockBad(`role.enabled debe ser true o false; llegó ${JSON.stringify(r.enabled)}`);
+    if (r.text != null && typeof r.text !== 'string') throw blockBad('role.text debe ser un texto');
+    const enabled = r.enabled === true;
+    const t = typeof r.text === 'string' ? r.text.trim() : '';
+    if (enabled && !t) throw blockBad('role.enabled es true y role.text viene vacío: la placa de rol necesita su texto');
+    role = { enabled, text: t, place: r.place == null ? null : parseBlockPlace(r.place, 'role.place') };
+  }
+  return { headline: text('headline'), subheadline: text('subheadline'), role };
+}
+
+/** ¿Hay que dibujar la placa de rol? Sólo con `enabled: true` (por defecto, no). PURO. */
+export function roleRequested(b: BlocksIn | null | undefined): boolean {
+  return !!b?.role?.enabled && !!b.role.text;
+}
+
+/** La zona segura del texto en px: la caja de `overlayTextBox` y, con franja de identidad inferior más gruesa que el
+ *  relleno de abajo, por encima de ella (lo mismo que `overlayTextVerticalRoom`). PURO. */
+export function blockSafeRect(style: OStyle, width: number, height: number): PxRect {
+  const box = overlayTextBox(style, width, height);
+  let bottom = box.bottom;
+  if (style.identity && style.identity.mode === 'edge_bottom') {
+    const thickness = Math.max(1, Math.round(Math.round((style.identity.widthPct / 100) * Math.min(width, height) * 100) / 100));
+    bottom = Math.max(bottom, thickness);
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return { x0: r2(box.left), y0: r2(box.top), x1: r2(width - box.right), y1: r2(height - bottom) };
+}
+
+/** Del centro pedido (% de la zona segura) a la caja del bloque (px), acotada para quedar entera dentro de la zona
+ *  segura. Un bloque más grande que la zona se pega a su borde izquierdo/superior y cuenta como acotado. PURO. */
+export function placeBlockRect(place: Pick<BlockPlace, 'x_pct' | 'y_pct'>, size: { w: number; h: number }, safe: PxRect): { rect: PxRect; clamped: boolean } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const sw = safe.x1 - safe.x0, sh = safe.y1 - safe.y0;
+  const cx = safe.x0 + (place.x_pct / 100) * sw;
+  const cy = safe.y0 + (place.y_pct / 100) * sh;
+  const fit = (c: number, size: number, lo: number, hi: number) => {
+    const want = c - size / 2;
+    if (size >= hi - lo) return lo;
+    return Math.min(Math.max(want, lo), hi - size);
+  };
+  const x0 = fit(cx, size.w, safe.x0, safe.x1);
+  const y0 = fit(cy, size.h, safe.y0, safe.y1);
+  const clamped = Math.abs(x0 - (cx - size.w / 2)) > 0.01 || Math.abs(y0 - (cy - size.h / 2)) > 0.01;
+  return { rect: { x0: r2(x0), y0: r2(y0), x1: r2(x0 + size.w), y1: r2(y0 + size.h) }, clamped };
+}
+
+/** El tamaño de una ranura por el zoom: su tamaño y sus escalones, en la misma proporción (`scaledSizePct`). PURO. */
+export function zoomSlot<T extends { sizePct: number; fitSmaller?: number[] }>(slot: T, zoom: number): T {
+  if (zoom === 1) return slot;
+  return { ...slot, sizePct: scaledSizePct(slot.sizePct, zoom), ...(slot.fitSmaller ? { fitSmaller: slot.fitSmaller.map((v) => scaledSizePct(v, zoom)) } : {}) };
+}
+
+/** ¿Las dos cajas se pisan (área > 0)? PURO. */
+export function rectsOverlap(a: PxRect, b: PxRect): boolean {
+  return Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0;
+}
+
+/** Las cajas del detector (0..1) en px, con un margen en px. PURO. */
+export function faceBoxesPx(faces: FaceBox[] | null | undefined, width: number, height: number, padPx = 0): PxRect[] {
+  return (faces ?? []).map((f) => ({ x0: f.x0 * width - padPx, y0: f.y0 * height - padPx, x1: f.x1 * width + padPx, y1: f.y1 * height + padPx }));
+}
+
+/** La caja que envuelve varias (o null). PURO. */
+export function unionRect(rects: Array<PxRect | null | undefined>): PxRect | null {
+  const rs = rects.filter((r): r is PxRect => !!r);
+  if (!rs.length) return null;
+  return { x0: Math.min(...rs.map((r) => r.x0)), y0: Math.min(...rs.map((r) => r.y0)), x1: Math.max(...rs.map((r) => r.x1)), y1: Math.max(...rs.map((r) => r.y1)) };
+}
+
+/** Un estilo de UN solo bloque de texto: la ranura va en la posición del titular (sin hueco arriba), con el filete sólo
+ *  si es el titular. El resto (márgenes, zona segura, alineación, sombra) es el del estilo de partida. PURO. */
+export function singleBlockStyle(style: OStyle, slot: OSlot, withRule: boolean): OStyle {
+  return { ...style, slots: { headline: slot, subheadline: null }, rule: withRule ? style.rule : null, markers: [] };
+}
+
+/**
+ * Separa lo que va a mano de lo que sigue automático. PURO. Sin `place` en ningún bloque, EL MISMO estilo y ningún
+ * bloque a mano. Con el titular a mano y la bajada automática, la bajada ocupa sola el bloque automático (en la ranura
+ * del titular, para que el área, el alto y las caras la sigan cuidando) y el filete va con el titular. Un `place` para
+ * una ranura que no se dibuja (sin texto o no declarada por la marca) se ignora y se dice.
+ */
+export function splitBlocksStyle(style: OStyle, blocks: BlocksIn | null): {
+  auto: OStyle; manual: Array<{ key: 'headline' | 'subheadline'; place: BlockPlace; slot: OSlot; withRule: boolean }>; autoKeys: Array<'headline' | 'subheadline'>; markers: string[];
+} {
+  const hl = style.slots.headline, sub = style.slots.subheadline;
+  const markers: string[] = [];
+  const want = (k: 'headline' | 'subheadline') => {
+    const p = blocks?.[k]?.place ?? null;
+    if (p && !style.slots[k]) markers.push(`TEXT_PLACE_IGNORED: ${k} (la ranura no se dibuja: sin texto o no declarada por la marca)`);
+    return p && style.slots[k] ? p : null;
+  };
+  const ph = want('headline'), ps = want('subheadline');
+  const autoKeys = (['headline', 'subheadline'] as const).filter((k) => style.slots[k] && !(k === 'headline' ? ph : ps));
+  if (!ph && !ps) return { auto: style, manual: [], autoKeys: [...autoKeys], markers };
+  const manual: Array<{ key: 'headline' | 'subheadline'; place: BlockPlace; slot: OSlot; withRule: boolean }> = [];
+  if (ph) manual.push({ key: 'headline', place: ph, slot: hl!, withRule: true });
+  if (ps) manual.push({ key: 'subheadline', place: ps, slot: sub!, withRule: false });
+  // Lo que queda automático. Con el titular a mano, la bajada (si va automática) pasa a la ranura del titular.
+  const autoHead = ph ? (ps ? null : sub) : hl;
+  const autoSub = ph ? null : (ps ? null : sub);
+  const auto: OStyle = { ...style, slots: { headline: autoHead, subheadline: autoSub }, rule: ph ? null : style.rule,
+    // El corrector del resaltado del titular no rige sobre una bajada que ocupa la ranura del titular.
+    layout: ph && autoHead ? (({ emphasisContrast: _e, ...rest }) => rest)(style.layout) : style.layout };
+  return { auto, manual, autoKeys: [...autoKeys], markers };
+}
+
+/** La ranura de la placa de rol: la de la bajada de la marca (tipografía y color), al escalón más chico que declara.
+ *  null si la marca no declara bajada. `roleStyle` es el estilo resuelto con el texto del rol en la bajada. PURO. */
+export function roleSlotFrom(roleStyle: OStyle): OSlot | null {
+  const s = roleStyle.slots.subheadline;
+  if (!s) return null;
+  const min = Math.min(s.sizePct, ...(s.fitSmaller ?? []));
+  const { parts: _p, emphasis: _e, ...rest } = s;
+  return { ...rest, sizePct: min, fitSmaller: [] } as OSlot;
+}
+
+/** El chip de la placa de rol: el color y la opacidad del velo de la marca; sin velo, sin chip. PURO. */
+export function roleChipColor(style: OStyle): string | null {
+  return style.scrim ? hexToRgba(style.scrim.color, style.scrim.opacity) : null;
+}
+
+/** Relleno del chip, proporcional a la letra de la placa (px). PURO. */
+export function rolePadding(fontPx: number): { x: number; y: number; radius: number } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return { x: r2(fontPx * 0.6), y: r2(fontPx * 0.35), radius: r2(fontPx * 0.3) };
+}
+
+/** Candidatas de la placa de rol sin `place`, en orden: tercio inferior izquierdo de la zona segura (abajo, luego arriba
+ *  del tercio), después abajo al centro y abajo a la derecha. PURO. */
+export function roleCandidateRects(size: { w: number; h: number }, safe: PxRect): PxRect[] {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const sw = safe.x1 - safe.x0, sh = safe.y1 - safe.y0;
+  const at = (x0: number, y0: number): PxRect => ({ x0: r2(x0), y0: r2(y0), x1: r2(x0 + size.w), y1: r2(y0 + size.h) });
+  const bottom = Math.max(safe.y0, safe.y1 - size.h);
+  const thirdTop = Math.min(bottom, safe.y0 + (2 * sh) / 3);
+  const left = safe.x0;
+  return [at(left, bottom), at(left, thirdTop), at(Math.max(left, safe.x0 + (sw - size.w) / 2), bottom), at(Math.max(left, safe.x1 - size.w), bottom)];
+}
+
+export interface BlocksLayout {
+  scene: { blocks: Array<{ style: OStyle; rect: PxRect }>; role: null | { slot: OSlot; rect: PxRect; chip: string | null; padX: number; padY: number; radius: number } };
+  rects: PxRect[];
+  markers: string[];
+  meta: Record<string, unknown>;
+}
+
+/**
+ * Coloca los bloques a mano y la placa de rol. PURO y determinista. Recibe el estilo de partida (antes de separar),
+ * lo separado (`splitBlocksStyle`), el bloque automático ya decidido (estilo final y su caja, o null), las caras
+ * detectadas (0..1, o null si no hubo detección) y la ranura del rol (o null). Devuelve lo que la escena dibuja, las
+ * cajas, los avisos y el eco de `meta.blocks`.
+ */
+export function layoutBlocks(args: {
+  base: OStyle; split: ReturnType<typeof splitBlocksStyle>; blocks: BlocksIn;
+  autoStyle: OStyle; autoRect: PxRect | null; width: number; height: number;
+  metrics?: Record<string, FontAdvance | null | undefined> | null;
+  faces: FaceBox[] | null; roleSlot: OSlot | null;
+}): BlocksLayout {
+  const { base, split, width, height } = args;
+  const safe = blockSafeRect(base, width, height);
+  const markers: string[] = [...split.markers];
+  const faceRaw = faceBoxesPx(args.faces, width, height);
+  const facePad = args.faces && base.layout.avoidFaces ? (base.layout.avoidFaces.marginPct / 100) * Math.min(width, height) : 0;
+  const facePadded = faceBoxesPx(args.faces, width, height, facePad);
+  const out: Array<{ key: string; style: OStyle; rect: PxRect; place: BlockPlace; clamped: boolean }> = [];
+  for (const m of split.manual) {
+    let st = singleBlockStyle(base, zoomSlot(m.slot, m.place.zoom), m.withRule);
+    st = avoidOrphanLines(st, width, height, args.metrics).style;
+    const size = measureOverlayText(st, width, height, args.metrics);
+    const p = placeBlockRect(m.place, { w: size.width, h: size.height }, safe);
+    if (p.clamped) markers.push(`TEXT_PLACE_CLAMPED: ${m.key}`);
+    out.push({ key: m.key, style: { ...st, markers: [] }, rect: p.rect, place: m.place, clamped: p.clamped });
+  }
+  // Las cajas de texto contra las que se mide el solape: el bloque automático y los bloques a mano.
+  const textRects = (except: string): PxRect[] => [
+    ...(args.autoRect && except !== 'auto' ? [args.autoRect] : []),
+    ...out.filter((b) => b.key !== except).map((b) => b.rect),
+  ];
+  const flags: Record<string, { over_face: boolean; overlap: boolean }> = {};
+  for (const b of out) {
+    const overFace = faceRaw.some((f) => rectsOverlap(b.rect, f));
+    const overlap = textRects(b.key).some((r) => rectsOverlap(b.rect, r));
+    if (overFace) markers.push(`TEXT_PLACED_OVER_FACE: ${b.key}`);
+    if (overlap) markers.push(`TEXT_PLACED_OVERLAP: ${b.key}`);
+    flags[b.key] = { over_face: overFace, overlap };
+  }
+  // La placa de rol.
+  let role: BlocksLayout['scene']['role'] = null;
+  let roleMeta: Record<string, unknown> = { enabled: false };
+  if (roleRequested(args.blocks)) {
+    const rq = args.blocks.role!;
+    if (!args.roleSlot) {
+      markers.push('TEXT_ROLE_NOT_COMPOSED: la marca no declara typography.subheadline; la placa de rol usa la tipografía de la bajada y no se dibuja');
+      roleMeta = { enabled: true, drawn: false };
+    } else {
+      const slot = rq.place ? zoomSlot(args.roleSlot, rq.place.zoom) : args.roleSlot;
+      const st = singleBlockStyle(base, { ...slot, text: rq.text }, false);
+      const tm = measureOverlayText(st, width, height, args.metrics);
+      const fontPx = Math.round((slot.sizePct / 100) * width * 100) / 100;
+      const pad = rolePadding(fontPx);
+      const chip = roleChipColor(base);
+      const size = { w: Math.round((tm.width + 2 * pad.x) * 100) / 100, h: Math.round((tm.height + 2 * pad.y) * 100) / 100 };
+      const others = textRects('role');
+      let rect: PxRect, clamped = false, placed: 'auto' | 'manual';
+      if (rq.place) {
+        const p = placeBlockRect(rq.place, size, safe);
+        rect = p.rect; clamped = p.clamped; placed = 'manual';
+        if (clamped) markers.push('TEXT_PLACE_CLAMPED: role');
+      } else {
+        placed = 'auto';
+        const cands = roleCandidateRects(size, safe);
+        const free = (r: PxRect) => !facePadded.some((f) => rectsOverlap(r, f));
+        const clear = (r: PxRect) => !others.some((o) => rectsOverlap(r, o));
+        rect = cands.find((r) => free(r) && clear(r)) ?? cands.find(free) ?? cands[0];
+      }
+      const overFace = faceRaw.some((f) => rectsOverlap(rect, f));
+      const overlap = others.some((r) => rectsOverlap(rect, r));
+      if (overFace) markers.push('TEXT_PLACED_OVER_FACE: role');
+      if (overlap) markers.push('TEXT_PLACED_OVERLAP: role');
+      role = { slot: { ...slot, text: rq.text }, rect, chip, padX: pad.x, padY: pad.y, radius: pad.radius };
+      roleMeta = { enabled: true, drawn: true, placed, rect: roundRect(rect), ...(rq.place ? { zoom: rq.place.zoom, clamped } : {}),
+        size_pct: slot.sizePct, chip: chip != null, over_face: overFace, overlap };
+    }
+  }
+  const metaOf = (k: 'headline' | 'subheadline') => {
+    const m = out.find((b) => b.key === k);
+    if (m) return { placed: 'manual', rect: roundRect(m.rect), zoom: m.place.zoom, clamped: m.clamped, ...flags[k] };
+    if (split.autoKeys.includes(k)) {
+      // Con el titular a mano, la bajada automática vive en la ranura del titular del bloque automático. Una escalera
+      // (área, alto, caras) puede haberla quitado: entonces no se dibujó y no tiene caja.
+      const at = k === 'headline' || out.some((b) => b.key === 'headline') ? 'headline' : 'subheadline';
+      return args.autoStyle.slots[at] && args.autoRect ? { placed: 'auto', rect: roundRect(args.autoRect) } : { placed: 'auto', rect: null };
+    }
+    return null;
+  };
+  const meta: Record<string, unknown> = { headline: metaOf('headline'), subheadline: metaOf('subheadline'), role: roleMeta,
+    faces_checked: args.faces != null };
+  return {
+    scene: { blocks: out.map((b) => ({ style: b.style, rect: b.rect })), role },
+    rects: [...out.map((b) => b.rect), ...(role ? [role.rect] : [])],
+    markers, meta,
+  };
+}
+
+function roundRect(r: PxRect): PxRect {
+  return { x0: Math.round(r.x0), y0: Math.round(r.y0), x1: Math.round(r.x1), y1: Math.round(r.y1) };
+}
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -6952,6 +7323,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (outputIn === 'text_layer' && carouselIn) {
       throw new CompositorError('COMPOSITOR_OUTPUT_INVALID', "output 'text_layer' no aplica a carrusel", 400);
     }
+    // BLOQUES A MANO (2026-11-16) — titular, bajada y rol colocados a mano. Sin el campo, todo lo de abajo es 1.24.0.
+    // La lámina de carrusel tiene su propia maqueta: allí `blocks` es un 400 claro.
+    const blocksIn = parseBlocksRequest(body.blocks);
+    if (blocksIn && carouselIn) {
+      throw new CompositorError('COMPOSITOR_BLOCK_PLACE_INVALID', 'blocks: no aplica a carrusel (la lámina tiene su propia maqueta de filas y columnas)', 400);
+    }
     // 1.4.0 — tramos de énfasis del titular. Se validan con el resto del contrato, antes de leer dato.
     const emphasisIn = parseEmphasisRequest(body.emphasis);
     const emphasisRoleIn = parseEmphasisRoleRequest(body.emphasis_role);
@@ -7260,7 +7637,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const placeApplied = applyTextPlace(style, textPlaceIn, prodAnchorIn);
     // 1.17.0 — la columna, después de la fila. Sin `text_column`, `oStyle` es el de 1.16.0.
     const columnApplied = applyTextColumn(placeApplied.style, textColumnIn, textPlaceIn, prodAnchorIn);
-    const oStyle = columnApplied.style;
+    // BLOQUES A MANO — lo que va a mano sale del bloque automático; el resto sigue su camino de siempre. Sin `blocks`,
+    // `oStyle` es el de 1.24.0.
+    const blocksSplit = blocksIn ? splitBlocksStyle(columnApplied.style, blocksIn) : null;
+    const oStyle = blocksSplit ? blocksSplit.auto : columnApplied.style;
+    // La placa de rol: la tipografía y el color de la bajada de la marca (resueltos con el texto del rol).
+    const roleSlot = blocksIn && roleRequested(blocksIn)
+      ? roleSlotFrom(resolveOverlayStyle({ tokens: picked.tokens, typography: typography as any[], palette: palette as any[],
+        text: { headline: '', subheadline: blocksIn.role!.text } }))
+      : null;
     const prodPick = resolveProductLayer({ tokens: picked.tokens, textAnchor: oStyle.slots.headline ? oStyle.layout.anchor : null, count: productsIn.length });
     oStyle.markers.push(...prodPick.markers);
     const productImgs: ProductImageIn[] = [];
@@ -7311,11 +7696,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
     }
 
+    // BLOQUES A MANO — la fuente de la placa de rol, si no es una de las que ya se bajaron.
+    if (roleSlot && !fonts.some((f) => f.name === roleSlot.family && f.weight === roleSlot.weight && (f.style === 'italic') === roleSlot.italic)) {
+      fonts.push({ slot: 'role' as any, ...(await loadFont('subheadline', roleSlot)) });
+    }
     // 1.5.0 — el límite de área de la plataforma, medido con las MISMAS fuentes que recibe satori.
     const areaMetrics: Record<string, FontAdvance | null> = {};
     for (const f of fonts) {
       const slotStyle = (f.slot as string) === 'headline:emphasis' ? style.slots.headline?.emphasis
-        : (f.slot as string) === 'subheadline:emphasis' ? style.slots.subheadline?.emphasis : style.slots[f.slot as Slot];
+        : (f.slot as string) === 'subheadline:emphasis' ? style.slots.subheadline?.emphasis
+        : (f.slot as string) === 'role' ? roleSlot : style.slots[f.slot as Slot];
       if (slotStyle) areaMetrics[fitFontKey(slotStyle)] = fontAdvanceMetrics(f.data);
     }
     // 1.18.0 — CURSIVA POR TRAMO: las caras contrarias que piden los tramos, bajadas y medidas ANTES de cualquier ajuste;
@@ -7339,7 +7729,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // 1.6.3 — con `avoid_scene_text`, la MISMA llamada pide también los letreros de la escena.
     let faceMeta: Record<string, unknown> | null = null;
     let signsUnder: FaceBox[] = [];
-    if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) {
+    // BLOQUES A MANO — con un bloque a mano o la placa de rol, las caras se detectan aunque el bloque automático no
+    // tenga titular (para avisar y para que la placa las esquive). Sin `blocks`, la condición es la de 1.24.0.
+    const blocksWantFaces = !!blocksSplit && (blocksSplit.manual.length > 0 || !!roleSlot);
+    let facesSeen: FaceBox[] | null = null;
+    let wantFaceCheck = false;
+    if (finalStyle.layout.avoidFaces && finalStyle.slots.headline) wantFaceCheck = true;
+    else if (finalStyle.layout.avoidFaces && blocksWantFaces) wantFaceCheck = true;
+    if (wantFaceCheck) {
       const wantSigns = !!finalStyle.layout.avoidSceneText;
       // 1.11.0 — con `avoid_products`, la MISMA llamada pide también los productos de la escena.
       const wantProducts = !!finalStyle.layout.avoidProducts;
@@ -7362,6 +7759,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
       }
       if (fc.faces) {
+        facesSeen = fc.faces;
         const ch = chooseOverlayAnchor({ style: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics,
           faces: fc.faces, people: fc.people, productAnchor: prodPick.layer && productImgs.length ? prodPick.layer.anchor : null, signs: fc.signs, products: fc.products,
           textPlace: textPlaceIn, textColumn: textColumnIn });
@@ -7378,6 +7776,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // estilo es el mismo y la escena la de 1.12.0.
     const orphan = avoidOrphanLines(finalStyle, dims.width, dims.height, areaMetrics);
     finalStyle = orphan.style;
+
+    // BLOQUES A MANO — con el bloque automático ya decidido, se colocan los bloques a mano y la placa de rol. Sin
+    // `blocks`, null y nada de esto existe.
+    const blocksLay = blocksSplit ? layoutBlocks({ base: columnApplied.style, split: blocksSplit, blocks: blocksIn!,
+      autoStyle: finalStyle, width: dims.width, height: dims.height, metrics: areaMetrics, faces: facesSeen, roleSlot,
+      autoRect: finalStyle.slots.headline ? overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor) : null }) : null;
+    if (blocksLay?.markers.length) finalStyle = { ...finalStyle, markers: [...finalStyle.markers, ...blocksLay.markers] };
 
     // 1.6.3 — si el texto igual cae sobre un letrero y la marca declara `blur_pct`, ese letrero se desenfoca.
     let bgBytes: Uint8Array = cleanBytes;
@@ -7469,6 +7874,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       style: finalStyle, width: dims.width, height: dims.height,
       backgroundSrc: bgSrc,
       products: productImgs, productLayer: prodPick.layer,
+      ...(blocksLay ? { placed: blocksLay.scene } : {}),
     });
 
     const svg = await satori(scene as any, {
@@ -7483,13 +7889,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const layerScene = buildOverlayScene({
         style: finalStyle, width: dims.width, height: dims.height,
         backgroundSrc: bgSrc, products: productImgs, productLayer: prodPick.layer, omitBackground: true,
+        ...(blocksLay ? { placed: blocksLay.scene } : {}),
       });
       const layerSvg = await satori(layerScene as any, {
         width: dims.width, height: dims.height,
         fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })),
       });
       const layerPng = new Resvg(layerSvg, { fitTo: { mode: 'original' } }).render().asPng();
-      const rect = finalStyle.slots.headline ? overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor) : null;
+      const autoRect = finalStyle.slots.headline ? overlayTextRect(finalStyle, dims.width, dims.height, areaMetrics, finalStyle.layout.anchor) : null;
+      // BLOQUES A MANO — con `blocks`, la caja que envuelve TODO el texto dibujado (automático, a mano y rol).
+      const rect = blocksLay ? unionRect([autoRect, ...blocksLay.rects]) : autoRect;
       layerOut = {
         output: 'text_layer',
         layer_data_url: `data:image/png;base64,${b64(new Uint8Array(layerPng))}`,
@@ -7506,6 +7915,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       `markers=${finalStyle.markers.length} ${Date.now() - t0}ms`,
     );
 
+    // ¿Se dibujó la bajada? Sin `blocks`, lo de siempre: si quedó en el estilo final. BLOQUES A MANO — con `blocks`, si va
+    // a mano o si sigue en el bloque automático (con el titular a mano, en la ranura del titular de ese bloque).
+    const subDrawn = blocksSplit
+      ? (blocksSplit.manual.some((m) => m.key === 'subheadline')
+        || (blocksSplit.autoKeys.includes('subheadline') && !!finalStyle.slots[blocksSplit.manual.some((m) => m.key === 'headline') ? 'headline' : 'subheadline']))
+      : !!finalStyle.slots.subheadline;
     res.status(200).json({
       status: 'ok',
       image_data_url: `data:image/png;base64,${b64(new Uint8Array(png))}`,
@@ -7533,7 +7948,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // Eco VERBATIM de lo compuesto: el carril lo asienta y así queda cruzable contra el copy juzgado.
       // 1.4.0 — `emphasis` viaja sólo si la petición lo trajo: sin él, el eco es el de 1.3.4.
       // 1.5.0 — si el límite de área retiró la bajada, el eco lo dice: lo compuesto ya no la lleva.
-      text: { headline, subheadline: finalStyle.slots.subheadline ? subheadline : (style.slots.subheadline ? null : subheadline),
+      text: { headline, subheadline: subDrawn ? subheadline : (style.slots.subheadline ? null : subheadline),
         ...(emphasisIn.length ? { emphasis: emphasisIn } : {}) },
       // F3 — la forma de 1.2.0 se mantiene; sólo se suma `meta`.
       meta: {
@@ -7565,6 +7980,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         // 1.20.0 — cuántos saltos de línea escritos en la bajada se respetaron (sólo si la bajada trae `\n`). Si una
         // escalera quitó la bajada, ninguno.
         ...(subBreaksIn != null ? { sub_breaks: finalStyle.slots.subheadline ? subBreaksIn : 0 } : {}),
+        // BLOQUES A MANO — con `blocks`, la bajada puede ir a mano o en la ranura del titular del bloque automático.
+        ...(blocksSplit && subBreaksIn != null ? { sub_breaks: subDrawn ? subBreaksIn : 0 } : {}),
+        // BLOQUES A MANO — qué bloque quedó a mano o automático, su caja final en px y los avisos (sólo si llegó `blocks`).
+        ...(blocksLay ? { blocks: blocksLay.meta } : {}),
         ...(shadowApplied ? { text_shadow: { requested: textShadowIn, spans_requested: shadowSpansIn, ...shadowApplied.applied } } : {}),
         ...(emphasisIn.length ? { emphasis: {
           requested: emphasisIn,
