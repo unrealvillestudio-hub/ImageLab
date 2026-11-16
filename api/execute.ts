@@ -1496,6 +1496,14 @@ export const MARK_START_MAX_ELAPSED_MS = 25_000;
 export function markPassAllowed(elapsedMs: number): boolean {
   return Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs <= MARK_START_MAX_ELAPSED_MS;
 }
+/** Espera ante un 429 de cuota antes del siguiente intento de la pasada (Sam, 2026-11-16: «sí al PR del 429»). */
+export const MARK_QUOTA_WAIT_MS = 20_000;
+/** Cuánto esperar antes del siguiente intento: `MARK_QUOTA_WAIT_MS` si el error es un 429 y, después de esperar, el
+ *  intento aún puede empezar (`markPassAllowed`); 0 en cualquier otro caso. PURO. */
+export function markQuotaWaitMs(error: string, elapsedMs: number): number {
+  return /\b429\b|RESOURCE_EXHAUSTED|Resource exhausted/i.test(String(error ?? '')) && markPassAllowed(elapsedMs + MARK_QUOTA_WAIT_MS)
+    ? MARK_QUOTA_WAIT_MS : 0;
+}
 /** Lugar por defecto del logo, si la variante no lo declara. */
 export const MARK_DEFAULT_PLACEMENT = 'on the LEFT chest of the wearer (the image RIGHT side when they face the camera), at the usual chest-logo height';
 /** Fondo liso sobre el que se compone el logo, por tono de la prenda, si la variante no lo declara. */
@@ -3012,6 +3020,13 @@ async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRati
         const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
         console.warn(`[ImageLab][MARCA] brand=${brandId} intento ${intento}: la edición falló: ${msg}`);
         attempts.push({ model: GEMINI_IMAGE_MODEL, usage: (err as any)?.usage ?? null, changed_pct: null, outcome: 'failed', error: msg });
+        // 2026-11-16 — CUOTA: con un 429 el reintento inmediato vuelve a chocar (medido en la prueba final: los dos
+        // intentos, 429). Se espera `MARK_QUOTA_WAIT_MS` antes del siguiente, sólo si después de esperar aún hay tiempo.
+        const espera = markQuotaWaitMs(msg, Date.now() - t0);
+        if (intento < 2 && espera > 0) {
+          console.warn(`[ImageLab][MARCA] brand=${brandId} 429 de cuota: se espera ${espera} ms antes del intento ${intento + 1}`);
+          await new Promise((res) => setTimeout(res, espera));
+        }
         continue;
       }
       const despuesBytes = Buffer.from(r.image_data_url.slice(r.image_data_url.indexOf(',') + 1), 'base64');
