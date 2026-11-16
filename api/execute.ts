@@ -361,7 +361,9 @@ export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
   if (!payload || typeof payload !== 'object') return [];
   const p = payload as Record<string, any>;
   const rows: LedgerRow[] = [];
-  const delivered = typeof p.image_data_url === 'string' && p.image_data_url.length > 0;
+  // 2026-11-16 — en `mode: 'mark_pass'` la imagen que vuelve NO se generó aquí (es la guardada, con o sin parche): no
+  // hay fila de imagen entregada; las filas son los intentos de edición, abajo.
+  const delivered = typeof p.image_data_url === 'string' && p.image_data_url.length > 0 && p.source !== 'mark_pass';
   if (delivered) {
     rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: true }));
   } else if (p.status === 'error' && p.provider_called === true) {
@@ -373,6 +375,15 @@ export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
       const reason = typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim() : 'UNSPECIFIED';
       rows.push(ledgerCallRow({ outputType: 'image', model: d.model ?? p.model, usage: d.usage, ok: true,
         status: 'discarded', markers: [`IMAGE_ATTEMPT_DISCARDED:${reason}`], durationMs: 0 }));
+    }
+  }
+  // 2026-11-16 — cada intento de la pasada de marca es una llamada cobrada: la aplicada como éxito, las demás descartadas.
+  if (Array.isArray(p.mark_pass?.attempts)) {
+    for (const d of p.mark_pass.attempts) {
+      if (!d || typeof d !== 'object') continue;
+      const outcome = typeof d.outcome === 'string' && d.outcome.trim() ? d.outcome.trim() : 'UNSPECIFIED';
+      rows.push(ledgerCallRow({ outputType: 'image', model: d.model ?? p.model, usage: d.usage, ok: outcome !== 'failed' || !!d.usage,
+        ...(outcome === 'applied' ? {} : { status: 'discarded' }), markers: [`MARK_PASS_ATTEMPT:${outcome}`], durationMs: 0 }));
     }
   }
   const builderModel = typeof p.prompt_builder_model === 'string' ? p.prompt_builder_model.trim() : '';
@@ -1506,16 +1517,42 @@ export function markVariantsOf(marks: unknown, mark: string): MarkVariant[] {
       ...(typeof v.background === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.background.trim()) ? { background: v.background.trim() } : {}) }));
 }
 
-/** El plan de la pasada para esta imagen, o el motivo por el que no corre. `null`/`null`: nadie lleva marca. PURO. */
-export function markPlanFor(choices: Array<{ name: string; choices: Array<{ when: string } & WardrobeOption> }>, marks: unknown):
+/** Texto de prenda comparable: minúsculas, espacios colapsados, sin la nota de prenda lisa ni puntuación final. PURO. */
+export function garmentKey(s: string): string {
+  return String(s ?? '').toLowerCase().replace(/\(plain fabric:[^)]*\)/g, ' ').replace(/\s+/g, ' ').replace(/[\s.;,:]+$/, '').trim();
+}
+
+/** LA PRENDA QUE SE ESCRIBIÓ (2026-11-16). MEDIDO en la prueba §6 del cableado (pieza 01, una persona con una opción con
+ *  marca en 8 de sus entradas): `MARK_UNDETERMINED`, porque el constructor elige la ENTRADA por la escena y el motor no
+ *  sabía cuál. El constructor recibe cada opción ya elegida con la orden de describirla «exactly as written»: la que
+ *  aparece en el prompt final es la que vistió. Devuelve las elegidas cuyo texto está en el prompt; sin prompt, todas. PURO. */
+export function wornChoicesIn<T extends { outfit: string }>(choices: T[], prompt: string | null | undefined): T[] {
+  if (typeof prompt !== 'string' || !prompt.trim()) return choices;
+  const p = garmentKey(prompt);
+  return choices.filter((c) => { const k = garmentKey(c.outfit); return k.length >= 12 && p.includes(k); });
+}
+
+/** El plan de la pasada para esta imagen, o el motivo por el que no corre. `null`/`null`: nadie lleva marca. Con
+ *  `prompt` (el final), cuenta sólo la prenda que el constructor escribió (`wornChoicesIn`); si no escribió ninguna de
+ *  las elegidas, se queda con todas, como antes. PURO. */
+export function markPlanFor(choicesIn: Array<{ name: string; choices: Array<{ when: string } & WardrobeOption> }>, marks: unknown,
+  prompt?: string | null):
   { plan: PlanDeMarca | null; status: 'MARK_NOT_AVAILABLE' | 'MARK_MULTI_PERSONA' | 'MARK_UNDETERMINED' | null } {
-  const marcadas = choices.filter((w) => w.choices.some((c) => !!c.mark));
+  // Por persona: las que se escribieron (si el prompt lo dice) o todas. Con la prenda vista, cuentan sólo las con marca
+  // que se escribieron: el peinado y los accesorios (sin marca) también se escriben y no hacen indeterminada la prenda.
+  const porPersona = choicesIn.map((w) => {
+    const vistas = wornChoicesIn(w.choices, prompt);
+    const vista = typeof prompt === 'string' && !!prompt.trim() && vistas.length > 0;
+    const conMarca = (vista ? vistas : w.choices).filter((c) => !!c.mark);
+    const mixta = vista ? new Set(conMarca.map((c) => c.mark)).size > 1 : new Set(w.choices.map((c) => c.mark ?? '')).size > 1;
+    return { name: w.name, conMarca, mixta };
+  });
+  const marcadas = porPersona.filter((w) => w.conMarca.length > 0);
   if (!marcadas.length) return { plan: null, status: null };
   if (marcadas.length > 1) return { plan: null, status: 'MARK_MULTI_PERSONA' };
   const w = marcadas[0];
-  const keys = new Set(w.choices.map((c) => c.mark ?? ''));
-  if (keys.size !== 1) return { plan: null, status: 'MARK_UNDETERMINED' };
-  const c = w.choices[0];
+  if (w.mixta) return { plan: null, status: 'MARK_UNDETERMINED' };
+  const c = w.conMarca[0];
   const variants = markVariantsOf(marks, c.mark!);
   const tone = c.garment_tone ?? null;
   const variant = (tone ? variants.find((v) => v.for_tone === tone) : null) ?? (variants.length === 1 ? variants[0] : null);
@@ -1544,6 +1581,107 @@ export function changedPixelPct(a: Uint8Array, b: Uint8Array, channels: number, 
     if (d > threshold) changed++;
   }
   return px ? Math.round((changed / px) * 10000) / 100 : 0;
+}
+
+// ── LA CARA NO SE TOCA: SÓLO SE PEGA EL PARCHE DE LA MARCA (2026-11-16) ─────────────────────────────────
+//
+// POR QUÉ (medido el 2026-11-16, prueba de tiempos de F1): de 9 imágenes, el juez de identidad rechazó UNA, la única con
+// logo, por el lado del lunar. La medida de la imagen entera (≤ 1 %) no lo vio: la edición rehace la imagen y un cambio
+// sutil en la cara cabe en ese 1 %. Decisión de Sam (2026-11-16, «sí a la barrera… y proteger la cara por supuesto»):
+// la cara queda intacta POR CONSTRUCCIÓN. De la imagen editada sólo se toma la zona compacta donde cambió (el logo) y se
+// pega sobre la ORIGINAL; todo lo demás —cara, pelo, manos, fondo— son los píxeles de la original.
+//
+// CUÁNDO SE RECHAZA el intento, y la traza lo dice: sin cambio visible (`MARK_NOT_VISIBLE`); la zona más grande que
+// `MARK_PATCH_MAX_PCT` o cambios fuera de ella por encima de `MARK_OUTSIDE_MAX_PCT` (`MARK_REJECTED_SPREAD`: la
+// edición rehízo algo más que el logo, y pegar su parche sería pegar otra cosa). EJE: umbrales sobre píxeles.
+
+/** Porcentaje máximo de la imagen que puede ocupar la caja del parche (el logo, con su margen). */
+export const MARK_PATCH_MAX_PCT = 3;
+/** Porcentaje máximo de píxeles cambiados FUERA de la caja: por encima, la edición tocó otra cosa. */
+export const MARK_OUTSIDE_MAX_PCT = 0.3;
+/** Mínimo de píxeles cambiados dentro de la caja para que el logo cuente como visible (a 432 px de ancho). */
+export const MARK_MIN_CHANGED_PX = 20;
+/** Radio con el que se juntan píxeles cambiados vecinos (los hilos del bordado) y margen de la caja, a 432 px. */
+export const MARK_JOIN_RADIUS_PX = 3;
+export const MARK_PATCH_MARGIN_PX = 6;
+
+/** Una caja en píxeles: x, y, ancho y alto. */
+export interface CajaDeParche { x: number; y: number; w: number; h: number }
+
+/** El parche de la marca: la mayor zona conexa de píxeles cambiados (con los vecinos a `MARK_JOIN_RADIUS_PX` juntos),
+ *  su caja con margen y lo que cambió fuera; o el motivo del rechazo. Dos buffers RGB de `w`×`h`. PURO. */
+export function planMarkPatch(a: Uint8Array, b: Uint8Array, w: number, h: number, channels = 3):
+  { ok: true; box: CajaDeParche; box_pct: number; outside_pct: number; changed_px: number }
+  | { ok: false; reason: 'MARK_NOT_VISIBLE' | 'MARK_REJECTED_SPREAD'; box_pct: number | null; outside_pct: number | null; changed_px: number } {
+  if (a.length !== b.length || a.length !== w * h * channels || channels < 3) throw new Error('MARK_DIFF_SIZE_MISMATCH');
+  const total = w * h;
+  const cambio = new Uint8Array(total);
+  let nCambio = 0;
+  for (let p = 0, i = 0; p < total; p++, i += channels) {
+    const d = (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2])) / 3;
+    if (d > MARK_DIFF_THRESHOLD) { cambio[p] = 1; nCambio++; }
+  }
+  if (nCambio < MARK_MIN_CHANGED_PX) return { ok: false, reason: 'MARK_NOT_VISIBLE', box_pct: null, outside_pct: null, changed_px: nCambio };
+  // Zonas conexas sobre los píxeles cambiados, uniendo los que están a `MARK_JOIN_RADIUS_PX` o menos.
+  const r = MARK_JOIN_RADIUS_PX;
+  const zona = new Int32Array(total).fill(-1);
+  const tam: number[] = []; const cajas: Array<[number, number, number, number]> = [];
+  const pila: number[] = [];
+  for (let s = 0; s < total; s++) {
+    if (!cambio[s] || zona[s] >= 0) continue;
+    const id = tam.length; tam.push(0); cajas.push([w, h, -1, -1]);
+    zona[s] = id; pila.push(s);
+    while (pila.length) {
+      const p = pila.pop()!; const x = p % w, y = (p - x) / w;
+      tam[id]++; const c = cajas[id];
+      if (x < c[0]) c[0] = x; if (y < c[1]) c[1] = y; if (x > c[2]) c[2] = x; if (y > c[3]) c[3] = y;
+      for (let dy = -r; dy <= r; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -r; dx <= r; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= w) continue;
+          const q = yy * w + xx;
+          if (cambio[q] && zona[q] < 0) { zona[q] = id; pila.push(q); }
+        }
+      }
+    }
+  }
+  let mayor = 0;
+  for (let k = 1; k < tam.length; k++) if (tam[k] > tam[mayor]) mayor = k;
+  const [x0, y0, x1, y1] = cajas[mayor];
+  const m = MARK_PATCH_MARGIN_PX;
+  const box: CajaDeParche = { x: Math.max(0, x0 - m), y: Math.max(0, y0 - m), w: 0, h: 0 };
+  box.w = Math.min(w, x1 + m + 1) - box.x; box.h = Math.min(h, y1 + m + 1) - box.y;
+  let fuera = 0;
+  for (let p = 0; p < total; p++) {
+    if (!cambio[p]) continue;
+    const x = p % w, y = (p - x) / w;
+    if (x < box.x || y < box.y || x >= box.x + box.w || y >= box.y + box.h) fuera++;
+  }
+  const pct = (v: number) => Math.round((v / total) * 10000) / 100;
+  const box_pct = pct(box.w * box.h), outside_pct = pct(fuera);
+  if (tam[mayor] < MARK_MIN_CHANGED_PX) return { ok: false, reason: 'MARK_NOT_VISIBLE', box_pct, outside_pct, changed_px: nCambio };
+  if (box_pct > MARK_PATCH_MAX_PCT || outside_pct > MARK_OUTSIDE_MAX_PCT)
+    return { ok: false, reason: 'MARK_REJECTED_SPREAD', box_pct, outside_pct, changed_px: nCambio };
+  return { ok: true, box, box_pct, outside_pct, changed_px: nCambio };
+}
+
+/** La caja medida a `mw`×`mh` llevada a la imagen real de `W`×`H`, redondeada hacia fuera y dentro de sus límites. PURO. */
+export function scaleBox(box: CajaDeParche, mw: number, mh: number, W: number, H: number): CajaDeParche {
+  const sx = W / mw, sy = H / mh;
+  const x = Math.max(0, Math.floor(box.x * sx)), y = Math.max(0, Math.floor(box.y * sy));
+  const x2 = Math.min(W, Math.ceil((box.x + box.w) * sx)), y2 = Math.min(H, Math.ceil((box.y + box.h) * sy));
+  return { x, y, w: Math.max(1, x2 - x), h: Math.max(1, y2 - y) };
+}
+
+/** El plan que llega en `mode: 'mark_pass'` (el que devolvió `MARK_DEFERRED`), validado campo a campo; o null. PURO. */
+export function planDeMarcaFrom(raw: unknown): PlanDeMarca | null {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  if (!o) return null;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const persona = str(o.persona), outfit = str(o.outfit), mark = str(o.mark);
+  const variant = markVariantsOf({ k: [o.variant] }, 'k')[0] ?? null;
+  if (!persona || !outfit || !mark || !variant) return null;
+  return { persona, outfit, mark, garment_tone: str(o.garment_tone), variant };
 }
 
 /** Las opciones elegidas de una persona en esta imagen, con la misma semilla que `personaWardrobeBlock`: una
@@ -2831,12 +2969,14 @@ async function edgePlateOfImage(dataUrl: string): Promise<{ plate: EdgePlate | n
 }
 
 // 2026-11-15 — LA PASADA DE MARCA sobre los píxeles reales (reglas y umbral en el bloque PB, `markPlanFor`). Una edición
-// con la imagen entregada y el logo (compuesto sobre fondo liso); se mide la imagen entera contra la de antes; > 1 % →
-// un reintento; si vuelve a pasar, la imagen sin logo y `MARK_NOT_APPLIED`. Cada intento viaja con su consumo: se
-// generó y se cobró, y el carril lo asienta.
+// con la imagen y el logo (compuesto sobre fondo liso). 2026-11-16 — DIFERIDA y con la cara intacta por construcción
+// (`planMarkPatch`): corre en `mode: 'mark_pass'`, fuera del tiempo de la imagen; de la edición sólo se pega sobre la
+// ORIGINAL la caja del logo. Un intento rechazado → un reintento; si vuelve a fallar, la imagen original y
+// `MARK_NOT_APPLIED`. Cada intento viaja con su consumo y su motivo, y se escribe en el log: se generó y se cobró.
 async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRatio: string, brandId: string, t0: number):
   Promise<{ image_data_url: string; trace: Record<string, unknown> }> {
-  const attempts: Array<{ model: string; usage: Record<string, number> | null; changed_pct: number | null; error?: string }> = [];
+  const attempts: Array<{ model: string; usage: Record<string, number> | null; changed_pct: number | null; outcome?: string;
+    box_pct?: number | null; outside_pct?: number | null; error?: string }> = [];
   const base = { mark: plan.mark, garment_tone: plan.garment_tone, persona: plan.persona };
   try {
     const { default: sharp } = await import('sharp');
@@ -2847,14 +2987,11 @@ async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRati
     const logoPng = await sharp(Buffer.from(logoIn.data, 'base64')).flatten({ background: fondo }).png().toBuffer();
     const actual: InlineImage = { mimeType: imageDataUrl.slice(5, imageDataUrl.indexOf(';')) || 'image/png', data: imageDataUrl.slice(comma + 1) };
     const logo: InlineImage = { mimeType: 'image/png', data: logoPng.toString('base64') };
-    const medir = async (despuesDataUrl: string): Promise<number> => {
-      const meta = await sharp(antesBytes).metadata();
-      const w = MARK_MEASURE_WIDTH, h = Math.max(1, Math.round((meta.height ?? w) * w / (meta.width ?? w)));
-      const raw = (b: Buffer) => sharp(b).removeAlpha().resize(w, h, { fit: 'fill' }).raw().toBuffer();
-      const d = Buffer.from(despuesDataUrl.slice(despuesDataUrl.indexOf(',') + 1), 'base64');
-      const [a, b] = await Promise.all([raw(antesBytes), raw(d)]);
-      return changedPixelPct(new Uint8Array(a.buffer, a.byteOffset, a.length), new Uint8Array(b.buffer, b.byteOffset, b.length), 3);
-    };
+    const meta = await sharp(antesBytes).metadata();
+    const W = meta.width ?? MARK_MEASURE_WIDTH, H = meta.height ?? MARK_MEASURE_WIDTH;
+    const mw = MARK_MEASURE_WIDTH, mh = Math.max(1, Math.round(H * mw / W));
+    const raw = async (bf: Buffer) => { const r = await sharp(bf).removeAlpha().resize(mw, mh, { fit: 'fill' }).raw().toBuffer(); return new Uint8Array(r.buffer, r.byteOffset, r.length); };
+    const antesRaw = await raw(antesBytes);
     for (let intento = 1; intento <= 2; intento++) {
       const elapsed = Date.now() - t0;
       if (!markPassAllowed(elapsed)) {
@@ -2866,16 +3003,30 @@ async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRati
         r = await vertexPredictImagenCapability({ prompt: markEditPrompt(plan), aspectRatio, images: [actual, logo] });
       } catch (err) {
         const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
-        attempts.push({ model: GEMINI_IMAGE_MODEL, usage: (err as any)?.usage ?? null, changed_pct: null, error: msg });
+        console.warn(`[ImageLab][MARCA] brand=${brandId} intento ${intento}: la edición falló: ${msg}`);
+        attempts.push({ model: GEMINI_IMAGE_MODEL, usage: (err as any)?.usage ?? null, changed_pct: null, outcome: 'failed', error: msg });
         continue;
       }
-      const pct = await medir(r.image_data_url);
-      attempts.push({ model: GEMINI_IMAGE_MODEL, usage: r.usage, changed_pct: pct });
-      if (pct <= MARK_DIFF_MAX_PCT) {
-        console.log(`[ImageLab][MARCA] brand=${brandId} ${plan.mark} aplicada en el intento ${intento}: ${pct} % de píxeles cambiados`);
-        return { image_data_url: r.image_data_url, trace: { mark_pass: { ...base, applied: true, attempts } } };
+      const despuesBytes = Buffer.from(r.image_data_url.slice(r.image_data_url.indexOf(',') + 1), 'base64');
+      const despuesRaw = await raw(despuesBytes);
+      const pct = changedPixelPct(antesRaw, despuesRaw, 3);
+      const parche = planMarkPatch(antesRaw, despuesRaw, mw, mh);
+      const medida = { changed_pct: pct, box_pct: parche.box_pct, outside_pct: parche.outside_pct };
+      if (pct > MARK_DIFF_MAX_PCT || !parche.ok) {
+        const motivo = 'reason' in parche ? parche.reason : 'MARK_REJECTED_SPREAD';
+        console.warn(`[ImageLab][MARCA] brand=${brandId} intento ${intento}: ${motivo} (${pct} % de la imagen, caja ${parche.box_pct ?? '-'} %, fuera ${parche.outside_pct ?? '-'} %)`);
+        attempts.push({ model: GEMINI_IMAGE_MODEL, usage: r.usage, ...medida, outcome: motivo });
+        continue;
       }
-      console.warn(`[ImageLab][MARCA] brand=${brandId} intento ${intento}: ${pct} % de píxeles cambiados (> ${MARK_DIFF_MAX_PCT} %)`);
+      // La caja, a la resolución real; de la editada sólo ese recorte, pegado sobre la ORIGINAL.
+      const caja = scaleBox((parche as { box: CajaDeParche }).box, mw, mh, W, H);
+      const editada = await sharp(despuesBytes).removeAlpha().resize(W, H, { fit: 'fill' })
+        .extract({ left: caja.x, top: caja.y, width: caja.w, height: caja.h }).png().toBuffer();
+      const final = await sharp(antesBytes).composite([{ input: editada, left: caja.x, top: caja.y }]).png().toBuffer();
+      attempts.push({ model: GEMINI_IMAGE_MODEL, usage: r.usage, ...medida, outcome: 'applied' });
+      console.log(`[ImageLab][MARCA] brand=${brandId} ${plan.mark} aplicada en el intento ${intento}: parche ${caja.w}×${caja.h} px (${parche.box_pct} % de la imagen), ${pct} % cambiado, el resto es la original`);
+      return { image_data_url: `data:image/png;base64,${final.toString('base64')}`,
+        trace: { mark_pass: { ...base, applied: true, patch: caja, attempts } } };
     }
   } catch (err) {
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
@@ -2884,6 +3035,31 @@ async function pasadaDeMarca(imageDataUrl: string, plan: PlanDeMarca, aspectRati
   }
   console.warn(`[ImageLab][MARCA] MARK_NOT_APPLIED brand=${brandId}: se entrega la imagen sin logo`);
   return { image_data_url: imageDataUrl, trace: { mark_pass: { ...base, applied: false, reason: 'MARK_NOT_APPLIED', attempts } } };
+}
+
+/** 2026-11-16 — `mode: 'mark_pass'`: la pasada DIFERIDA. El carril manda la imagen ya guardada (`image_url`) y el plan
+ *  que le devolvió `MARK_DEFERRED`; el tiempo es el de esta llamada, no el de la imagen. */
+async function pasadaDiferida(body: any, res: VercelResponse): Promise<void> {
+  const t0 = Date.now();
+  const brandId = typeof body.brandId === 'string' ? body.brandId : '';
+  const plan = planDeMarcaFrom(body.plan);
+  const url = typeof body.image_url === 'string' ? body.image_url.trim() : '';
+  if (!brandId || !plan || !/^(https?:\/\/|data:image\/)/.test(url)) {
+    res.status(400).json({ status: 'error', error: 'MARK_PASS_INVALID: brandId, plan (persona, outfit, mark, variant) e image_url son obligatorios' });
+    return;
+  }
+  const ledgerCtx = { platform: typeof body.canal === 'string' ? body.canal : null, t0, tag: 'execute/mark_pass' };
+  try {
+    const img = url.startsWith('data:') ? { mimeType: url.slice(5, url.indexOf(';')), data: url.slice(url.indexOf(',') + 1) } : await fetchImageInline(url);
+    const dataUrl = `data:${img.mimeType || 'image/png'};base64,${img.data}`;
+    const aspect = typeof body.aspect_ratio === 'string' && /^\d+:\d+$/.test(body.aspect_ratio) ? body.aspect_ratio : '1:1';
+    const m = await pasadaDeMarca(dataUrl, plan, aspect, brandId, t0);
+    await respondAndRecord(res, 200, body, { status: 'ok', source: 'mark_pass', image_data_url: m.image_data_url, model: GEMINI_IMAGE_MODEL, ...m.trace }, ledgerCtx);
+  } catch (err) {
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    console.warn(`[ImageLab][MARCA] MARK_PASS_FAILED brand=${brandId}: ${msg}`);
+    res.status(500).json({ status: 'error', error: `MARK_PASS_FAILED: ${msg}` });
+  }
 }
 
 // ── RESPUESTA-IMAGEN:BEGIN ── bloque puro (sin red): lo extrae `tests/contrato_de_fallo_test.mjs`.
@@ -3538,8 +3714,9 @@ async function entregarImagen(
   // estado, nada cambia; sin plan, la respuesta dice por qué no corrió.
   let marcaTrace: Record<string, unknown> = {};
   if (e.marca?.plan) {
-    const m = await pasadaDeMarca(imageDataUrl, e.marca.plan, e.aspect_ratio, brandId, t0);
-    imageDataUrl = m.image_data_url; marcaTrace = m.trace;
+    // 2026-11-16 — DIFERIDA (Sam, opción a): la imagen sale lisa y el plan viaja; el carril llama a `mode: 'mark_pass'`.
+    console.log(`[ImageLab][MARCA] MARK_DEFERRED brand=${brandId} ${e.marca.plan.mark} en ${e.marca.plan.persona}`);
+    marcaTrace = { mark_pass: { applied: false, reason: 'MARK_DEFERRED', plan: e.marca.plan, aspect_ratio: e.aspect_ratio } };
   } else if (e.marca?.status) {
     console.warn(`[ImageLab][MARCA] ${e.marca.status} brand=${brandId}`);
     marcaTrace = { mark_pass: { applied: false, reason: e.marca.status } };
@@ -3693,6 +3870,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
   }
+
+  // 2026-11-16 — la pasada de marca DIFERIDA: una imagen ya guardada y su plan.
+  if (body?.mode === 'mark_pass') { await pasadaDiferida(body, res); return; }
 
   if (!body.brandId) { res.status(400).json(failurePayload(new Error('brandId is required'), null)); return; }
 
@@ -3957,7 +4137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       // 2026-10-31 — sólo si se pidió: sin `params.canvas`, el estado es el de antes.
       ...(lienzoIn.lienzo ? { canvas: lienzoIn.lienzo } : {}),
       // 2026-11-15 — sólo si alguna opción elegida lleva marca: sin eso, el estado es el de antes.
-      ...(markedChoices.length ? { marca: markPlanFor(wardrobeChoices, params.marks) } : {}),
+      ...(markedChoices.length ? { marca: markPlanFor(wardrobeChoices, params.marks, finalPrompt) } : {}),
       respuesta: {
         output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
         preset_used:    built.presetUsed,
