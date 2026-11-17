@@ -910,6 +910,32 @@ export function ledgerCallRow(p: {
   };
 }
 
+/** LA CAUSA VIAJA CON EL ASIENTO (2026-11-17, Sam). Medido ese día: 460 de 594 imágenes fallidas por la vía
+ *  directa en 30 días quedaron en el libro sin causa, y el aviso sólo podía decir «sin causa registrada». El
+ *  cuerpo del fallo ya la traía (`error`, `provider_http_status`, `block_reason`, `finish_reason`): ahora va
+ *  en `error_msg`, con códigos estables delante para que la base la diga en palabras. Sin enlaces y acotada. */
+export function ledgerFailureMarkers(p: Record<string, any>): string[] {
+  const out: string[] = [];
+  const http = p?.provider_http_status;
+  if (Number.isInteger(http) && (http < 200 || http > 299)) out.push(`PROVIDER_HTTP_${http}`);
+  for (const [k, code] of [['block_reason', 'BLOCK_REASON'], ['finish_reason', 'FINISH_REASON']] as const) {
+    const v = typeof p?.[k] === 'string' ? p[k].trim() : '';
+    if (v && v.toUpperCase() !== 'STOP') out.push(`${code}:${v.slice(0, 60)}`);
+  }
+  const msg = typeof p?.error === 'string' ? p.error.replace(/https?:\/\/\S+|www\.\S+/gi, '[enlace]').replace(/\s+/g, ' ').trim() : '';
+  out.push(msg ? `IMAGE_FAILED: ${msg.slice(0, 200)}` : 'IMAGE_FAILED: el cuerpo del fallo no trae mensaje');
+  return out;
+}
+
+/** LA SESIÓN QUE LLAMA (2026-11-17, Sam). Una llamada directa puede declarar en `caller_session` el título de
+ *  la sesión de trabajo que la hizo; el aviso de un fallo la nombra. Texto libre, recortado. `null` si no viene. */
+export function ledgerCallerSession(body: unknown): string | null {
+  const v = body && typeof body === 'object' ? (body as Record<string, unknown>).caller_session : null;
+  if (typeof v !== 'string') return null;
+  const t = v.replace(/\s+/g, ' ').trim();
+  return t ? t.slice(0, 200) : null;
+}
+
 /** Las filas de una respuesta de `/api/execute` (éxito o fallo, modo directo o del orquestador): la
  *  imagen entregada o fallida, cada intento descartado, y el constructor de prompt si se llamó. Lee el
  *  MISMO cuerpo que el carril lee para asentar, así que las dos vías no pueden contar distinto. */
@@ -923,7 +949,8 @@ export function ledgerRowsFromExecute(payload: unknown): LedgerRow[] {
   if (delivered) {
     rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: true }));
   } else if (p.status === 'error' && p.provider_called === true) {
-    rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: false, httpStatus: p.provider_http_status }));
+    rows.push(ledgerCallRow({ outputType: 'image', model: p.model, usage: p.usage, ok: false, httpStatus: p.provider_http_status,
+      markers: ledgerFailureMarkers(p) }));
   }
   if (Array.isArray(p.discarded_attempts)) {
     for (const d of p.discarded_attempts) {
@@ -961,6 +988,7 @@ export function ledgerPieceId(body: unknown): string | null {
 /** Los argumentos de `ops_log_generation` para una fila. Sin precio declarado: la base lo resuelve. */
 export function ledgerRpcArgs(row: LedgerRow, ctx: {
   brandId: string | null; brandNote: string | null; platform: string | null; pieceId: string | null; durationMs: number | null;
+  callMode?: 'sync' | 'async' | null; callerSession?: string | null;
 }): Record<string, unknown> {
   const errorMsg = [...row.markers, ctx.brandNote].filter(Boolean).join(' | ') || null;
   const dur = row.duration_ms !== undefined ? row.duration_ms : ctx.durationMs;
@@ -977,7 +1005,18 @@ export function ledgerRpcArgs(row: LedgerRow, ctx: {
     p_error_msg: errorMsg,
     p_source_app: LEDGER_DIRECT_SOURCE_APP,
     ...(row.billable ? { p_billable: row.billable } : {}),
+    // 2026-11-17: cómo se llamó y desde qué sesión. Sólo con valor: un RPC anterior a la migración que
+    // los acepta no los conoce, y `ledgerRecordDirect` reintenta sin ellos (LEDGER_RPC_SIN_VIA).
+    ...(ctx.callMode ? { p_call_mode: ctx.callMode } : {}),
+    ...(ctx.callerSession ? { p_caller_session: ctx.callerSession } : {}),
   };
+}
+
+/** Los argumentos sin los datos de vía, para un RPC que todavía no los acepta. */
+export function ledgerArgsSinVia(args: Record<string, unknown>): Record<string, unknown> | null {
+  if (!('p_call_mode' in args) && !('p_caller_session' in args)) return null;
+  const { p_call_mode: _m, p_caller_session: _s, ...resto } = args;
+  return resto;
 }
 
 function ledgerBaseUrl(raw: string): string {
@@ -1018,6 +1057,8 @@ export async function ledgerResolveBrand(raw: string | null, base: string, key: 
  *  filas escribió, para el log y los tests. Con `ledger_by_caller: true`, no hace nada (ni red). */
 export async function ledgerRecordDirect(body: unknown, rows: LedgerRow[], ctx: {
   platform?: string | null; durationMs?: number | null; tag: string;
+  /** Cómo se llamó: `sync` (la respuesta trae el resultado; por defecto) o `async` (lote recogido después). */
+  callMode?: 'sync' | 'async';
 }): Promise<{ skipped: boolean; written: number; failed: number }> {
   if (ledgerByCaller(body) || !rows.length) return { skipped: true, written: 0, failed: 0 };
   let written = 0, failed = 0;
@@ -1031,13 +1072,24 @@ export async function ledgerRecordDirect(body: unknown, rows: LedgerRow[], ctx: 
     const brand = await ledgerResolveBrand(ledgerBrandOf(body), base, key);
     const pieceId = ledgerPieceId(body);
     const platform = typeof ctx.platform === 'string' && ctx.platform.trim() ? ctx.platform.trim() : null;
+    const callerSession = ledgerCallerSession(body);
+    const llamar = (args: Record<string, unknown>) => ledgerFetch(`${base}/rest/v1/rpc/ops_log_generation`, {
+      method: 'POST',
+      headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    });
     await Promise.all(rows.map(async (row) => {
       try {
-        const res = await ledgerFetch(`${base}/rest/v1/rpc/ops_log_generation`, {
-          method: 'POST',
-          headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(ledgerRpcArgs(row, { brandId: brand.brandId, brandNote: brand.note, platform, pieceId, durationMs: ctx.durationMs ?? null })),
-        });
+        const args = ledgerRpcArgs(row, { brandId: brand.brandId, brandNote: brand.note, platform, pieceId, durationMs: ctx.durationMs ?? null,
+          callMode: ctx.callMode ?? 'sync', callerSession });
+        let res = await llamar(args);
+        // Una base sin la migración de 2026-11-17 no conoce `p_call_mode` / `p_caller_session` (PostgREST
+        // responde 404 PGRST202): se asienta igual, sin esos dos datos. Perder la vía es mejor que el asiento.
+        const sinVia = res.status === 404 ? ledgerArgsSinVia(args) : null;
+        if (sinVia && (await res.clone().text()).includes('PGRST202')) {
+          console.error(`[ImageLab][LIBRO] ${ctx.tag} LEDGER_RPC_SIN_VIA: el RPC no acepta vía ni sesión; se asienta sin ellas`);
+          res = await llamar(sinVia);
+        }
         if (!res.ok) {
           failed++;
           console.error(`[ImageLab][LIBRO] ${ctx.tag} ops_log_generation ${res.status} (${row.output_type} ${row.model_id}): ${(await res.text()).slice(0, 200)}`);

@@ -288,4 +288,67 @@ await ok('CABLEADO: inspect y compose asientan sólo una llamada hecha y por el 
   assert.match(c, /if \(fc\.called\) \{[\s\S]*?outputType: 'image_overlay_faces'[\s\S]*?billable: 'estructura'/);
 });
 
+// ── 2026-11-17 · LA CAUSA, LA VÍA Y LA SESIÓN (Sam) ───────────────────────────────
+await ok('imagen fallida: la causa viaja en el asiento, con códigos estables y sin enlaces', () => {
+  const [r] = L.ledgerRowsFromExecute({ status: 'error', model: 'm', provider_called: true, provider_http_status: 429,
+    usage: null, error: 'Gemini image error 429: Resource exhausted. See https://cloud.example/docs', block_reason: null, finish_reason: 'STOP' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.markers[0], 'PROVIDER_HTTP_429');
+  assert.ok(r.markers.some((m) => m.startsWith('IMAGE_FAILED: Gemini image error 429')), r.markers.join(' | '));
+  assert.ok(!r.markers.join(' ').includes('https://'), 'un enlace llegó al libro');
+  assert.ok(!r.markers.some((m) => m.startsWith('FINISH_REASON')), 'STOP no es causa');
+  const a = L.ledgerRpcArgs(r, { brandId: 'M1', brandNote: null, platform: null, pieceId: null, durationMs: 1 });
+  assert.match(a.p_error_msg, /^PROVIDER_HTTP_429 \| IMAGE_FAILED: /);
+});
+await ok('imagen fallida por filtro: el motivo del bloqueo va en la causa', () => {
+  const m = L.ledgerFailureMarkers({ provider_http_status: 200, block_reason: 'SAFETY', finish_reason: 'IMAGE_SAFETY', error: 'sin imagen' });
+  assert.deepEqual(m, ['BLOCK_REASON:SAFETY', 'FINISH_REASON:IMAGE_SAFETY', 'IMAGE_FAILED: sin imagen']);
+  assert.deepEqual(L.ledgerFailureMarkers({}), ['IMAGE_FAILED: el cuerpo del fallo no trae mensaje']);
+});
+await ok('la sesión que llama: `caller_session` recortado; ausente o vacío = null', () => {
+  assert.equal(L.ledgerCallerSession({ caller_session: '  IFP —  set canónico  ' }), 'IFP — set canónico');
+  assert.equal(L.ledgerCallerSession({ caller_session: 'x'.repeat(500) }).length, 200);
+  for (const b of [{}, { caller_session: '   ' }, { caller_session: 7 }, null]) assert.equal(L.ledgerCallerSession(b), null);
+});
+await ok('el RPC recibe vía y sesión sólo con valor', () => {
+  const row = L.ledgerCallRow({ outputType: 'image', model: 'm', usage: null, ok: true });
+  const base = { brandId: 'M1', brandNote: null, platform: null, pieceId: null, durationMs: 1 };
+  const a = L.ledgerRpcArgs(row, { ...base, callMode: 'async', callerSession: 'S - hint' });
+  assert.equal(a.p_call_mode, 'async');
+  assert.equal(a.p_caller_session, 'S - hint');
+  const b = L.ledgerRpcArgs(row, base);
+  assert.ok(!('p_call_mode' in b) && !('p_caller_session' in b));
+  assert.equal(L.ledgerArgsSinVia(b), null);
+  const c = L.ledgerArgsSinVia(a);
+  assert.ok(!('p_call_mode' in c) && !('p_caller_session' in c) && c.p_lab === 'imagelab');
+});
+await ok('asentar: síncrona por defecto, la sesión de la petición, y con una base vieja (PGRST202) se asienta sin vía', async () => {
+  process.env.SUPABASE_URL = 'proyecto-de-prueba';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = SECRETO;
+  const rows = [L.ledgerCallRow({ outputType: 'image', model: 'm', usage: null, ok: false, markers: ['IMAGE_FAILED: x'] })];
+  const body = { brand_id: 'M1', caller_session: 'S - hint' };
+  const okRpc = (url) => url.includes('/rest/v1/brands') ? json([{ id: 'M1' }]) : json('uuid');
+  const { r, calls } = await conRed(okRpc, () => L.ledgerRecordDirect(body, rows, { tag: 't' }));
+  assert.equal(r.written, 1);
+  const [c] = rpcCalls(calls);
+  assert.equal(argsOf(c).p_call_mode, 'sync');
+  assert.equal(argsOf(c).p_caller_session, 'S - hint');
+  const viejo = (url, init) => {
+    if (url.includes('/rest/v1/brands')) return json([{ id: 'M1' }]);
+    const a = JSON.parse(init.body);
+    return 'p_call_mode' in a ? json({ code: 'PGRST202', message: 'Could not find the function' }, 404) : json('uuid');
+  };
+  const v = await conRed(viejo, () => L.ledgerRecordDirect(body, rows, { tag: 't', callMode: 'async' }));
+  assert.equal(v.r.written, 1, 'el asiento se perdió con una base sin la migración');
+  assert.equal(rpcCalls(v.calls).length, 2);
+  assert.ok(!('p_call_mode' in argsOf(rpcCalls(v.calls)[1])));
+  assert.ok(v.logs.some((l) => l.includes('LEDGER_RPC_SIN_VIA')));
+  assert.ok(!v.logs.join(' ').includes(SECRETO), 'la clave salió en el log');
+});
+await ok('CABLEADO: el lote asienta como asíncrono y el resto como síncrono', () => {
+  const e = SRC['execute.ts'];
+  assert.match(e, /tag: 'execute\/lote', callMode: 'async' as const/);
+  assert.match(e, /callMode: ctx\.callMode \?\? 'sync'/);
+});
+
 console.log(`\n✓ ${n} comprobaciones del libro directo`);
