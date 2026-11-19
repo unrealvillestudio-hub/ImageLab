@@ -315,10 +315,13 @@ export function referencesClause(refs: InspectReference[]): string {
   const names = refs.map((r) => `${referenceLabel(r)} (${r.image_urls.length})`).join(', ');
   return 'REFERENCE PHOTOS — the FIRST image is the scene to judge. After it come labeled reference photos of the ' +
     `people the scene was meant to show: ${names}. They are NOT the scene: never judge any rule on them. Use them ` +
-    'ONLY for rules about whether a person in the scene is that same individual: compare facial structure, face ' +
+    'ONLY for rules that compare a person in the scene with that person\'s reference. For rules about whether a ' +
+    'person in the scene is that same individual: compare facial structure, face ' +
     'shape and fullness, jaw, nose, eyes, eyebrows, apparent age, skin tone and distinctive marks such as moles. ' +
-    'Ignore clothing, hairstyle, makeup, lighting, angle and expression. Each labeled reference is ONE distinct individual: ' +
-    'when a rule is about identity, say in the evidence which person_id (or name) you mean.';
+    'Ignore clothing, hairstyle, makeup, lighting, angle and expression. A rule that explicitly names another ' +
+    'attribute to compare with the reference (for example the volume of the hair) is judged on that attribute only, ' +
+    'against the same person\'s reference. Each labeled reference is ONE distinct individual: ' +
+    'when a rule compares with a reference, say in the evidence which person_id (or name) you mean.';
 }
 
 export const JUDGE_SYSTEM =
