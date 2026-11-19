@@ -6161,6 +6161,142 @@ export function facesForContract(faces: FaceBox[] | null): Array<{ x0: number; y
   const r = (v: number) => Math.round(v * 10000) / 10000;
   return (faces ?? []).map((f) => ({ x0: r(f.x0), y0: r(f.y0), x1: r(f.x1), y1: r(f.y1) }));
 }
+
+// ── VOLUMEN DEL PELO (2026-11-19) ───────────────────────────────────────────────────────────────────────────────────
+// Campo opcional `measure` del modo `faces`: `{ mode: 'faces', brand_id, image_url | image_data_url,
+// measure: { hair_volume: { dark_threshold? } } }`. Cada cara de la respuesta lleva entonces `hair_volume`:
+//
+//   { width_ratio, height_ratio, face_width_px, hair_top_clipped, valid, issues[] }
+//
+// · `width_ratio`  — ancho máximo del pelo oscuro, desde la línea del pelo hasta el mentón, ÷ ancho de la cara.
+// · `height_ratio` — alto del pelo por encima de la línea del pelo, en el centro de la cabeza, ÷ ancho de la cara.
+//                    null si el pelo toca el borde superior de la imagen (`hair_top_clipped`): no se puede medir.
+// · El ancho de la cara NO es el de la caja del detector: es la fila más ancha de piel dentro de la caja (percentil 90).
+//   La caja sólo da el punto de partida. Medido el 2026-11-19 en producción: la caja del
+//   detector varió hasta un 30 % entre tres llamadas sobre la misma imagen; el ancho de piel, menos de un 1 %.
+//
+// POR QUÉ EXISTE. El juez visual (un modelo) no detectó el pelo más voluminoso que la tarjeta de identidad: banco
+// medido el 2026-11-19, 0 de 3 detecciones con la regla junto a la de identidad. Sam eligió «medida determinista».
+// Este bloque mide; NO decide. Quien llama compara con la medida de la tarjeta de la misma persona y decide con su
+// tolerancia (dato del carril, no de este código).
+//
+// SUPUESTOS DECLARADOS, que la medida comprueba y NO esconde: el pelo es más oscuro que `dark_threshold` (luminancia
+// 0..255, por defecto 80) y el fondo y la piel no lo son. Si no se cumplen, `valid: false` y `issues` dice cuál falló:
+//   NO_FACE_SKIN       no hay piel en la franja de las mejillas (la caja no es una cara, o la piel es más oscura que el
+//                      umbral: `dark_threshold` es dato de la persona y se puede bajar).
+//   BOX_MISMATCH       el ancho de piel no cuadra con la caja (0,5×–1,5×): la caja no es fiable.
+//   DARK_BACKGROUND    los bordes de la ventana de búsqueda están oscuros: el fondo se confunde con el pelo.
+//   HAIR_NOT_DARK      no hay pelo oscuro fuera de la cara: con pelo claro esta medida no vale.
+//   SIDE_CLIPPED       el pelo toca el borde lateral de la imagen: el ancho puede quedar corto.
+// EJE (código): la geometría de la medida y sus comprobaciones. INSTANCIA (dato): el umbral de oscuro, la referencia y
+// la tolerancia. El código no nombra personas ni marcas. Origen: `BluePrints/tools/identity/hair_volume.py`.
+
+export const HAIR_DARK_DEFAULT = 80;
+export interface HairVolume {
+  width_ratio: number | null; height_ratio: number | null; face_width_px: number | null;
+  hair_top_clipped: boolean; valid: boolean; issues: string[];
+}
+
+/** Valida `measure` del modo `faces`. Ausente ⇒ null (la respuesta es la de siempre). Mal formado ⇒ 400 con nombre. PURO. */
+export function parseFacesMeasure(raw: unknown): null | { hairVolume: null | { darkThreshold: number } } {
+  if (raw == null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new CompositorError('COMPOSITOR_MEASURE_INVALID', 'measure debe ser un objeto', 400);
+  const known = ['hair_volume'];
+  const extra = Object.keys(raw as object).filter((k) => !known.includes(k));
+  if (extra.length) throw new CompositorError('COMPOSITOR_MEASURE_INVALID', `measure: clave desconocida ${extra.join(', ')}`, 400);
+  const hv = (raw as any).hair_volume;
+  if (hv == null || hv === false) return { hairVolume: null };
+  const o = hv === true ? {} : hv;
+  if (typeof o !== 'object' || Array.isArray(o)) throw new CompositorError('COMPOSITOR_MEASURE_INVALID', 'measure.hair_volume debe ser true o un objeto', 400);
+  const t = o.dark_threshold == null ? HAIR_DARK_DEFAULT : Number(o.dark_threshold);
+  if (!Number.isFinite(t) || t < 1 || t > 254) throw new CompositorError('COMPOSITOR_MEASURE_INVALID', 'measure.hair_volume.dark_threshold debe estar entre 1 y 254', 400);
+  return { hairVolume: { darkThreshold: t } };
+}
+
+/** El tramo de `mask` en la fila `y` que contiene el píxel marcado más cercano a `cx`, tolerando huecos de `gap` px. PURO. */
+function maskRunAt(mask: Uint8Array, width: number, y: number, cx: number, gap: number): [number, number] | null {
+  const row = y * width;
+  let seed = -1;
+  for (let d = 0; d <= gap * 3; d++) {
+    if (cx - d >= 0 && mask[row + cx - d]) { seed = cx - d; break; }
+    if (cx + d < width && mask[row + cx + d]) { seed = cx + d; break; }
+  }
+  if (seed < 0) return null;
+  let l = seed, miss = 0;
+  while (l > 0 && miss <= gap) { l--; miss = mask[row + l] ? 0 : miss + 1; }
+  l += miss;
+  let r = seed; miss = 0;
+  while (r < width - 1 && miss <= gap) { r++; miss = mask[row + r] ? 0 : miss + 1; }
+  r -= miss;
+  return [l, r];
+}
+
+const median = (xs: number[]): number => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const quantile = (xs: number[], q: number): number => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+
+/** El volumen del pelo de UNA cara. `rgb`: píxeles RGB (3 bytes por píxel), `box`: la caja del detector (0..1). PURO:
+ *  los mismos píxeles y la misma caja dan siempre la misma medida, y la caja sólo pesa como punto de partida. */
+export function measureHairVolume(rgb: Uint8Array, width: number, height: number, box: FaceBox, darkThreshold = HAIR_DARK_DEFAULT): HairVolume {
+  const out: HairVolume = { width_ratio: null, height_ratio: null, face_width_px: null, hair_top_clipped: false, valid: false, issues: [] };
+  const n = width * height;
+  const dark = new Uint8Array(n), skin = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 3) {
+    const R = rgb[p], G = rgb[p + 1], B = rgb[p + 2];
+    const Y = (R + G + B) / 3;
+    if (Y < darkThreshold) { dark[i] = 1; continue; }
+    const cr = 128 + 0.5 * R - 0.4187 * G - 0.0813 * B, cb = 128 - 0.1687 * R - 0.3313 * G + 0.5 * B;
+    if (cr > 135 && cr < 180 && cb > 85 && cb < 135) skin[i] = 1;
+  }
+  const bx0 = box.x0 * width, bx1 = box.x1 * width, by0 = box.y0 * height, by1 = box.y1 * height;
+  const bh = by1 - by0, cx = Math.round((bx0 + bx1) / 2);
+  const gap = Math.max(2, Math.round(0.01 * width));
+  // 1 · El ancho de la cara: la fila más ancha de piel dentro de la caja (percentil 90 de las filas, del 20 % al 100 % de
+  //     la caja). No depende de dónde cae la caja: una franja fija de la caja caía hacia la mandíbula si la caja se movía.
+  const ws: number[] = [], cs: number[] = [];
+  for (let y = Math.floor(by0 + 0.2 * bh); y < Math.floor(by1) && y < height; y++) {
+    if (y < 0) continue;
+    const run = maskRunAt(skin, width, y, Math.min(width - 1, Math.max(0, cx)), gap);
+    if (run) { ws.push(run[1] - run[0]); cs.push((run[0] + run[1]) / 2); }
+  }
+  if (!ws.length) { out.issues.push('NO_FACE_SKIN'); return out; }
+  const fw = quantile(ws, 0.9), fcx = median(cs);
+  out.face_width_px = Math.round(fw);
+  if (fw < 8) { out.issues.push('NO_FACE_SKIN'); return out; }
+  const boxRatio = fw / Math.max(1, bx1 - bx0);
+  if (boxRatio < 0.5 || boxRatio > 1.5) out.issues.push('BOX_MISMATCH');
+  // 2 · La línea del pelo: subiendo por el centro de la cara, la última fila con piel (los ojos y las cejas son huecos cortos).
+  const c0 = Math.max(0, Math.round(fcx - 0.15 * fw)), c1 = Math.min(width, Math.round(fcx + 0.15 * fw));
+  const frac = (mask: Uint8Array, y: number) => { let s = 0; for (let x = c0; x < c1; x++) s += mask[y * width + x]; return s / Math.max(1, c1 - c0); };
+  let y = Math.min(height - 1, Math.floor(by0 + 0.62 * bh)), hairline = y, miss = 0;
+  const lim = Math.round(0.12 * fw);
+  while (y > 0 && miss <= lim) { y--; if (frac(skin, y) >= 0.5) { hairline = y; miss = 0; } else miss++; }
+  // 3 · El alto del pelo: desde la línea del pelo hacia arriba, mientras haya pelo oscuro en el centro.
+  let top = hairline; y = hairline; miss = 0;
+  const lim2 = Math.max(2, Math.round(0.03 * fw));
+  while (y > 0 && miss <= lim2) { y--; if (frac(dark, y) >= 0.2) { top = y; miss = 0; } else miss++; }
+  out.hair_top_clipped = top <= 1;
+  out.height_ratio = out.hair_top_clipped ? null : Math.round(((hairline - top) / fw) * 1000) / 1000;
+  // 4 · El ancho del pelo: la mayor extensión de oscuro, de la línea del pelo al mentón, en ±1,6 caras del centro.
+  const a = Math.max(0, Math.round(fcx - 1.6 * fw)), b = Math.min(width, Math.round(fcx + 1.6 * fw));
+  const yEnd = Math.min(height, Math.round(by1));
+  let span = 0, minX = width, maxX = -1, edgeDark = 0, edgeAll = 0;
+  const edge = Math.max(1, Math.round(0.1 * (b - a)));
+  for (let yy = Math.max(0, hairline); yy < yEnd; yy++) {
+    let l = -1, r = -1;
+    for (let x = a; x < b; x++) {
+      const d = dark[yy * width + x];
+      if (d) { if (l < 0) l = x; r = x; }
+      if (x < a + edge || x >= b - edge) { edgeAll++; edgeDark += d; }
+    }
+    if (l >= 0) { span = Math.max(span, r - l); minX = Math.min(minX, l); maxX = Math.max(maxX, r); }
+  }
+  out.width_ratio = Math.round((span / fw) * 1000) / 1000;
+  if (edgeAll && edgeDark / edgeAll > 0.5) out.issues.push('DARK_BACKGROUND');
+  if (span <= fw * 1.02) out.issues.push('HAIR_NOT_DARK');
+  if (maxX >= 0 && (minX <= 0 || maxX >= width - 1)) out.issues.push('SIDE_CLIPPED');
+  out.valid = out.issues.length === 0;
+  return out;
+}
 // ── BLOQUES A MANO (2026-11-16) ─────────────────────────────────────────────────────────────────────────────────────
 // Contrato «Bloques de texto colocados a mano» v1 (Sam, 2026-11-16). Objetivo validado: «En el Orchestrator, una sola
 // ventana de texto para imagen y video. Cada bloque (título, subtítulo, títulos clave, CTA, rol) tiene X, Y y zoom de
@@ -7336,6 +7472,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   if (body.mode === 'faces') {
     try {
       const fr = parseFacesRequest(body);
+      // 2026-11-19 — `measure` opcional: sin él, la respuesta es la de siempre, byte a byte.
+      const measureIn = parseFacesMeasure(body.measure);
       const bytes = fr.imageDataUrl ? dataUrlToBytes(fr.imageDataUrl) : await fetchBytes(String(fr.imageUrl), 'COMPOSITOR_IMAGE_FETCH_FAILED');
       const dims = imageDimensions(bytes);
       const fc = await detectFaces(bytes, dims.mime, { calibration: calibrationFromHeaders(req.headers as Record<string, unknown>, process.env.VERCEL_ENV) });
@@ -7353,7 +7491,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           model: fc.model, provider_called: fc.called, provider_http_status: fc.http_status });
         return;
       }
-      res.status(200).json({ status: 'ok', mode: 'faces', faces: facesForContract(fc.faces), image: { width: dims.width, height: dims.height },
+      let facesOut: Array<Record<string, unknown>> = facesForContract(fc.faces);
+      if (measureIn?.hairVolume) {
+        const thr = measureIn.hairVolume.darkThreshold;
+        const { data, info } = await sharp(bytes).removeAlpha().toColorspace('srgb').raw().toBuffer({ resolveWithObject: true });
+        const rgb = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        if (info.channels !== 3) throw new CompositorError('COMPOSITOR_MEASURE_FAILED', `la imagen decodificada tiene ${info.channels} canales, se esperaban 3`, 500);
+        facesOut = facesOut.map((f, i) => ({ ...f, hair_volume: measureHairVolume(rgb, info.width, info.height, fc.faces![i], thr) }));
+      }
+      res.status(200).json({ status: 'ok', mode: 'faces', faces: facesOut, image: { width: dims.width, height: dims.height },
         model: fc.model, model_source: fc.model_source ?? null, usage: fc.usage, duration_ms: Date.now() - t0 });
     } catch (err) {
       const e = err instanceof CompositorError ? err : null;
