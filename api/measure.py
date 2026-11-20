@@ -23,7 +23,8 @@ juzgan), NO_POSE (la cara no tiene cuerpo asociado), SHOULDERS_NOT_VISIBLE, NO_P
 
 Dependencias: `pyproject.toml` en la raíz. MediaPipe importa OpenCV, matplotlib y sounddevice sólo para dibujar y para
 audio; se excluyen en la instalación (`[tool.uv] override-dependencies`) y aquí se cubre su import con módulos vacíos
-(`api/_measure_stubs/`), para que la función quepa en el límite de Vercel. Modelos: se descargan en el arranque en frío a
+(`api/_measure_stubs/`), para que la función quepa en el límite de Vercel. libEGL/libGLESv2 van en `api/_measure_libs/`
+(ver su README). Modelos: se descargan en el arranque en frío a
 /tmp desde URL fijadas por versión y se verifican por sha256 (no se guardan en el repo).
 
 EJE (código): la geometría y sus comprobaciones. INSTANCIA (dato): referencia y tolerancia de cada persona, en su ficha.
@@ -40,7 +41,24 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '_measure_stubs'))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '_measure_stubs'))
+
+
+def _preload_gl():
+    """MediaPipe enlaza libEGL/libGLESv2 aunque mida en CPU, y el runtime de Vercel no las trae (api/_measure_libs/README.md).
+    Cargadas antes con RTLD_GLOBAL, el cargador las encuentra por su soname al abrir libmediapipe.so. Si el sistema ya
+    las tiene, se usan las del sistema."""
+    import ctypes
+    import ctypes.util
+    for name in ('libGLdispatch.so.0', 'libEGL.so.1', 'libGLESv2.so.2'):
+        try:
+            ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            ctypes.CDLL(os.path.join(_HERE, '_measure_libs', name), mode=ctypes.RTLD_GLOBAL)
+
+
+_preload_gl()
 
 MEASURE_VERSION = '1.0.0'
 MAX_YAW = 20.0          # grados: más girada que esto, la medida frontal no vale
