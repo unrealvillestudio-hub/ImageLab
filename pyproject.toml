@@ -1,0 +1,27 @@
+# Dependencias de la ÚNICA función Python de ImageLab: api/measure.py (medida determinista de personas con MediaPipe).
+# El resto de ImageLab es Node (package.json) y no lee este archivo.
+[project]
+name = "imagelab-measure"
+version = "1.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  # 0.10.21 y no 1.2.x: libmediapipe.so de 1.2.x trae tcmalloc, que aborta en Vercel al no encontrar
+  # /sys/devices/system/cpu/possible (medido en el preview de #100, 2026-11-20). Mismas cifras medidas con las dos.
+  "mediapipe==0.10.21",
+  "numpy<2",
+  "pillow",
+]
+
+[tool.uv]
+# MediaPipe importa OpenCV, matplotlib y sounddevice sólo para dibujar y para audio, y declara jax/jaxlib/sentencepiece
+# para tareas que /api/measure no usa.
+# Se excluyen con un marcador que nunca se cumple (cubren su import los módulos vacíos de api/_measure_stubs/):
+# sin ellos son 147 MB (medido el 2026-11-20 con mediapipe 0.10.21).
+override-dependencies = [
+  "opencv-contrib-python; sys_platform == 'never'",
+  "matplotlib; sys_platform == 'never'",
+  "sounddevice; sys_platform == 'never'",
+  "jax; sys_platform == 'never'",
+  "jaxlib; sys_platform == 'never'",
+  "sentencepiece; sys_platform == 'never'",
+]

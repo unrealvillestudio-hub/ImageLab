@@ -21,3 +21,24 @@ jobs:
         working-directory: .
       - run: npm test
         working-directory: .
+
+  # 2026-11-19 — la función Python de la medida determinista (api/measure.py). Instala con el MISMO pyproject.toml que usa
+  # Vercel (uv, sin OpenCV/matplotlib/sounddevice) y comprueba que cabe: si una versión nueva de MediaPipe arrastrara algo
+  # pesado, el PR lo ve aquí y no en el despliegue.
+  measure-py:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install uv
+      - run: uv sync
+      - run: uv run python tests/medida_test.py
+      - name: tamaño de las dependencias (límite de Vercel para Python, 500 MB)
+        run: |
+          size=$(du -sm .venv/lib/python3*/site-packages | cut -f1)
+          echo "site-packages: ${size} MB"
+          test "$size" -lt 400
+      - name: MediaPipe importa con los módulos vacíos y los modelos fijados cargan (sha256)
+        run: uv run python -c "import importlib.util as u; s=u.spec_from_file_location('m','api/measure.py'); m=u.module_from_spec(s); s.loader.exec_module(m); m.detectors(); print('ok', m.MEASURE_VERSION)"
