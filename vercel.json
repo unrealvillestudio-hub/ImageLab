@@ -1,6 +1,7 @@
 {
   "functions": {
-    "api/execute.ts": { "maxDuration": 300 }
+    "api/execute.ts": { "maxDuration": 300 },
+    "api/measure.py": { "maxDuration": 60, "memory": 2048, "excludeFiles": "{node_modules/**,dist/**,src/**,tests/**,releases/**,docs/**,public/**}" }
   },
   "headers": [
     {
