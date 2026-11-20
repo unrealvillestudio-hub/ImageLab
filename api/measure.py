@@ -1,7 +1,7 @@
 """ImageLab — POST /api/measure (y GET para diagnóstico): medida DETERMINISTA de personas en una imagen.
 
 2026-11-19. Sam: «sí, hazlo, sería un buen upgrade». Las medidas de identidad del set (BluePrints tools/identity) usan
-MediaPipe en Python; en la función Node de ImageLab MediaPipe no corre (pide WebGL). Esta función Python corre MediaPipe
+MediaPipe en Python; en la función Node de ImageLab MediaPipe no corre (pide WebGL). Versión 0.10.21: ver pyproject.toml. Esta función Python corre MediaPipe
 en CPU y devuelve, por cada persona de la imagen:
 
   body: { shoulders_over_face_w, valid, issues[] }      hombros (pose 11-12) / ancho de cara (FaceLandmarker 234-454)
