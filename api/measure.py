@@ -25,11 +25,11 @@ no eran las de la marca, y la edición «misma escena» devolvió otra escena (m
         correlación del gradiente del FONDO —lo que no es persona en ninguna de las dos— contra la imagen de referencia,
         buscando la escala y el desplazamiento del reencuadre. Medido: la misma escena 0,86; otra, ≤ 0,29.
 
-  hole (2026-11-21, no es una medida: prepara el reemplazo): con `hole: { persons: [i], dilate_px? }` devuelve la imagen
-        con esas personas tapadas en gris plano (su máscara de PoseLandmarker, dilatada) y sus cajas. ImageLab
+  hole (2026-11-21, no es una medida: prepara el reemplazo): con `hole: { bodies: [i], dilate_px? }` devuelve la imagen
+        con esos cuerpos (lista `bodies` de la respuesta: uno por máscara de persona, con su cara o null) tapados en gris plano (su máscara de PoseLandmarker, dilatada) y sus cajas. ImageLab
         `generation_mode: 'replace_person'` pinta a quien entra sólo en ese hueco.
 
-Pedido:  { image_url | image_data_url, hole?: { persons: [índice], dilate_px? }, measure?: { body?: true, hair?: true | { dark_threshold },
+Pedido:  { image_url | image_data_url, hole?: { bodies: [índice], dilate_px? }, measure?: { body?: true, hair?: true | { dark_threshold },
                                                  identity?: true | { references: [{ id, embeddings: [[128]] }], threshold?, embed? },
                                                  scene?: { reference_image_url | reference_image_data_url } } }
          GET /api/measure?image_url=https://…  (sólo para diagnóstico; mismas reglas)
@@ -264,47 +264,67 @@ def scene_alignment(ref_g, ref_bg, cands):
     return out
 
 
-def hole_mask(masks, faces, poses, targets, dilate_px):
-    """La máscara del hueco: la unión de las máscaras de persona de las caras `targets` (índices de la lista de personas
-    ordenada de izquierda a derecha), dilatada `dilate_px` para que el borde no deje restos de la persona que sale.
-    Devuelve (máscara, cajas en 0..1, issues). Una cara sin cuerpo asociado no tiene máscara: HOLE_NO_PERSON_MASK."""
+def bodies_of(masks, poses, faces):
+    """Los CUERPOS de la imagen (una máscara de PoseLandmarker cada uno), de izquierda a derecha, con su caja en 0..1 y el
+    índice de su cara en `persons` (también de izquierda a derecha) o None. Una persona de perfil o de espaldas no tiene
+    cara detectable pero sí cuerpo (medido el 2026-11-21 en 8cde215d: 2 cuerpos, 1 cara): el hueco se pide por cuerpo."""
+    import numpy as np
+    orden = sorted(range(len(faces)), key=lambda k: faces[k][0][:, 0].min())
+    cara_de = {}
+    for pos, k in enumerate(orden):
+        F = faces[k][0]
+        j = pair_pose(F[1], float(np.linalg.norm(F[234] - F[454])), poses)
+        if j >= 0 and j not in cara_de:
+            cara_de[j] = pos
+    out = []
+    for j, m in enumerate(masks):
+        ys, xs = np.where(m)
+        if not len(xs):
+            continue
+        H, W = m.shape
+        # La caja va del percentil 2 al 98 de los píxeles de la máscara: la máscara de PoseLandmarker suelta píxeles
+        # sueltos lejos del cuerpo (medido el 2026-11-21 en 8cde215d: la invitada de la derecha salía con la caja desde
+        # x = 0,10, encima de la otra persona). El orden es por el centroide, no por el borde.
+        x0, x1 = np.percentile(xs, [2, 98])
+        y0, y1 = np.percentile(ys, [2, 98])
+        out.append({'mask_index': j, 'face': cara_de.get(j),
+                    'box': [round(float(x0 / W), 4), round(float(y0 / H), 4), round(float(x1 / W), 4), round(float(y1 / H), 4)],
+                    'center': [round(float(xs.mean() / W), 4), round(float(ys.mean() / H), 4)],
+                    'share': round(float(m.mean()), 4)})
+    out.sort(key=lambda b: b['center'][0])
+    return out
+
+
+def hole_mask(masks, bodies, targets, dilate_px):
+    """La máscara del hueco: la unión de las máscaras de los cuerpos `targets` (índices de `bodies`), dilatada `dilate_px`
+    para que el borde no deje restos de la persona que sale. Devuelve (máscara, cajas en 0..1)."""
     import numpy as np
     from PIL import Image, ImageFilter
-    orden = sorted(range(len(faces)), key=lambda k: faces[k][0][:, 0].min())
-    H, W = masks[0].shape if masks else (0, 0)
-    issues, union, boxes = [], None, []
+    union, boxes = None, []
     for t in targets:
-        if not isinstance(t, int) or isinstance(t, bool) or not 0 <= t < len(orden):
-            raise MeasureError('MEASURE_BAD_REQUEST', f'hole.persons: {t!r} no es una persona de la imagen (hay {len(orden)})', 400)
-        F = faces[orden[t]][0]
-        j = pair_pose(F[1], float(np.linalg.norm(F[234] - F[454])), poses)
-        if j < 0 or j >= len(masks):
-            issues.append(f'HOLE_NO_PERSON_MASK:{t}')
-            continue
-        m = masks[j]
+        if not isinstance(t, int) or isinstance(t, bool) or not 0 <= t < len(bodies):
+            raise MeasureError('MEASURE_BAD_REQUEST', f'hole.bodies: {t!r} no es un cuerpo de la imagen (hay {len(bodies)})', 400)
+        m = masks[bodies[t]['mask_index']]
         union = m.copy() if union is None else (union | m)
-        ys, xs = np.where(m)
-        boxes.append([round(float(xs.min() / W), 4), round(float(ys.min() / H), 4), round(float(xs.max() / W), 4), round(float(ys.max() / H), 4)])
-    if union is None:
-        return None, boxes, issues
+        boxes.append(bodies[t]['box'])
     k = max(3, int(dilate_px) | 1)
     union = np.asarray(Image.fromarray(union.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(k))) > 127
-    return union, boxes, issues
+    return union, boxes
 
 
 def parse_hole(raw):
-    """`hole`: `{ persons: [índice, …], dilate_px? }` (índices de `persons`, de izquierda a derecha)."""
+    """`hole`: `{ bodies: [índice, …], dilate_px? }` (índices de `bodies`, de izquierda a derecha)."""
     if raw is None:
         return None
-    if not isinstance(raw, dict) or set(raw) - {'persons', 'dilate_px'}:
-        raise MeasureError('MEASURE_BAD_REQUEST', 'hole debe ser { persons: [índices], dilate_px? }', 400)
-    ps = raw.get('persons')
+    if not isinstance(raw, dict) or set(raw) - {'bodies', 'dilate_px'}:
+        raise MeasureError('MEASURE_BAD_REQUEST', 'hole debe ser { bodies: [índices], dilate_px? }', 400)
+    ps = raw.get('bodies')
     if not isinstance(ps, list) or not 1 <= len(ps) <= MAX_FACES or len(set(map(str, ps))) != len(ps):
-        raise MeasureError('MEASURE_BAD_REQUEST', f'hole.persons: de 1 a {MAX_FACES} índices distintos', 400)
+        raise MeasureError('MEASURE_BAD_REQUEST', f'hole.bodies: de 1 a {MAX_FACES} índices distintos', 400)
     d = raw.get('dilate_px', HOLE_DILATE_DEFAULT)
     if not isinstance(d, int) or isinstance(d, bool) or not 1 <= d <= 201:
         raise MeasureError('MEASURE_BAD_REQUEST', 'hole.dilate_px: entero entre 1 y 201', 400)
-    return {'persons': ps, 'dilate_px': d}
+    return {'bodies': ps, 'dilate_px': d}
 
 
 def parse_measure(raw):
@@ -560,23 +580,23 @@ def run(body):
     rgb = load_image(body)
     found = analyze(rgb)
     persons = measure_image(rgb, want, found)
+    bodies = bodies_of(found[2], found[1], found[0])
     out = {'status': 'ok', 'mode': 'measure', 'measure_version': MEASURE_VERSION,
-           'image': {'width': int(rgb.shape[1]), 'height': int(rgb.shape[0])}, 'persons': persons}
+           'image': {'width': int(rgb.shape[1]), 'height': int(rgb.shape[0])}, 'persons': persons,
+           'bodies': [{k: v for k, v in b.items() if k != 'mask_index'} for b in bodies]}
     if want.get('scene'):
         ref = load_image(want['scene'])
         out['scene'] = measure_scene(ref, rgb, analyze(ref), found)
     hole = parse_hole(body.get('hole'))
     if hole:
-        m, boxes, issues = hole_mask(found[2], found[0], found[1], hole['persons'], hole['dilate_px'])
-        if m is None:
-            raise MeasureError('HOLE_NO_PERSON_MASK', f'ninguna de las personas pedidas tiene máscara: {", ".join(issues)}', 422)
+        m, boxes = hole_mask(found[2], bodies, hole['bodies'], hole['dilate_px'])
         from PIL import Image
         img = rgb.copy()
         img[m] = HOLE_GREY
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format='JPEG', quality=90)
         out['hole'] = {'image_data_url': 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode(),
-                       'boxes': boxes, 'share': round(float(m.mean()), 4), 'issues': issues}
+                       'boxes': boxes, 'share': round(float(m.mean()), 4)}
     out['models'] = {k: v[1][:12] for k, v in MODELS.items() if k in _DET or k != 'sface'}
     out['duration_ms'] = int((time.time() - t0) * 1000)
     return out
