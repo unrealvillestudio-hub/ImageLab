@@ -6,6 +6,9 @@ QUÉ AFIRMA.
   2. Hombros / cara es la distancia pose 11-12 dividida por la cara 234-454; sin pose, NO_POSE; de perfil, NOT_FRONTAL;
      hombros poco visibles, SHOULDERS_NOT_VISIBLE.
   3. A cada cara le toca la pose cuya nariz está a menos de media cara; si no hay ninguna, -1.
+  5. Identidad (2026-11-21): cada cara recibe a lo sumo una persona de referencia y cada persona a lo sumo una cara.
+  6. La alineación a la plantilla ArcFace es exacta.
+  7. Escena: se juzga el fondo, no a quien cambia.
   4. El pelo cuenta SÓLO píxeles oscuros de la persona: el mismo pelo sobre un fondo oscuro mide igual que sobre uno claro
      (el defecto de la medida de la piel, DARK_BACKGROUND, desaparece). Pelo más ancho ⇒ width_ratio mayor.
 
@@ -64,11 +67,18 @@ def bad(raw):
 
 
 def t1():
-    assert M.parse_measure(None) == {'body': True, 'hair': True, 'dark': M.DARK_DEFAULT}
-    assert M.parse_measure({'body': True}) == {'body': True, 'hair': False, 'dark': M.DARK_DEFAULT}
+    assert M.parse_measure(None) == {'body': True, 'hair': True, 'dark': M.DARK_DEFAULT, 'identity': None, 'scene': None}
+    assert M.parse_measure({'body': True}) == {'body': True, 'hair': False, 'dark': M.DARK_DEFAULT, 'identity': None, 'scene': None}
     assert M.parse_measure({'hair': {'dark_threshold': 100}})['dark'] == 100
-    for raw in ['x', [1], {'otra': 1}, {'hair': 'si'}, {'hair': {'dark_threshold': 0}}, {'body': 'si'}]:
+    for raw in ['x', [1], {'otra': 1}, {'hair': 'si'}, {'hair': {'dark_threshold': 0}}, {'body': 'si'},
+                {'identity': 'si'}, {'identity': {'references': [{'id': 'a', 'embeddings': [[0.1] * 127]}]}},
+                {'identity': {'references': [{'id': 'a', 'embeddings': [[0.1] * 128]}, {'id': 'a', 'embeddings': [[0.1] * 128]}]}},
+                {'identity': {'threshold': 1.5}}, {'scene': {}}, {'scene': 'x'}]:
         bad(raw)
+    ok = M.parse_measure({'identity': {'references': [{'id': 'p1', 'embeddings': [[0.1] * 128]}], 'threshold': 0.4}})
+    assert ok['identity']['threshold'] == 0.4 and ok['identity']['references'][0]['id'] == 'p1' and not ok['identity']['embed']
+    assert M.parse_measure({'identity': True})['identity']['embed'] is True
+    assert M.parse_measure({'scene': {'reference_image_url': 'https://x/y.png'}})['scene']['image_url'] == 'https://x/y.png'
 
 
 def t2():
@@ -112,9 +122,55 @@ def t4():
     assert 'HAIR_NOT_DARK' in M.hair_measure(F, lum, mask, True)['issues']
 
 
+def t5():
+    # Uno a uno: gana el par más alto; la segunda cara no puede quedarse con la persona ya asignada.
+    S = [[0.95, 0.30], [0.80, 0.70], None, [0.20, 0.10]]
+    assert M.assign_identities(S, ['A', 'B'], 0.363) == ['A', 'B', None, None]
+    # Dos caras que se parecen a la misma persona: sólo una la recibe; la otra es complemento si no pasa con nadie más.
+    assert M.assign_identities([[0.9, 0.1], [0.85, 0.2]], ['A', 'B'], 0.363) == ['A', None]
+    assert M.assign_identities([[0.3]], ['A'], 0.363) == [None]
+
+
+def t6():
+    # La alineación lleva los puntos a la plantilla: con puntos ya en la plantilla, la identidad.
+    A, t = M.similarity_transform(M.ARCFACE_112, M.ARCFACE_112)
+    assert np.allclose(A, np.eye(2), atol=1e-6) and np.allclose(t, 0, atol=1e-6)
+    src = np.array(M.ARCFACE_112) * 3 + [50, 20]
+    A, t = M.similarity_transform(src, M.ARCFACE_112)
+    assert np.allclose(src @ A.T + t, M.ARCFACE_112, atol=1e-6)
+
+
+def t7():
+    rng = np.random.default_rng(7)
+
+    def textura():  # 64 × 64: ruido suavizado con una caja de 3 × 3, para que haya bordes sin rejilla fija
+        n = rng.uniform(0, 255, (66, 66))
+        return M.gradient(sum(n[i:i + 64, j:j + 64] for i in range(3) for j in range(3)) / 9)
+    escena = textura()
+    bg = np.ones((64, 64), dtype=bool)
+    bg[16:56, 24:40] = False  # la persona
+    otra_persona = escena.copy()
+    otra_persona[16:56, 24:40] = 0  # cambia sólo quien está: la misma escena
+    same = M.scene_alignment(escena, bg, [(1.0, otra_persona, bg)])
+    assert same['valid'] and same['similarity'] > 0.99 and same['shift'] == [0, 0], same
+    # La misma escena desplazada 4 píxeles: se encuentra el desplazamiento.
+    m = M.scene_alignment(escena, bg, [(1.0, np.roll(escena, 4, 1), np.roll(bg, 4, 1))])
+    assert m['similarity'] > 0.99 and m['shift'] == [4, 0], m
+    assert M.scene_alignment(escena, bg, [(1.0, textura(), bg)])['similarity'] < 0.3
+    # Con un radio de búsqueda impar, el desplazamiento cero sigue entrando: la imagen contra sí misma da 1.
+    # (68 × 68 centrada: radio 68 // 6 + 2 + 2 = 15, impar).
+    impar = np.pad(escena, 2)
+    r = M.scene_alignment(escena, bg, [(1.06, impar, np.pad(bg, 2))])
+    assert r['similarity'] > 0.99 and r['shift'] == [0, 0], r
+    assert M.scene_alignment(escena, np.zeros((64, 64), dtype=bool), [(1.0, escena, bg)])['issues'] == ['TOO_LITTLE_BACKGROUND']
+
+
 test('1 · measure: ausente mide todo; mal formado, 400 con nombre', t1)
 test('2 · hombros / cara y sus casos no válidos', t2)
 test('3 · cada cara con su pose', t3)
 test('4 · el pelo cuenta sólo la persona: fondo oscuro o claro, la misma medida', t4)
-print(f'\n{4 - len(fails)} ok, {len(fails)} fallan')
+test('5 · identidad: reparto uno a uno por coseno, el resto es complemento', t5)
+test('6 · la alineación a la plantilla ArcFace es una semejanza exacta', t6)
+test('7 · escena: cambiar sólo a la persona no la cambia; un desplazamiento se encuentra; otra escena no pasa', t7)
+print(f'\n{7 - len(fails)} ok, {len(fails)} fallan')
 sys.exit(1 if fails else 0)

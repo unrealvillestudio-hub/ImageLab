@@ -41,4 +41,4 @@ jobs:
           echo "site-packages: ${size} MB"
           test "$size" -lt 400
       - name: MediaPipe importa con los módulos vacíos y los modelos fijados cargan (sha256)
-        run: uv run python -c "import importlib.util as u; s=u.spec_from_file_location('m','api/measure.py'); m=u.module_from_spec(s); s.loader.exec_module(m); m.detectors(); print('ok', m.MEASURE_VERSION)"
+        run: uv run python -c "import importlib.util as u; s=u.spec_from_file_location('m','api/measure.py'); m=u.module_from_spec(s); s.loader.exec_module(m); m.detectors(); m.sface(); print('ok', m.MEASURE_VERSION)"
