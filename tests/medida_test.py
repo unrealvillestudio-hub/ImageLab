@@ -197,6 +197,36 @@ def t8():
         assert e.label == 'MEASURE_BAD_REQUEST'
 
 
+def t9():
+    # Los detectores se cargan los dos o ninguno: una carga a medias no deja a la instancia rota para siempre.
+    llamadas = []
+    real = M._model_path
+    try:
+        def falla_pose(key):
+            llamadas.append(key)
+            if key == 'pose':
+                raise M.MeasureError('MEASURE_MODEL_UNAVAILABLE', 'pose: timeout', 503)
+            return real(key)
+        M._model_path = falla_pose
+        M._DET.clear()
+        try:
+            M.detectors()
+            raise AssertionError('no falló')
+        except M.MeasureError:
+            pass
+        assert 'face' not in M._DET and 'pose' not in M._DET, M._DET.keys()
+        # Con 'face' sola (el estado roto de antes), la guarda vuelve a cargar en vez de caer en KeyError.
+        M._DET.clear(); M._DET['face'] = object()
+        try:
+            M.detectors()
+        except M.MeasureError:
+            pass
+        assert llamadas.count('pose') == 2, llamadas
+    finally:
+        M._model_path = real
+        M._DET.clear()
+
+
 test('1 · measure: ausente mide todo; mal formado, 400 con nombre', t1)
 test('2 · hombros / cara y sus casos no válidos', t2)
 test('3 · cada cara con su pose', t3)
@@ -205,5 +235,6 @@ test('5 · identidad: reparto uno a uno por coseno, el resto es complemento', t5
 test('6 · la alineación a la plantilla ArcFace es una semejanza exacta', t6)
 test('7 · escena: cambiar sólo a la persona no la cambia; un desplazamiento se encuentra; otra escena no pasa', t7)
 test('8 · hueco por CUERPO (también sin cara): dilatado, sin tocar al vecino; índices validados', t8)
-print(f'\n{8 - len(fails)} ok, {len(fails)} fallan')
+test('9 · detectores: los dos o ninguno; una carga a medias se reintenta', t9)
+print(f'\n{9 - len(fails)} ok, {len(fails)} fallan')
 sys.exit(1 if fails else 0)

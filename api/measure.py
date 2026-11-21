@@ -97,6 +97,9 @@ HOLE_GREY = (128, 128, 128)        # con menos fondo común que este tanto de la
 # La plantilla de ArcFace (5 puntos en 112 × 112): ojos, nariz y comisuras. SFace espera la cara alineada a ella.
 ARCFACE_112 = ((38.2946, 51.6963), (73.5318, 51.5014), (56.0252, 71.7366), (41.5493, 92.3655), (70.7299, 92.2041))
 FETCH_TIMEOUT_S = 20
+# 2026-11-21 — la descarga de un modelo en frío (el de pose pesa unos 30 MB) tiene su propio plazo, dentro de los 60 s de la
+# función: con 20 s una descarga lenta dejaba la instancia sin detectores (ver `detectors`).
+MODEL_FETCH_TIMEOUT_S = 40
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MODELS = {
     'face': ('https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
@@ -397,7 +400,7 @@ def _model_path(key):
     path = os.path.join('/tmp', f'imagelab_{key}_{sha[:12]}.task')
     if not os.path.exists(path):
         try:
-            with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as r:
+            with urllib.request.urlopen(url, timeout=MODEL_FETCH_TIMEOUT_S) as r:
                 data = r.read()
         except Exception as e:  # noqa: BLE001
             raise MeasureError('MEASURE_MODEL_UNAVAILABLE', f'{key}: {str(e)[:160]}', 503)
@@ -410,14 +413,19 @@ def _model_path(key):
 
 
 def detectors():
-    if not _DET:
+    # 2026-11-21 — LOS DOS O NINGUNO. Medido ese día en producción: una instancia respondía 500 «'pose'» a TODAS las
+    # peticiones. Antes la guarda era `if not _DET`: si la carga del modelo de pose fallaba después de cargar el de cara
+    # (descarga lenta en frío), `_DET` quedaba con 'face' sólo, la guarda ya no volvía a cargar y cada petición siguiente
+    # de esa instancia caía en `_DET['pose']`. Ahora se mira cada clave y se asignan las dos juntas, sólo si las dos cargan.
+    if 'face' not in _DET or 'pose' not in _DET:
         from mediapipe.tasks.python import BaseOptions, vision
-        _DET['face'] = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
+        face = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=_model_path('face')), num_faces=MAX_FACES,
             output_facial_transformation_matrixes=True))
-        _DET['pose'] = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+        pose = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=_model_path('pose')), num_poses=MAX_FACES,
             output_segmentation_masks=True))
+        _DET['face'], _DET['pose'] = face, pose
     return _DET['face'], _DET['pose']
 
 
