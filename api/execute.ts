@@ -3654,9 +3654,12 @@ export function replaceSideOf(box: readonly number[]): 'left' | 'center' | 'righ
   return cx < 1 / 3 ? 'left' : cx > 2 / 3 ? 'right' : 'center';
 }
 
-export interface ReplaceEntry { persona: string; box: [number, number, number, number]; side: 'left' | 'center' | 'right'; outfit: string | null }
+// 2026-11-21 — `figure`: quien entra puede ser una FIGURA sin identidad de la marca (Sam, 2026-11-20: «reemplazar al
+// hombre por un trabajador de mantenimiento de jardines»): texto de la directriz, sin foto. Entonces `persona` va vacía.
+export interface ReplaceEntry { persona: string; figure: string | null; box: [number, number, number, number]; side: 'left' | 'center' | 'right'; outfit: string | null }
 
-/** `params.replace`: [{ persona, box }]. Cada persona tiene que venir en `personas` (por nombre). Falla con nombre. */
+/** `params.replace`: [{ persona | figure, box, outfit? }]. Cada persona tiene que venir en `personas` (por nombre); una
+ *  figura es texto. Falla con nombre. */
 export function normalizeReplace(raw: unknown, personaNames: readonly string[], max: number):
   { entries: ReplaceEntry[]; error: string | null } {
   if (!Array.isArray(raw) || raw.length === 0) return { entries: [], error: 'REPLACE_BAD_REQUEST: replace debe ser una lista no vacía de { persona, box }' };
@@ -3664,18 +3667,22 @@ export function normalizeReplace(raw: unknown, personaNames: readonly string[], 
   const out: ReplaceEntry[] = [];
   for (const r of raw) {
     const name = typeof (r as any)?.persona === 'string' ? (r as any).persona.trim() : '';
+    const figRaw = (r as any)?.figure;
+    const figure = typeof figRaw === 'string' && figRaw.trim() ? figRaw.trim() : null;
     const box = (r as any)?.box;
-    if (!name || !personaNames.includes(name)) return { entries: [], error: `REPLACE_PERSONA_UNKNOWN: «${name}» no viene en personas` };
-    if (out.some((e) => e.persona === name)) return { entries: [], error: `REPLACE_BAD_REQUEST: «${name}» repetida` };
+    if (figure && name) return { entries: [], error: 'REPLACE_BAD_REQUEST: cada hueco lleva una persona o una figura, no las dos' };
+    if (figure && figure.length > 300) return { entries: [], error: 'REPLACE_BAD_REQUEST: la figura debe ser texto de hasta 300 caracteres' };
+    if (!figure && (!name || !personaNames.includes(name))) return { entries: [], error: `REPLACE_PERSONA_UNKNOWN: «${name}» no viene en personas` };
+    if (name && out.some((e) => e.persona === name)) return { entries: [], error: `REPLACE_BAD_REQUEST: «${name}» repetida` };
     if (!Array.isArray(box) || box.length !== 4 || box.some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1)
         || box[0] >= box[2] || box[1] >= box[3]) {
-      return { entries: [], error: `REPLACE_BAD_REQUEST: la caja de «${name}» debe ser [x0, y0, x1, y1] en 0..1` };
+      return { entries: [], error: `REPLACE_BAD_REQUEST: la caja de «${name || figure}» debe ser [x0, y0, x1, y1] en 0..1` };
     }
     const outfit = (r as any)?.outfit;
     if (outfit !== undefined && outfit !== null && (typeof outfit !== 'string' || outfit.length > 400)) {
-      return { entries: [], error: `REPLACE_BAD_REQUEST: el vestuario de «${name}» debe ser texto de hasta 400 caracteres` };
+      return { entries: [], error: `REPLACE_BAD_REQUEST: el vestuario de «${name || figure}» debe ser texto de hasta 400 caracteres` };
     }
-    out.push({ persona: name, box: box as [number, number, number, number], side: replaceSideOf(box), outfit: typeof outfit === 'string' && outfit.trim() ? outfit.trim() : null });
+    out.push({ persona: name, figure, box: box as [number, number, number, number], side: replaceSideOf(box), outfit: typeof outfit === 'string' && outfit.trim() ? outfit.trim() : null });
   }
   // Con dos o más huecos, el lado es RELATIVO (el de más a la izquierda, el de más a la derecha): una persona sentada con
   // las piernas hacia el otro lado tiene la caja corrida al centro (medido el 2026-11-21 en 8cde215d) y el lado absoluto
@@ -3693,7 +3700,12 @@ const REPLACE_SIDE_WORDS: Record<ReplaceEntry['side'], string> = { left: 'on the
 /** La instrucción. `people[i]` va en la imagen i + 2 (la 1 es la del hueco). `outfit` y `expression`, si hay. */
 export function replacePersonPrompt(args: {
   people: Array<{ name: string; description: string; side: ReplaceEntry['side']; outfit?: string | null; expression?: string | null;
-    role?: string | null }>;
+    role?: string | null;
+    // 2026-11-21 — la ropa de su tarjeta (`wardrobe_reference_outfit`): medido ese día en producción, la persona que entró
+    // en el hueco salió con la camiseta negra de su tarjeta aunque se pidió otra prenda. Se nombra para prohibirla.
+    avoid_outfit?: string | null;
+    // 2026-11-21 — una figura sin identidad (texto de la directriz): no tiene imagen.
+    figure?: string | null }>;
   gaze?: string | null;
 }): string {
   const many = args.people.length > 1;
@@ -3703,8 +3715,17 @@ export function replacePersonPrompt(args: {
     'Paint into the grey area ONLY. Everything outside the grey is final and stays exactly as it is in image 1: ' +
     'the place, the other people, the camera position, lens and framing, the light and colour, the furniture and every object.',
   ];
+  // Las imágenes de referencia sólo existen para las personas: la 1 es la del hueco; las personas, 2, 3…, en su orden.
+  let siguiente = 2;
+  const imgs: Array<number | null> = args.people.map((p) => (p.figure ? null : siguiente++));
   args.people.forEach((p, i) => {
-    const img = i + 2;
+    const img = imgs[i];
+    if (img === null) {
+      c.push(`Into the grey area${many ? ` ${REPLACE_SIDE_WORDS[p.side]}` : ''}, paint a new, unnamed person: ${p.figure}. ` +
+        'Same position, size and posture as the grey silhouette, doing what the scene around shows. This person is NOT anyone from the ' +
+        'reference images and must not resemble them' + (p.outfit ? `; wears ${p.outfit}.` : '.'));
+      return;
+    }
     const parts = [
       `Into the grey area${many ? ` ${REPLACE_SIDE_WORDS[p.side]}` : ''}, paint ${p.name}, the person in image ${img}, ` +
       'in the same position, size and posture as the grey silhouette, doing what the scene around shows (seated where a seat is, at the table, at the microphone, holding what is there).',
@@ -3715,10 +3736,15 @@ export function replacePersonPrompt(args: {
     if (p.role) parts.push(`${p.name} is ${p.role}: dressed and acting as that role, never in another occupation or uniform.`);
     if (p.outfit) parts.push(`${p.name} wears ${p.outfit}, never the clothes of image ${img}.`);
     else parts.push(`Never copy the clothes of image ${img}.`);
+    if (p.avoid_outfit) parts.push(`${p.name} must NOT wear ${p.avoid_outfit}.`);
     if (p.expression) parts.push(`Expression: ${p.expression}.`);
     c.push(parts.join(' '));
   });
-  c.push(`Image${many ? 's' : ''} ${args.people.map((_, i) => i + 2).join(', ')} ${many ? 'are' : 'is'} only identity reference${many ? 's' : ''}: never copy ${many ? 'their' : 'its'} background, framing, light or clothes, and never paint ${many ? 'them' : 'it'} as a second picture.`);
+  const refs = imgs.filter((x): x is number => x !== null);
+  if (refs.length) {
+    const varias = refs.length > 1;
+    c.push(`Image${varias ? 's' : ''} ${refs.join(', ')} ${varias ? 'are' : 'is'} only identity reference${varias ? 's' : ''}: never copy ${varias ? 'their' : 'its'} background, framing, light or clothes, and never paint ${varias ? 'them' : 'it'} as a second picture.`);
+  }
   c.push('Return ONE single photograph with the same framing as image 1: never a collage, grid, split screen or side-by-side. No text, letters or numbers.');
   return c.join(' ');
 }
@@ -4151,16 +4177,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const rep = normalizeReplace(params.replace, resolved.personas.map((p) => p.name), MAX_PERSONAS_PER_IMAGE);
       if (rep.error) { res.status(400).json(failurePayload(new Error(rep.error), null)); return; }
       const cls = identityCardClassFor(null, params.card_class).card_class;
-      const people = rep.entries.map((e) => ({ e, p: resolved.personas.find((x) => x.name === e.persona)! }));
+      const todos = rep.entries.map((e) => ({ e, p: e.figure ? null : resolved.personas.find((x) => x.name === e.persona)! }));
+      const people = todos.filter((x): x is { e: ReplaceEntry; p: PromptPersona } => !!x.p);
       const refs = people.map(({ p }) => personaIdentityRefs(p, cls).refs[0]).filter((u): u is string => typeof u === 'string' && !!u);
       if (refs.length !== people.length) {
         res.status(400).json(failurePayload(new Error('REPLACE_NO_IDENTITY: cada persona que entra necesita su tarjeta o una foto de referencia'), null));
         return;
       }
-      const gazeR = resolveGaze(params.gaze, people.length + 1);
+      const gazeR = resolveGaze(params.gaze, todos.length + 1);
       const finalPrompt = replacePersonPrompt({
-        people: people.map(({ e, p }) => ({ name: p.name, description: String(p.description ?? ''), side: e.side, outfit: e.outfit,
-          role: typeof p.role === 'string' && p.role.trim() ? p.role.trim() : null })),
+        people: todos.map(({ e, p }) => p ? ({ name: p.name, description: String(p.description ?? ''), side: e.side, outfit: e.outfit,
+          role: typeof p.role === 'string' && p.role.trim() ? p.role.trim() : null,
+          avoid_outfit: String(p.wardrobe_reference_outfit ?? '').trim() || null })
+          : ({ name: '', description: '', side: e.side, outfit: e.outfit, figure: e.figure })),
         gaze: gazeR.error ? null : gazeR.gaze,
       });
       fallo.promptFull = finalPrompt;
@@ -4173,7 +4202,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
           preset_used: built.presetUsed, preset_id: built.presetId, brand: built.brandName, canal: built.canal,
           model: GEMINI_IMAGE_MODEL, prompt_full: finalPrompt, prompt_builder_version: null, prompt_builder_model: null,
-          prompt_builder_usage: null, generation_mode: mode, persona_used: true, location_used: null, location_refs: 0,
+          prompt_builder_usage: null, generation_mode: mode, persona_used: people.length > 0, location_used: null, location_refs: 0,
           product_composited: false, product_in_scene: null, product_left_scene: null, product_staging: null, product_refs: 0,
           reference_images: imageUrls.length,
           personas: { personas_used: people.map(({ p }) => p.name), persona_refs: people.map(() => 1), gaze: gazeR.error ? null : gazeR.gaze,
@@ -4184,7 +4213,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           ...(personaIdsOf(people.map(({ p }) => p)).length ? { personas_used_ids: personaIdsOf(people.map(({ p }) => p)) } : {}),
         },
       };
-      console.log(`[ImageLab][REEMPLAZO] brand=${request.brandId} entran=${people.map(({ e }) => `${e.persona}@${e.side}`).join(', ')} tarjeta=${cls} prompt=${finalPrompt.length} chars`);
+      console.log(`[ImageLab][REEMPLAZO] brand=${request.brandId} entran=${todos.map(({ e }) => `${e.persona || 'figura'}@${e.side}`).join(', ')} tarjeta=${cls} prompt=${finalPrompt.length} chars`);
       await generarYEntregar(estado);
       return;
     }
