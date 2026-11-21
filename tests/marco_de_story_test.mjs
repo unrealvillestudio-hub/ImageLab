@@ -45,13 +45,13 @@ const PAL = [{ role: 'fondo', hex: '#101418' }, { role: 'brasa', hex: '#C8502A' 
 const PALTOK = { surface: 'fondo', keyword: 'brasa', progress_on: 'brasa', shade: 'noche', text: 'hueso' };
 const palBy = new Map(PAL.map((r) => [r.role, r]));
 const CATALOGO = {
-  canvas: { width: 1080, height: 1920 }, margin_pct: 7, logo_scale: 1.25, logo_min_contrast: 2.2, identity_canal: 'CAROUSEL',
+  canvas: { width: 1080, height: 1920 }, margin_pct: 7, logo_scale: 1.25, logo_min_contrast: 2.2, safe_zone_pct: { top: 13, bottom: 20 }, identity_canal: 'CAROUSEL',
   models: [
-    { id: 'solido', kind: 'solid', background: 'surface', image_width_pct: 88, logo: 'top' },
-    { id: 'degradado', kind: 'gradient', background: 'surface', background_to: 'progress_on', image_width_pct: 88, logo: 'bottom' },
+    { id: 'solido', kind: 'solid', background: 'surface', image_width_pct: 88, logo: 'below_image' },
+    { id: 'degradado', kind: 'gradient', background: 'progress_on', background_to: 'surface', image_width_pct: 88, logo: 'below_image' },
     { id: 'tarjeta', kind: 'card', background: 'surface', accent: 'keyword', shadow: { fn: 'shade', alpha: 0.6 }, radius_pct: 3.5,
       rule_width_pct: 14, rule_height_pct: 0.35, image_width_pct: 82, logo: 'top' },
-    { id: 'desenfoque', kind: 'blur', background: 'surface', veil: { fn: 'shade', alpha: 0.5 }, blur_pct: 5, image_width_pct: 92, logo: 'bottom' },
+    { id: 'desenfoque', kind: 'blur', background: 'surface', veil: { fn: 'shade', alpha: 0.5 }, blur_pct: 5, image_width_pct: 92, logo: 'below_image' },
     { id: 'franjas', kind: 'bands', background: 'surface', accent: 'progress_on', band_pct: 12, image_width_pct: 100, logo: 'band_top' },
   ],
 };
@@ -68,13 +68,14 @@ await test('1b · sin catálogo no hay marco, y un catálogo a medias dice TODO 
   assert.equal(label(() => M.resolveStoryFrameTokens({})), 'STORY_FRAME_NOT_DECLARED');
   const roto = structuredClone(CATALOGO);
   delete roto.logo_min_contrast;
+  roto.safe_zone_pct = { top: 50, bottom: 40 };
   roto.models[1].background_to = '';
   roto.models[4].band_pct = 60;
   roto.models.push({ ...roto.models[0] });
   try { M.resolveStoryFrameTokens({ story_frame: roto }); assert.fail('debía fallar'); }
   catch (e) {
     assert.equal(e.label, 'STORY_FRAME_TOKENS_INCOMPLETE');
-    for (const x of ['logo_min_contrast', 'models[1].background_to', 'models[4].band_pct', "id='solido' repetido"]) assert.ok(e.message.includes(x), `falta «${x}»`);
+    for (const x of ['logo_min_contrast', 'safe_zone_pct', 'models[1].background_to', 'models[4].band_pct', "id='solido' repetido"]) assert.ok(e.message.includes(x), `falta «${x}»`);
   }
 });
 await test("1c · 'band_top' sólo en franjas y una clase desconocida no pasa", () => {
@@ -121,16 +122,22 @@ await test('3b · el bloque del marco no escribe colores ni nombra marcas', () =
 });
 
 console.log('── 4 · la imagen entra entera ──');
+const SZ = { top: 13 * 19.2, bottom: 1920 - 20 * 19.2 };
 for (const [w, h] of [[1344, 768], [1080, 1350], [1024, 1024]]) {
-  await test(`4 · ${w}×${h}: entera, centrada, con su proporción, sin pisar el logotipo (en los cinco modelos)`, () => {
+  await test(`4 · ${w}×${h}: entera, con su proporción, centrada en ancho, imagen y logotipo dentro de las zonas seguras (salvo franjas)`, () => {
     for (const model of T.models) {
-      const p = M.storyFramePlan({ model, canvas: T.canvas, marginPct: T.margin_pct, image: { width: w, height: h }, logoHeightPx: 120 });
+      const p = M.storyFramePlan({ model, canvas: T.canvas, marginPct: T.margin_pct, image: { width: w, height: h }, logoHeightPx: 120, safeZonePct: T.safe_zone_pct });
       const im = p.image;
       assert.ok(Math.abs(im.w / im.h - w / h) < 0.01, `${model.id}: proporción`);
-      assert.ok(im.x >= 0 && im.x + im.w <= 1080.01 && im.y >= 0 && im.y + im.h <= 1920.01, `${model.id}: dentro del lienzo`);
-      assert.ok(Math.abs(im.x + im.w / 2 - 540) < 0.5 && Math.abs(im.y + im.h / 2 - 960) < 0.5, `${model.id}: centrada`);
+      assert.ok(Math.abs(im.x + im.w / 2 - 540) < 0.5, `${model.id}: centrada en ancho`);
       const lg = p.logo;
       assert.ok(lg.y + lg.h <= im.y + 0.01 || lg.y >= im.y + im.h - 0.01, `${model.id}: el logotipo no pisa la imagen`);
+      if (model.kind !== 'bands') {
+        for (const [a, b, que] of [[im.y, im.y + im.h, 'imagen'], [lg.y, lg.y + lg.h, 'logotipo']]) {
+          assert.ok(a >= SZ.top - 0.01 && b <= SZ.bottom + 0.01, `${model.id}: ${que} fuera de la zona segura (${a}..${b})`);
+        }
+      }
+      if (model.logo === 'below_image') assert.ok(Math.abs(lg.y - (im.y + im.h + p.margin)) < 0.02, `${model.id}: el logotipo va justo debajo de la imagen`);
     }
   });
 }
@@ -138,7 +145,8 @@ for (const [w, h] of [[1344, 768], [1080, 1350], [1024, 1024]]) {
 console.log('── 5 · el logotipo no se pierde ──');
 const wordmark = (color) => ({ kind: 'wordmark', sizePct: 5, parts: [{ text: 'Nombre', color: 'rgb(238, 232, 221)', scale: 1 }, { text: 'Marca', color, scale: 1 }] });
 const placeOf = (Mod, model, logo) => Mod.storyFrameLogoPlacement({ model, colors: Mod.resolveStoryFrameColors(model, PALTOK, palBy),
-  ink: Mod.storyFrameWordmarkInk(logo), minContrast: T.logo_min_contrast });
+  ink: Mod.storyFrameWordmarkInk(logo), minContrast: T.logo_min_contrast, canvasHeight: 1920,
+  centerY: (pl) => { const l = Mod.storyFramePlan({ model, canvas: T.canvas, marginPct: T.margin_pct, image: { width: 1080, height: 1080 }, logoHeightPx: 120, logoPlace: pl, safeZonePct: T.safe_zone_pct }).logo; return l.y + l.h / 2; } });
 await test('5a · una parte del logotipo en el mismo acento que la franja: pasa bajo la franja y se dice', () => {
   const r = placeOf(M, T.models[4], wordmark('rgb(200, 80, 42)'));
   assert.equal(r.place, 'below_band');
@@ -148,8 +156,12 @@ await test('5a · una parte del logotipo en el mismo acento que la franja: pasa 
   assert.ok(p.logo.y >= p.band, 'el logotipo queda fuera de la franja');
   assert.ok(p.logo.y + p.logo.h <= p.image.y + 0.01, 'y no pisa la imagen');
 });
-await test('5b · en el degradado, abajo es el acento: pasa arriba, a la superficie', () => {
-  assert.equal(placeOf(M, T.models[1], wordmark('rgb(200, 80, 42)')).place, 'top');
+await test('5b · en un degradado que acaba en el acento, el color se mide a la altura del logotipo y el logotipo sube', () => {
+  const alReves = { ...T.models[1], background: 'surface', background_to: 'progress_on', logo: 'bottom' };
+  assert.equal(placeOf(M, alReves, wordmark('rgb(200, 80, 42)')).place, 'top');
+  // El degradado del catálogo (acento arriba, oscuro abajo): bajo la imagen ya es casi la superficie y se queda.
+  assert.equal(placeOf(M, T.models[1], wordmark('rgb(200, 80, 42)')).moved, false);
+  assert.equal(M.storyFrameMixRgb('rgb(0, 0, 0)', 'rgb(200, 100, 50)', 0.5), 'rgb(100, 50, 25)');
 });
 await test('5c · un logotipo que se lee se queda donde pide el modelo; en el desenfoque no se mide', () => {
   const claro = { kind: 'wordmark', sizePct: 5, parts: [{ text: 'Marca', color: 'rgb(238, 232, 221)', scale: 1 }] };

@@ -363,6 +363,10 @@ declare const process: { env: Record<string, string | undefined> };
 //         extraídos sin cambiar lo que dibujan). Elección estable por pieza (`story_frame.seed`). EL LOGOTIPO NO SE PIERDE: si
 //         su tinta no contrasta con lo que tiene debajo (`logo_min_contrast`), pasa a la superficie y se dice. No escribe texto
 //         ni llama a ningún proveedor. Sin `mode: 'story_frame'`, toda respuesta es la de 1.24.0, byte a byte.
+//         Con la revisión de Sam del mismo día: el logotipo puede ir JUSTO DEBAJO de la imagen (`logo: 'below_image'`),
+//         imagen y logotipo respetan las zonas seguras de la plataforma (`safe_zone_pct`, dato), el color bajo el logotipo
+//         se mide a su altura (en un degradado, la mezcla a esa altura) y el logotipo en imagen se recorta a su tinta para
+//         quedar centrado de verdad.
 export const COMPOSITOR_VERSION = '1.25.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
@@ -6666,18 +6670,21 @@ function roundRect(r: PxRect): PxRect {
 // El canal de tokens del marco: la fila global (y la de cada marca, si la tiene) que declara el catálogo.
 export const STORY_FRAME_CANAL = 'STORY_FRAME';
 export const STORY_FRAME_KINDS = new Set(['solid', 'gradient', 'card', 'blur', 'bands']);
-export const STORY_FRAME_LOGO_PLACES = new Set(['top', 'bottom', 'band_top']);
+export const STORY_FRAME_LOGO_PLACES = new Set(['top', 'bottom', 'below_image', 'band_top']);
 
 export interface StoryFrameModel {
   id: string; kind: 'solid' | 'gradient' | 'card' | 'blur' | 'bands';
   // Funciones de color de `tokens.palette` (nunca un hex): fondo, segundo color del degradado, filete, franja, velo.
   background: string; background_to?: string; accent?: string; veil?: { fn: string; alpha: number };
-  image_width_pct: number; logo: 'top' | 'bottom' | 'band_top';
+  image_width_pct: number; logo: 'top' | 'bottom' | 'below_image' | 'band_top';
   radius_pct?: number; shadow?: { fn: string; alpha: number }; rule_width_pct?: number; rule_height_pct?: number;
   blur_pct?: number; band_pct?: number;
 }
 export interface StoryFrameTokens {
   canvas: { width: number; height: number }; margin_pct: number; logo_scale: number; logo_min_contrast: number;
+  // Zonas seguras del lienzo (% del alto): lo que la interfaz de la plataforma tapa arriba y abajo. Ni el logotipo ni
+  // la imagen entran ahí (salvo las franjas, que son fondo).
+  safe_zone_pct: { top: number; bottom: number };
   identity_canal: string; models: StoryFrameModel[];
 }
 
@@ -6713,6 +6720,8 @@ export function resolveStoryFrameTokens(tokens: Record<string, any>): StoryFrame
   const logoScale = s.logo_scale == null ? 1 : Number(s.logo_scale);
   if (!(logoScale > 0)) miss.push('story_frame.logo_scale (> 0)');
   const logoMin = Number(s.logo_min_contrast);
+  const szTop = Number(s.safe_zone_pct?.top); const szBottom = Number(s.safe_zone_pct?.bottom);
+  if (!(szTop >= 0 && szBottom >= 0 && szTop + szBottom < 80)) miss.push('story_frame.safe_zone_pct.top/bottom (% del alto, suma < 80)');
   if (!(logoMin >= 1 && logoMin <= 21)) miss.push('story_frame.logo_min_contrast (1..21, razón WCAG)');
   const identityCanal = typeof s.identity_canal === 'string' ? s.identity_canal.trim().toUpperCase() : '';
   if (!identityCanal) miss.push('story_frame.identity_canal (el canal cuyos tokens dan la paleta y el logotipo)');
@@ -6752,7 +6761,7 @@ export function resolveStoryFrameTokens(tokens: Record<string, any>): StoryFrame
   if (miss.length) {
     throw new CompositorError('STORY_FRAME_TOKENS_INCOMPLETE', `tokens.story_frame incompleto: ${miss.join(' · ')}`, 500);
   }
-  return { canvas: { width: W, height: H }, margin_pct: margin, logo_scale: logoScale, logo_min_contrast: logoMin, identity_canal: identityCanal, models };
+  return { canvas: { width: W, height: H }, margin_pct: margin, logo_scale: logoScale, logo_min_contrast: logoMin, safe_zone_pct: { top: szTop, bottom: szBottom }, identity_canal: identityCanal, models };
 }
 
 /** Hash FNV-1a de 32 bits. PURO. Sólo para repartir modelos de forma estable; no es seguridad. */
@@ -6800,12 +6809,16 @@ export function resolveStoryFrameColors(model: StoryFrameModel, palTok: Record<s
 
 /**
  * La geometría del marco. PURA. Todo en px del lienzo, derivado de porcentajes del dato. La imagen se encaja ENTERA
- * (nunca se recorta: trae el titular) dentro del ancho pedido y del alto que dejan libre el margen y el logotipo, y
- * queda centrada en el lienzo. En `bands`, el alto libre es el que queda entre las dos franjas.
+ * (nunca se recorta: trae el titular) dentro del ancho pedido y de la franja vertical útil: la que dejan libre las
+ * zonas seguras (`safeZonePct`, % del alto; nunca menos que el margen), las franjas y el logotipo.
+ *   · `top` / `bottom`: el logotipo en el borde de la franja útil; la imagen, centrada en lo que queda.
+ *   · `below_image`: imagen y logotipo forman un bloque (imagen, margen, logotipo) centrado en la franja útil.
+ *   · `band_top`: el logotipo dentro de la franja de arriba (las franjas son fondo y no respetan la zona segura).
  */
 export function storyFramePlan(args: {
   model: StoryFrameModel; canvas: { width: number; height: number }; marginPct: number;
   image: { width: number; height: number }; logoHeightPx: number; logoPlace?: StoryFrameLogoPlace;
+  safeZonePct?: { top: number; bottom: number };
 }): { image: { x: number; y: number; w: number; h: number }; logo: { y: number; h: number } | null; band: number; margin: number } {
   const { model, canvas } = args;
   const W = canvas.width; const H = canvas.height;
@@ -6813,23 +6826,23 @@ export function storyFramePlan(args: {
   const M = r2((args.marginPct / 100) * W);
   const L = args.logoHeightPx;
   const band = model.kind === 'bands' ? r2(((model.band_pct ?? 0) / 100) * H) : 0;
-  // Reserva vertical por lado: franja, o margen + logotipo + margen (el logotipo vive en el lado que pide el modelo,
-  // pero se reserva en los dos para que la imagen quede centrada en el lienzo).
   const place: StoryFrameLogoPlace = args.logoPlace ?? model.logo;
-  const reserve = model.kind === 'bands' ? band + M + (place === 'below_band' && L > 0 ? L + M : 0) : M + (L > 0 ? L + M : 0);
+  const sz = args.safeZonePct ?? { top: 0, bottom: 0 };
+  let top = Math.max(r2((sz.top / 100) * H), M, band ? band + M : 0);
+  let bot = H - Math.max(r2((sz.bottom / 100) * H), M, band ? band + M : 0);
+  let logo: { y: number; h: number } | null = null;
+  if (L > 0 && place === 'band_top') logo = { y: r2((band - L) / 2), h: L };
+  else if (L > 0 && (place === 'top' || place === 'below_band')) { logo = { y: r2(top), h: L }; top = top + L + M; }
+  else if (L > 0 && place === 'bottom') { logo = { y: r2(bot - L), h: L }; bot = bot - L - M; }
+  const below = L > 0 && place === 'below_image' ? L + M : 0;
   const maxW = r2((model.image_width_pct / 100) * W);
-  const maxH = Math.max(1, H - 2 * reserve);
+  const maxH = Math.max(1, bot - top - below);
   const ar = args.image.width / args.image.height;
   let w = maxW; let h = r2(w / ar);
   if (h > maxH) { h = maxH; w = r2(h * ar); }
-  const x = r2((W - w) / 2); const y = r2((H - h) / 2);
-  let logo: { y: number; h: number } | null = null;
-  if (L > 0) {
-    if (place === 'band_top') logo = { y: r2((band - L) / 2), h: L };
-    else if (place === 'below_band') logo = { y: r2(band + M), h: L };
-    else if (place === 'top') logo = { y: M, h: L };
-    else logo = { y: r2(H - M - L), h: L };
-  }
+  const x = r2((W - w) / 2);
+  const y = r2(top + (bot - top - h - below) / 2);
+  if (below) logo = { y: r2(y + h + M), h: L };
   return { image: { x, y, w, h }, logo, band, margin: M };
 }
 
@@ -6881,7 +6894,7 @@ export function buildStoryFrameScene(args: {
 // (una parte del nombre en el mismo acento que pinta el fondo), y un modelo que pone el logotipo SOBRE el acento lo borra.
 // Regla del eje: se mide la tinta del logotipo contra el color que tiene debajo; si una parte con peso no alcanza
 // `story_frame.logo_min_contrast` (dato), el logotipo pasa a la superficie y se dice. Nunca se recolorea un logotipo.
-export type StoryFrameLogoPlace = 'top' | 'bottom' | 'band_top' | 'below_band';
+export type StoryFrameLogoPlace = 'top' | 'bottom' | 'below_image' | 'band_top' | 'below_band';
 export interface StoryFrameInk { lum: number; weight: number }
 
 /** La tinta de un wordmark: un color por parte, con el peso de sus letras. PURO. La de una imagen la mide el handler. */
@@ -6905,23 +6918,41 @@ export function storyFrameInkReadable(ink: StoryFrameInk[], underColor: string, 
   return { readable: share <= 0.15, worst: Math.round(worst * 100) / 100, low_share: Math.round(share * 1000) / 1000 };
 }
 
+/** Mezcla lineal de dos colores `rgb()`/`rgba()` resueltos (sin alfa), en t ∈ [0, 1]. PURO. */
+export function storyFrameMixRgb(a: string, b: string, t: number): string {
+  const p = (c: string) => (String(c).match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
+  const [x, y] = [p(a), p(b)];
+  if (x.length < 3 || y.length < 3) throw new CompositorError('COMPOSITOR_COLOR_INVALID', `color inválido para mezclar: '${a}' / '${b}'`);
+  const k = Math.min(1, Math.max(0, t));
+  const m = x.map((v, i) => Math.round(v + (y[i] - v) * k));
+  return `rgb(${m[0]}, ${m[1]}, ${m[2]})`;
+}
+
 /**
  * Dónde va el logotipo. PURO. El sitio del modelo si se lee; si no, la superficie (`top`, o `below_band` en franjas).
- * En `blur` el fondo es la foto bajo un velo: no hay un color que medir y se respeta el modelo.
+ * El color de debajo se toma en la ALTURA del logotipo (`centerY`, que da el plan para cada sitio): en un degradado es
+ * la mezcla de sus dos colores a esa altura. En `blur` el fondo es la foto bajo un velo: no hay un color que medir y se
+ * respeta el modelo.
  */
-export function storyFrameLogoPlacement(args: { model: StoryFrameModel; colors: Record<string, string>; ink: StoryFrameInk[]; minContrast: number }):
-  { place: StoryFrameLogoPlace; moved: boolean; reason: string | null } {
+export function storyFrameLogoPlacement(args: {
+  model: StoryFrameModel; colors: Record<string, string>; ink: StoryFrameInk[]; minContrast: number;
+  canvasHeight: number; centerY: (p: StoryFrameLogoPlace) => number;
+}): { place: StoryFrameLogoPlace; moved: boolean; reason: string | null } {
   const { model, colors, ink, minContrast } = args;
   if (!ink.length || model.kind === 'blur') return { place: model.logo, moved: false, reason: null };
-  const under = (p: StoryFrameLogoPlace) => p === 'band_top' ? colors.accent : (p === 'bottom' && model.kind === 'gradient' ? colors.background_to : colors.background);
+  const under = (p: StoryFrameLogoPlace) => {
+    if (p === 'band_top') return colors.accent;
+    if (model.kind === 'gradient') return storyFrameMixRgb(colors.background, colors.background_to, args.centerY(p) / args.canvasHeight);
+    return colors.background;
+  };
   const first = storyFrameInkReadable(ink, under(model.logo), minContrast);
   if (first.readable) return { place: model.logo, moved: false, reason: null };
-  const alt: StoryFrameLogoPlace = model.kind === 'bands' ? 'below_band' : 'top';
+  const alt: StoryFrameLogoPlace = model.kind === 'bands' ? 'below_band' : (model.logo === 'top' ? 'bottom' : 'top');
   const second = storyFrameInkReadable(ink, under(alt), minContrast);
   if (!second.readable) {
     return { place: model.logo, moved: false, reason: `STORY_FRAME_LOGO_LOW_CONTRAST: el logotipo no alcanza ${minContrast}:1 ni en '${model.logo}' (${first.worst}) ni en '${alt}' (${second.worst}); queda donde pide el modelo` };
   }
-  return { place: alt, moved: true, reason: `STORY_FRAME_LOGO_MOVED: en '${model.logo}' el ${Math.round(first.low_share * 100)} % del logotipo queda bajo ${minContrast}:1 (peor ${first.worst}); va a '${alt}', sobre la superficie` };
+  return { place: alt, moved: true, reason: `STORY_FRAME_LOGO_MOVED: en '${model.logo}' el ${Math.round(first.low_share * 100)} % del logotipo queda bajo ${minContrast}:1 (peor ${first.worst}); va a '${alt}'` };
 }
 
 /** El alto del logotipo en el marco, en px (para reservar su sitio). PURO. Wordmark ⇒ su tamaño de letra. */
@@ -7762,10 +7793,21 @@ async function detectFaces(
   return out;
 }
 
+/** 1.25.0 — el logotipo en imagen, recortado a su tinta y rasterizado a `targetWidth` px de ancho (PNG). */
+async function trimLogoImage(logo: Extract<CarouselLogo, { kind: 'image' }>, targetWidth: number): Promise<CarouselLogo> {
+  const bytes = logoSrcBytes(logo.src);
+  const trimmed = await sharp(bytes, { density: 300 }).trim({ threshold: 1 }).png().toBuffer({ resolveWithObject: true });
+  const out = await sharp(trimmed.data).resize({ width: Math.min(targetWidth, trimmed.info.width * 4) }).png().toBuffer({ resolveWithObject: true });
+  return { ...logo, src: `data:image/png;base64,${out.data.toString('base64')}`, aspect: out.info.width / out.info.height };
+}
+function logoSrcBytes(src: string): Buffer {
+  const comma = src.indexOf(',');
+  return /;base64,/.test(src.slice(0, comma + 1)) ? Buffer.from(src.slice(comma + 1), 'base64') : Buffer.from(decodeURIComponent(src.slice(comma + 1)));
+}
+
 /** 1.25.0 — la tinta de un logotipo en imagen: luminancias de sus píxeles opacos, agrupadas. Sólo para medir contraste. */
 async function measureLogoInk(src: string): Promise<StoryFrameInk[]> {
-  const comma = src.indexOf(',');
-  const bytes = /;base64,/.test(src.slice(0, comma + 1)) ? Buffer.from(src.slice(comma + 1), 'base64') : Buffer.from(decodeURIComponent(src.slice(comma + 1)));
+  const bytes = logoSrcBytes(src);
   const { data, info } = await sharp(bytes, { density: 144 }).resize({ width: 240, withoutEnlargement: false }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const buckets = new Map<number, number>();
   for (let k = 0; k < info.width * info.height; k++) {
@@ -7856,21 +7898,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const colors = resolveStoryFrameColors(model, (idPicked.tokens.palette ?? {}) as Record<string, unknown>, palBy);
       const warnings: string[] = [];
       const logoFonts: Array<{ role: string; family: string; cssImport: string | null; weight: number; italic: boolean }> = [];
-      const logo = resolveCarouselLogo(await loadSignatureLogo(brandId, warnings), ((idPicked.tokens.carousel ?? {}).logo ?? {}) as Record<string, any>,
+      let logo = resolveCarouselLogo(await loadSignatureLogo(brandId, warnings), ((idPicked.tokens.carousel ?? {}).logo ?? {}) as Record<string, any>,
         typoBy, palBy, (f) => { if (!logoFonts.some((x) => x.family === f.family && x.weight === f.weight && x.italic === f.italic)) logoFonts.push(f); }, warnings);
       const bytes = body.image_data_url ? dataUrlToBytes(String(body.image_data_url)) : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
       const dims = imageDimensions(bytes);
       const { width: W, height: H } = sft.canvas;
+      // Un logotipo en imagen se recorta a su tinta (sin el margen transparente del archivo), para que quede centrado
+      // de verdad bajo la imagen. Si no se puede, se usa tal cual y se dice.
+      if (logo?.kind === 'image') {
+        try { logo = await trimLogoImage(logo, Math.round(W * 0.8)); }
+        catch (e) { warnings.push(`STORY_FRAME_LOGO_UNTRIMMED: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}; el logotipo entra con su margen`); }
+      }
       // La tinta del logotipo: la del wordmark es dato; la de una imagen se mide sobre sus píxeles opacos.
       let ink = storyFrameWordmarkInk(logo);
       if (logo?.kind === 'image') {
         try { ink = await measureLogoInk(logo.src); }
         catch (e) { warnings.push(`STORY_FRAME_LOGO_INK_UNMEASURED: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}; el logotipo queda donde pide el modelo`); }
       }
-      const placement = storyFrameLogoPlacement({ model, colors, ink, minContrast: sft.logo_min_contrast });
+      const planFor = (p?: StoryFrameLogoPlace) => storyFramePlan({ model, canvas: sft.canvas, marginPct: sft.margin_pct, image: dims,
+        logoHeightPx: storyFrameLogoHeight(logo, W, sft.logo_scale), logoPlace: p, safeZonePct: sft.safe_zone_pct });
+      const placement = storyFrameLogoPlacement({ model, colors, ink, minContrast: sft.logo_min_contrast, canvasHeight: H,
+        centerY: (p) => { const l = planFor(p).logo; return l ? l.y + l.h / 2 : 0; } });
       if (placement.reason) warnings.push(placement.reason);
-      const plan = storyFramePlan({ model, canvas: sft.canvas, marginPct: sft.margin_pct, image: dims,
-        logoHeightPx: storyFrameLogoHeight(logo, W, sft.logo_scale), logoPlace: placement.place });
+      const plan = planFor(placement.place);
       let blurSrc: string | null = null;
       if (model.kind === 'blur') {
         // Se reduce antes de desenfocar: el resultado es el mismo a la vista y cuesta una fracción.
