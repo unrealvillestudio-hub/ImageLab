@@ -181,6 +181,8 @@ function execSourceSinLienzo() {
   let s = SRC;
   s = s.replace(/  \/\/ 2026-10-31 — el lienzo se valida ANTES de pagar el constructor[^\n]*\n  const lienzoIn = leerLienzo\(body\.params\?\.canvas\);\n  if \('error' in lienzoIn\)[^\n]*\n/, '');
   s = s.replace(/      \/\/ 2026-10-31 — sólo si se pidió[^\n]*\n      \.\.\.\(lienzoIn\.lienzo \? \{ canvas: lienzoIn\.lienzo \} : \{\}\),\n/, '');
+  // 2026-11-21 — el reemplazo de persona (bloque REEMPLAZO) también lleva el lienzo a su estado, con la misma línea.
+  s = s.replace('        ...(lienzoIn.lienzo ? { canvas: lienzoIn.lienzo } : {}),\n', '');
   assert.ok(!s.includes('lienzoIn'), 'la reconstrucción quitó el lienzo del handler');
   return s;
 }

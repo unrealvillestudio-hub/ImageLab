@@ -354,7 +354,8 @@ ok('same_scene: la nota conserva la luz, sus fuentes y cada acción con su objet
     assert.ok(M.SAME_SCENE_BUILDER_NOTE.includes(w), w);
 });
 ok('same_scene: el handler exige la imagen actual y el constructor, y la imagen va sólo al constructor', () => {
-  assert.match(source, /mode === 'edit_from_current' \|\| mode === 'same_scene'\) && !params\.source_image_url/);
+  // 2026-11-21 — 'replace_person' también exige la imagen (la del hueco): la condición crece, lo que fija no cambia.
+  assert.match(source, /mode === 'edit_from_current' \|\| mode === 'same_scene' \|\| mode === 'replace_person'\) && !params\.source_image_url/);
   assert.match(source, /SAME_SCENE_WITHOUT_BUILDER/);
   assert.match(source, /\.\.\.\(mode === 'same_scene' \? \{ images: \[await fetchImageInline\(String\(params\.source_image_url\)\)\] \} : \{\}\)/);
   // 2026-10-21 (LOTE-IMAGEN) — §14.3: la lista de fotos del generador se arma UNA vez (`imageUrls`, que la llamada
@@ -362,7 +363,10 @@ ok('same_scene: el handler exige la imagen actual y el constructor, y la imagen 
   // lista sólo al editar, y es la única vía por la que una foto llega al generador.
   assert.match(source, /\.\.\.\(mode === 'edit_from_current' \? \[String\(params\.source_image_url\)\] : \[\]\),/, 'al generador sólo la manda editar');
   assert.equal((source.match(/source_image_url\)\)/g) ?? []).length, 1, 'la imagen actual sólo se baja para el constructor (same_scene)');
-  assert.match(source, /for \(const u of imageUrls\) images\.push\(await fetchImageInline\(u\)\);/, 'el generador recibe exactamente la lista');
+  // 2026-11-21 — la bajada vive en `generarYEntregar`, que recorre `estado.image_urls` (la misma lista `imageUrls`, que
+  // va en el estado): el reemplazo de persona pasa por el mismo sitio. Lo que fija no cambia.
+  assert.match(source, /image_urls: imageUrls,/, 'el estado lleva exactamente la lista');
+  assert.match(source, /for \(const u of estado\.image_urls\) images\.push\(await fetchImageInline\(u\)\);/, 'el generador recibe exactamente la lista');
 });
 
 console.log(`\n✅ prompt_builder_test — ${n} bloques OK`);

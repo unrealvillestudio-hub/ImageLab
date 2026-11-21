@@ -608,6 +608,9 @@ interface ExecuteRequest {
     marks?: Record<string, unknown> | null; // 2026-11-15 — variantes del logo por marca (`brand_assets` garment_mark); sin dato, sin pasada
     generation_mode?: GenerationMode;    // 'edit_from_current' exige `source_image_url`
     source_image_url?: string;           // la imagen actual, para editar en vez de repintar
+    // 2026-11-21 — 'replace_person': quién entra y dónde estaba quien sale (caja en 0..1). `source_image_url` es entonces la
+    // imagen CON EL HUECO (`/api/measure` → `hole`), https o data:image.
+    replace?: Array<{ persona: string; box: number[]; outfit?: string | null }>;
     prompt_only?: boolean;               // medición en seco: sintetiza y devuelve el prompt, sin imagen
     location?: PromptLocation | null;    // dato de `public.location_blueprints`, resuelto por el carril
     product_composited?: boolean;        // el compositor pegará el PNG real: el modelo no dibuja producto
@@ -1225,7 +1228,8 @@ export function composeVisualPrompt(
 // actual y la describe toma por toma con el cambio pedido; el GENERADOR pinta desde esa descripción con las fotos de
 // identidad y SIN la imagen actual (con ella, copia). Medido el 2026-10-19 en 92a24249: misma escena, Irja en el lugar de
 // la mujer. Exige `source_image_url` y el constructor (`copy_full`).
-export type GenerationMode = 'edit_from_current' | 'regenerate_full' | 'same_scene';
+// 2026-11-21 — 'replace_person': OTRA PERSONA EN EL MISMO LUGAR, pintada en el hueco que deja la que sale (bloque REEMPLAZO).
+export type GenerationMode = 'edit_from_current' | 'regenerate_full' | 'same_scene' | 'replace_person';
 
 /** Lo que el constructor recibe además en 'same_scene': cómo leer la imagen adjunta y los nombres de los lugares de
  *  la escena con los que una persona pide el cambio (Sam, 2026-10-19: «Ref1, Ref2, host y fondo»). PURA, del EJE. */
@@ -3604,6 +3608,87 @@ export function directSlotsPlan(slots: DirectSlots): { images: Array<{ mimeType:
 }
 // ── SLOTS:END ──
 
+// ── REEMPLAZO:BEGIN ── (2026-11-21) bloque PURO: «otra persona en el mismo lugar», pintada en un HUECO.
+//
+// POR QUÉ (Sam, 2026-11-21, «sí a 4 y E»): en «Arreglos», cambiar a una persona sin cambiar la escena no funcionaba.
+// Medido ese día sobre la pieza 8cde215d, contra ImageLab producción y sin escribir en ninguna pieza:
+//   · editar sobre la imagen actual conservó la escena (0,862) pero NO cambió a nadie (la misma cara: 0,413 → 0,416);
+//   · 'same_scene' (el constructor describe la escena y el generador pinta SIN la imagen actual) devolvió un collage con
+//     las fotos de referencia pegadas (escena 0,262; las caras, 0,958 y 0,964 contra sus fichas: copias);
+//   · borrar a la persona con su máscara (zona gris, `/api/measure` → `hole`) y pedir que se pinte a la nueva SÓLO en el
+//     hueco: escena 0,814, la otra persona intacta y la nueva medida como la persona pedida (0,873).
+// Este bloque arma esa petición: la imagen con el hueco primero y una tarjeta de identidad por persona después, con una
+// instrucción CORTA. No pasa por el constructor: su prompt de escena entera es justo lo que hacía repintar.
+//
+// EJE: posiciones, rótulos y la instrucción. INSTANCIA (dato del carril): quién, su descripción, su ropa y dónde estaba.
+// Ninguna marca, persona ni idioma de marca en este bloque.
+
+/** Dónde estaba la persona, por el centro de su caja (x0, y0, x1, y1 en 0..1): tercio izquierdo, centro o derecho. */
+export function replaceSideOf(box: readonly number[]): 'left' | 'center' | 'right' {
+  const cx = (Number(box[0]) + Number(box[2])) / 2;
+  return cx < 1 / 3 ? 'left' : cx > 2 / 3 ? 'right' : 'center';
+}
+
+export interface ReplaceEntry { persona: string; box: [number, number, number, number]; side: 'left' | 'center' | 'right'; outfit: string | null }
+
+/** `params.replace`: [{ persona, box }]. Cada persona tiene que venir en `personas` (por nombre). Falla con nombre. */
+export function normalizeReplace(raw: unknown, personaNames: readonly string[], max: number):
+  { entries: ReplaceEntry[]; error: string | null } {
+  if (!Array.isArray(raw) || raw.length === 0) return { entries: [], error: 'REPLACE_BAD_REQUEST: replace debe ser una lista no vacía de { persona, box }' };
+  if (raw.length > max) return { entries: [], error: `REPLACE_BAD_REQUEST: como mucho ${max} personas por imagen` };
+  const out: ReplaceEntry[] = [];
+  for (const r of raw) {
+    const name = typeof (r as any)?.persona === 'string' ? (r as any).persona.trim() : '';
+    const box = (r as any)?.box;
+    if (!name || !personaNames.includes(name)) return { entries: [], error: `REPLACE_PERSONA_UNKNOWN: «${name}» no viene en personas` };
+    if (out.some((e) => e.persona === name)) return { entries: [], error: `REPLACE_BAD_REQUEST: «${name}» repetida` };
+    if (!Array.isArray(box) || box.length !== 4 || box.some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1)
+        || box[0] >= box[2] || box[1] >= box[3]) {
+      return { entries: [], error: `REPLACE_BAD_REQUEST: la caja de «${name}» debe ser [x0, y0, x1, y1] en 0..1` };
+    }
+    const outfit = (r as any)?.outfit;
+    if (outfit !== undefined && outfit !== null && (typeof outfit !== 'string' || outfit.length > 400)) {
+      return { entries: [], error: `REPLACE_BAD_REQUEST: el vestuario de «${name}» debe ser texto de hasta 400 caracteres` };
+    }
+    out.push({ persona: name, box: box as [number, number, number, number], side: replaceSideOf(box), outfit: typeof outfit === 'string' && outfit.trim() ? outfit.trim() : null });
+  }
+  return { entries: out, error: null };
+}
+
+const REPLACE_SIDE_WORDS: Record<ReplaceEntry['side'], string> = { left: 'on the left', center: 'in the centre', right: 'on the right' };
+
+/** La instrucción. `people[i]` va en la imagen i + 2 (la 1 es la del hueco). `outfit` y `expression`, si hay. */
+export function replacePersonPrompt(args: {
+  people: Array<{ name: string; description: string; side: ReplaceEntry['side']; outfit?: string | null; expression?: string | null }>;
+  gaze?: string | null;
+}): string {
+  const many = args.people.length > 1;
+  const c: string[] = [
+    `Image 1 is a photograph in which ${many ? `${args.people.length} people were` : 'one person was'} removed: ` +
+    `${many ? 'each area where one of them was is' : 'the area where that person was is'} filled with flat grey.`,
+    'Paint into the grey area ONLY. Everything outside the grey is final and stays exactly as it is in image 1: ' +
+    'the place, the other people, the camera position, lens and framing, the light and colour, the furniture and every object.',
+  ];
+  args.people.forEach((p, i) => {
+    const img = i + 2;
+    const parts = [
+      `Into the grey area ${REPLACE_SIDE_WORDS[p.side]}, paint ${p.name}, the person in image ${img}, ` +
+      'in the same position, size and posture as the grey silhouette, doing what the scene around shows (seated where a seat is, at the table, at the microphone, holding what is there).',
+      `${p.name} must be exactly the person in image ${img}: same face, same hair, same skin and build. ${p.description}`,
+      'The head is turned at least three-quarters toward the camera, so the whole face and both eyes are visible.',
+      args.gaze === 'camera' ? 'The eyes look into the lens.' : 'The eyes look at the other person or at what the scene is about, never into the lens.',
+    ];
+    if (p.outfit) parts.push(`${p.name} wears ${p.outfit}, never the clothes of image ${img}.`);
+    else parts.push(`Never copy the clothes of image ${img}.`);
+    if (p.expression) parts.push(`Expression: ${p.expression}.`);
+    c.push(parts.join(' '));
+  });
+  c.push(`Image${many ? 's' : ''} ${args.people.map((_, i) => i + 2).join(', ')} ${many ? 'are' : 'is'} only identity reference${many ? 's' : ''}: never copy ${many ? 'their' : 'its'} background, framing, light or clothes, and never paint ${many ? 'them' : 'it'} as a second picture.`);
+  c.push('Return ONE single photograph with the same framing as image 1: never a collage, grid, split screen or side-by-side. No text, letters or numbers.');
+  return c.join(' ');
+}
+// ── REEMPLAZO:END ──
+
 interface DirectImageResult {
   image_data_url: string;
   preset_used: boolean;
@@ -4001,8 +4086,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // Sin `copy_full` no se sintetiza y el prompt es el de siempre: el cambio es inerte hasta que el
     // carril (fase 3) mande el copy entero. Con él, se sintetiza UN prompt con todo.
     const mode: GenerationMode = params.generation_mode === 'edit_from_current' || params.generation_mode === 'same_scene'
-      ? params.generation_mode : 'regenerate_full';
-    if ((mode === 'edit_from_current' || mode === 'same_scene') && !params.source_image_url) {
+      || params.generation_mode === 'replace_person' ? params.generation_mode : 'regenerate_full';
+    if ((mode === 'edit_from_current' || mode === 'same_scene' || mode === 'replace_person') && !params.source_image_url) {
       res.status(400).json(failurePayload(new Error(`EDIT_WITHOUT_SOURCE: generation_mode '${mode}' exige source_image_url`), null));
       return;
     }
@@ -4016,6 +4101,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // lista mal formada o por encima del techo es un error declarado: nunca un recorte silencioso.
     const resolved = resolvePersonas(params);
     if (resolved.error) { res.status(400).json(failurePayload(new Error(resolved.error), null)); return; }
+    // La imagen y su entrega, UNA vez por petición: la llamada directa de siempre y el reemplazo pasan por aquí.
+    const generarYEntregar = async (estado: EstadoDeImagen): Promise<void> => {
+      const images: InlineImage[] = [];
+      for (const u of estado.image_urls) images.push(await fetchImageInline(u));
+      const primera = await generarImagen(estado, images, null);
+      const entrega = await entregarImagen(estado, async () => images, primera, t0Handler, String(request.brandId), 'estandar');
+      await respondAndRecord(res, 200, body, entrega.payload, ledgerCtx);
+    };
+    // 2026-11-21 — 'replace_person' (bloque REEMPLAZO): la imagen con el hueco y una tarjeta por persona, con la instrucción
+    // corta. Ni constructor, ni lugar, ni producto: todo eso ya está en la imagen y fuera del hueco no se toca.
+    if (mode === 'replace_person') {
+      if (lote.modo === 'preparar') { res.status(400).json(failurePayload(new Error('REPLACE_NOT_BATCHABLE: el reemplazo de persona no va por lote'), null)); return; }
+      const rep = normalizeReplace(params.replace, resolved.personas.map((p) => p.name), MAX_PERSONAS_PER_IMAGE);
+      if (rep.error) { res.status(400).json(failurePayload(new Error(rep.error), null)); return; }
+      const cls = identityCardClassFor(null, params.card_class).card_class;
+      const people = rep.entries.map((e) => ({ e, p: resolved.personas.find((x) => x.name === e.persona)! }));
+      const refs = people.map(({ p }) => personaIdentityRefs(p, cls).refs[0]).filter((u): u is string => typeof u === 'string' && !!u);
+      if (refs.length !== people.length) {
+        res.status(400).json(failurePayload(new Error('REPLACE_NO_IDENTITY: cada persona que entra necesita su tarjeta o una foto de referencia'), null));
+        return;
+      }
+      const gazeR = resolveGaze(params.gaze, people.length + 1);
+      const finalPrompt = replacePersonPrompt({
+        people: people.map(({ e, p }) => ({ name: p.name, description: String(p.description ?? ''), side: e.side, outfit: e.outfit })),
+        gaze: gazeR.error ? null : gazeR.gaze,
+      });
+      fallo.promptFull = finalPrompt;
+      const imageUrls = [String(params.source_image_url), ...refs];
+      const estado: EstadoDeImagen = {
+        v: LOTE_IMAGEN_VERSION, prompt: finalPrompt, role_clause: '', negative_prompt: built.negativePrompt,
+        aspect_ratio: built.aspectRatio, image_urls: imageUrls, psycho_id: built.psychoId ?? null,
+        ...(lienzoIn.lienzo ? { canvas: lienzoIn.lienzo } : {}),
+        respuesta: {
+          output: `[IMAGE_GENERATED]\nPreset: ${built.presetId ?? '(none)'} (used=${built.presetUsed})\nAspect: ${built.aspectRatio}\nCanal: ${built.canal}`,
+          preset_used: built.presetUsed, preset_id: built.presetId, brand: built.brandName, canal: built.canal,
+          model: GEMINI_IMAGE_MODEL, prompt_full: finalPrompt, prompt_builder_version: null, prompt_builder_model: null,
+          prompt_builder_usage: null, generation_mode: mode, persona_used: true, location_used: null, location_refs: 0,
+          product_composited: false, product_in_scene: null, product_left_scene: null, product_staging: null, product_refs: 0,
+          reference_images: imageUrls.length,
+          personas: { personas_used: people.map(({ p }) => p.name), persona_refs: people.map(() => 1), gaze: gazeR.error ? null : gazeR.gaze,
+            reference_budget: imageUrls.length, references_dropped: [] },
+          overlay: null,
+          identity_card_class: cls,
+          personas_refs_used: Object.fromEntries(people.map(({ p }, i) => [p.name, [refs[i]]])),
+          ...(personaIdsOf(people.map(({ p }) => p)).length ? { personas_used_ids: personaIdsOf(people.map(({ p }) => p)) } : {}),
+        },
+      };
+      console.log(`[ImageLab][REEMPLAZO] brand=${request.brandId} entran=${people.map(({ e }) => `${e.persona}@${e.side}`).join(', ')} tarjeta=${cls} prompt=${finalPrompt.length} chars`);
+      await generarYEntregar(estado);
+      return;
+    }
     // 2026-10-04 — `scenePersonas`: las nombradas y la voz autora (`entry: "author_voice"`); sin esa
     // entrada, exactamente el filtro de mención de siempre.
     // 2026-10-05 — la directriz del tema también nombra (`sceneMentionTexts`), como en el carril.
@@ -4300,15 +4436,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
-    const images: InlineImage[] = [];
-    for (const u of imageUrls) images.push(await fetchImageInline(u));
     if (alloc.over_budget) {
-      console.warn(`[ImageLab][PERSONAS] ${images.length} imágenes de entrada sobre un presupuesto de ${alloc.budget}`);
+      console.warn(`[ImageLab][PERSONAS] ${imageUrls.length} imágenes de entrada sobre un presupuesto de ${alloc.budget}`);
     }
-
-    const primera = await generarImagen(estado, images, null);
-    const entrega = await entregarImagen(estado, async () => images, primera, t0Handler, String(request.brandId), 'estandar');
-    await respondAndRecord(res, 200, body, entrega.payload, ledgerCtx);
+    await generarYEntregar(estado);
   } catch (err) {
     await respondAndRecord(res, 500, body, logFailurePrompt(failurePayload(err, builder, fallo)), ledgerCtx);
   }
