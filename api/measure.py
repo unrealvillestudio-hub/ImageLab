@@ -627,8 +627,18 @@ class handler(BaseHTTPRequestHandler):  # noqa: N801 — nombre que exige el run
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
+        # Diagnóstico. 2026-11-21: `measure` y `hole` también por GET, como JSON en la query, para poder medir un preview
+        # con la única herramienta que lo alcanza (sólo GET). Mismas reglas que el POST.
         q = parse_qs(urlparse(self.path).query)
-        self._do({'image_url': (q.get('image_url') or [None])[0]})
+        body = {'image_url': (q.get('image_url') or [None])[0]}
+        try:
+            for k in ('measure', 'hole'):
+                if q.get(k):
+                    body[k] = json.loads(q[k][0])
+        except ValueError:
+            self._send(400, {'status': 'error', 'error_label': 'MEASURE_BAD_REQUEST', 'error': 'measure u hole no son JSON'})
+            return
+        self._do(body)
 
     def do_POST(self):  # noqa: N802
         try:
