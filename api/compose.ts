@@ -355,7 +355,15 @@ declare const process: { env: Record<string, string | undefined> };
 //         `output: 'text_layer'` la capa lleva los mismos bloques. Ver «BLOQUES A MANO» al final del bloque PURO. El
 //         número NO sube a propósito: el pedido exige que sin `blocks` la respuesta sea la misma byte a byte, y
 //         `compositor_version` viaja en cada respuesta. Sin `blocks`, nada de lo que se dibuja cambia.
-export const COMPOSITOR_VERSION = '1.24.0';
+//   1.25.0 (2026-11-21) — EL MARCO DE STORY (Sam, 2026-11-21: «las que no cubran el formato 9:16 de las stories se montan
+//         sobre un fondo de la marca»; cinco modelos aprobados el mismo día). Modo nuevo `mode: 'story_frame'`: la imagen YA
+//         compuesta de la pieza, entera y centrada, sobre un lienzo de story con fondo y logotipo de la marca. El catálogo de
+//         modelos es dato (`tokens.story_frame`, canal `STORY_FRAME`); los colores son funciones de `tokens.palette` y el
+//         logotipo es el de firma, resueltos con el mismo código que la lámina (`resolveCarouselLogo`, `carouselLogoNode`,
+//         extraídos sin cambiar lo que dibujan). Elección estable por pieza (`story_frame.seed`). EL LOGOTIPO NO SE PIERDE: si
+//         su tinta no contrasta con lo que tiene debajo (`logo_min_contrast`), pasa a la superficie y se dice. No escribe texto
+//         ni llama a ningún proveedor. Sin `mode: 'story_frame'`, toda respuesta es la de 1.24.0, byte a byte.
+export const COMPOSITOR_VERSION = '1.25.0';
 
 // Las nueve anclas. Enumeración CERRADA con fail-loud: un ancla que no está no cae a un default
 // silencioso — el token está mal escrito y hay que verlo. (La regla multimarca admite enumerar con
@@ -3133,6 +3141,67 @@ export function parseCarouselTextEffect(raw: unknown): CarouselTextEffect {
 }
 
 /**
+ * El logotipo de firma resuelto contra los tokens de tamaño (`logoTok`) y la tipografía y la paleta de la marca. PURO.
+ * TOLERANTE: sin fila ⇒ null; fila incompleta ⇒ aviso y null. Extraído de `resolveCarouselChrome` (1.25.0) para que el
+ * marco de story firme con el MISMO logotipo que la lámina; el carrusel lo llama igual que antes.
+ */
+export function resolveCarouselLogo(
+  lg: CarouselLogoIn | null, logoTok: Record<string, any>,
+  typoBy: Map<string, { role: string; font_family: string; css_import?: string | null }>, palBy: Map<string, { role: string; hex: string }>,
+  addFont: (f: { role: string; family: string; cssImport: string | null; weight: number; italic: boolean }) => void, warnings: string[],
+): CarouselLogo | null {
+  let logo: CarouselLogo | null = null;
+  if (lg) {
+    if (lg.kind === 'image') {
+      const h = Number(logoTok.height_pct);
+      const iw = Number(lg.intrinsic?.width);
+      const ih = Number(lg.intrinsic?.height);
+      const src = String(lg.src ?? '');
+      if (!/^(https:\/\/|data:image\/)/.test(src)) warnings.push('CAROUSEL_LOGO_INVALID: brand_logo.src no es https ni data:image; se compone sin logotipo');
+      else if (!Number.isFinite(h) || h <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.height_pct; se compone sin logotipo');
+      else if (!(iw > 0 && ih > 0)) warnings.push('CAROUSEL_LOGO_INVALID: no se pudieron medir las dimensiones del logotipo; se compone sin logotipo');
+      else logo = { kind: 'image', src, heightPct: h, aspect: iw / ih };
+    } else if (lg.kind === 'wordmark') {
+      const size = Number(logoTok.size_pct);
+      const parts = Array.isArray(lg.spec?.parts) ? lg.spec!.parts : [];
+      const bad: string[] = [];
+      const out = parts.map((p: any, k: number) => {
+        const text = typeof p?.text === 'string' ? p.text : '';
+        const typo = typoBy.get(String(p?.font ?? ''));
+        const color = carouselColor(p?.color, palBy, { allowHex: true, alpha: p?.alpha != null ? Number(p.alpha) : undefined });
+        if (!text) bad.push(`parts[${k}].text`);
+        if (!typo) bad.push(`parts[${k}].font='${p?.font ?? '∅'}' (rol de brand_typography)`);
+        if (!color) bad.push(`parts[${k}].color='${p?.color ?? '∅'}'`);
+        const sx = Number(p?.stretch?.x);
+        const sy = Number(p?.stretch?.y);
+        return {
+          text, family: typo ? String(typo.font_family) : '', cssImport: typo?.css_import ? String(typo.css_import) : null,
+          role: String(p?.font ?? ''), weight: Number(p?.weight ?? 400), italic: p?.style === 'italic',
+          color: color ?? '', letterSpacingEm: emValue(p?.tracking),
+          scale: Number.isFinite(Number(p?.scale)) && Number(p?.scale) > 0 ? Number(p.scale) : 1,
+          stretch: sx > 0 && sy > 0 ? { x: sx, y: sy } : null,
+          spaceBeforeEm: Number.isFinite(Number(p?.space_before)) ? Number(p.space_before) : 0,
+        };
+      });
+      if (!parts.length) bad.push('spec.parts vacío');
+      if (!Number.isFinite(size) || size <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.size_pct; se compone sin logotipo');
+      else if (bad.length) warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo (wordmark) incompleto — ${bad.join(' · ')}; se compone sin logotipo`);
+      else {
+        for (const p of out) addFont({ role: p.role, family: p.family, cssImport: p.cssImport, weight: p.weight, italic: p.italic });
+        logo = {
+          kind: 'wordmark', sizePct: size,
+          parts: out.map(({ cssImport: _c, role: _r, ...rest }) => rest),
+        };
+      }
+    } else {
+      warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo.kind='${lg.kind}' desconocido; se compone sin logotipo`);
+    }
+  }
+
+  return logo;
+}
+
+/**
  * Resuelve el «cromo» de una lámina de carrusel: colores por FUNCIÓN, familias y tamaños por ROL,
  * textos y logotipo. PURO. Devuelve `applied:false` si la marca no declara `tokens.carousel`.
  * FAIL-LOUD ACUMULATIVO para lo que la marca declaró a medias (como `resolveOverlayStyle`); el
@@ -3348,55 +3417,7 @@ export function resolveCarouselChrome(args: {
   const sub = String(args.text?.subheadline ?? '');
 
   // ── logotipo del pie: tolerante. Sin fila ⇒ sin logotipo; fila incompleta ⇒ aviso y sin logotipo ──
-  let logo: CarouselLogo | null = null;
-  const lg = args.logo ?? null;
-  const logoTok = (ct.logo ?? {}) as Record<string, any>;
-  if (lg) {
-    if (lg.kind === 'image') {
-      const h = Number(logoTok.height_pct);
-      const iw = Number(lg.intrinsic?.width);
-      const ih = Number(lg.intrinsic?.height);
-      const src = String(lg.src ?? '');
-      if (!/^(https:\/\/|data:image\/)/.test(src)) warnings.push('CAROUSEL_LOGO_INVALID: brand_logo.src no es https ni data:image; se compone sin logotipo');
-      else if (!Number.isFinite(h) || h <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.height_pct; se compone sin logotipo');
-      else if (!(iw > 0 && ih > 0)) warnings.push('CAROUSEL_LOGO_INVALID: no se pudieron medir las dimensiones del logotipo; se compone sin logotipo');
-      else logo = { kind: 'image', src, heightPct: h, aspect: iw / ih };
-    } else if (lg.kind === 'wordmark') {
-      const size = Number(logoTok.size_pct);
-      const parts = Array.isArray(lg.spec?.parts) ? lg.spec!.parts : [];
-      const bad: string[] = [];
-      const out = parts.map((p: any, k: number) => {
-        const text = typeof p?.text === 'string' ? p.text : '';
-        const typo = typoBy.get(String(p?.font ?? ''));
-        const color = carouselColor(p?.color, palBy, { allowHex: true, alpha: p?.alpha != null ? Number(p.alpha) : undefined });
-        if (!text) bad.push(`parts[${k}].text`);
-        if (!typo) bad.push(`parts[${k}].font='${p?.font ?? '∅'}' (rol de brand_typography)`);
-        if (!color) bad.push(`parts[${k}].color='${p?.color ?? '∅'}'`);
-        const sx = Number(p?.stretch?.x);
-        const sy = Number(p?.stretch?.y);
-        return {
-          text, family: typo ? String(typo.font_family) : '', cssImport: typo?.css_import ? String(typo.css_import) : null,
-          role: String(p?.font ?? ''), weight: Number(p?.weight ?? 400), italic: p?.style === 'italic',
-          color: color ?? '', letterSpacingEm: emValue(p?.tracking),
-          scale: Number.isFinite(Number(p?.scale)) && Number(p?.scale) > 0 ? Number(p.scale) : 1,
-          stretch: sx > 0 && sy > 0 ? { x: sx, y: sy } : null,
-          spaceBeforeEm: Number.isFinite(Number(p?.space_before)) ? Number(p.space_before) : 0,
-        };
-      });
-      if (!parts.length) bad.push('spec.parts vacío');
-      if (!Number.isFinite(size) || size <= 0) warnings.push('CAROUSEL_LOGO_SIZE_NOT_DECLARED: falta carousel.logo.size_pct; se compone sin logotipo');
-      else if (bad.length) warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo (wordmark) incompleto — ${bad.join(' · ')}; se compone sin logotipo`);
-      else {
-        for (const p of out) addFont({ role: p.role, family: p.family, cssImport: p.cssImport, weight: p.weight, italic: p.italic });
-        logo = {
-          kind: 'wordmark', sizePct: size,
-          parts: out.map(({ cssImport: _c, role: _r, ...rest }) => rest),
-        };
-      }
-    } else {
-      warnings.push(`CAROUSEL_LOGO_INVALID: brand_logo.kind='${lg.kind}' desconocido; se compone sin logotipo`);
-    }
-  }
+  const logo = resolveCarouselLogo(args.logo ?? null, (ct.logo ?? {}) as Record<string, any>, typoBy, palBy, addFont, warnings);
 
   const colors: Record<string, string> = {};
   for (const [element, f] of Object.entries(CAROUSEL_ELEMENT_COLOR)) colors[element] = fn[f];
@@ -3765,6 +3786,42 @@ export function carouselTextShadow(te: CarouselTextEffect, canvasWidth: number):
   return `0px 0px ${blur}px ${te.color}, 0px ${off}px ${blur}px ${te.color}`;
 }
 
+/** El nodo de satori del logotipo resuelto (imagen o wordmark), con `px` = % del ancho del lienzo. PURO. Extraído de
+ * `buildCarouselScene` (1.25.0): la lámina y el marco de story lo dibujan con el mismo código. */
+export function carouselLogoNode(logo: CarouselLogo | null, px: (pct: number) => number): Record<string, any> {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  let logoNode: Record<string, any> = { type: 'div', props: { style: { display: 'flex' } } };
+  if (logo?.kind === 'image') {
+    const h = px(logo.heightPct);
+    const w = r2(h * logo.aspect);
+    logoNode = { type: 'img', props: { src: logo.src, width: w, height: h, style: { width: w, height: h } } };
+  } else if (logo?.kind === 'wordmark') {
+    const S = px(logo.sizePct);
+    logoNode = {
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'row', alignItems: 'flex-end', lineHeight: 1 },
+        children: logo.parts.map((p) => {
+          const size = r2(S * p.scale);
+          return {
+            type: 'span',
+            props: {
+              style: {
+                fontFamily: p.family, fontWeight: p.weight, fontStyle: p.italic ? 'italic' : 'normal',
+                fontSize: size, color: p.color, letterSpacing: r2(p.letterSpacingEm * size), lineHeight: 1,
+                ...(p.spaceBeforeEm ? { marginLeft: r2(p.spaceBeforeEm * S) } : {}),
+                ...(p.stretch ? { transform: `scale(${p.stretch.x}, ${p.stretch.y})` } : {}),
+              },
+              children: p.text,
+            },
+          };
+        }),
+      },
+    };
+  }
+  return logoNode;
+}
+
 /**
  * La escena de una lámina de carrusel. PURA, misma disciplina que `buildOverlayScene`: todo se mide
  * en porcentaje del ANCHO del lienzo, y las proporciones internas (puntos, barras, separaciones) se
@@ -4116,35 +4173,7 @@ export function buildCarouselScene(args: {
   }
 
   // ── abajo: aviso de deslizar (sólo portada) + logotipo ──
-  let logoNode: Record<string, any> = { type: 'div', props: { style: { display: 'flex' } } };
-  if (chrome.logo?.kind === 'image') {
-    const h = px(chrome.logo.heightPct);
-    const w = r2(h * chrome.logo.aspect);
-    logoNode = { type: 'img', props: { src: chrome.logo.src, width: w, height: h, style: { width: w, height: h } } };
-  } else if (chrome.logo?.kind === 'wordmark') {
-    const S = px(chrome.logo.sizePct);
-    logoNode = {
-      type: 'div',
-      props: {
-        style: { display: 'flex', flexDirection: 'row', alignItems: 'flex-end', lineHeight: 1 },
-        children: chrome.logo.parts.map((p) => {
-          const size = r2(S * p.scale);
-          return {
-            type: 'span',
-            props: {
-              style: {
-                fontFamily: p.family, fontWeight: p.weight, fontStyle: p.italic ? 'italic' : 'normal',
-                fontSize: size, color: p.color, letterSpacing: r2(p.letterSpacingEm * size), lineHeight: 1,
-                ...(p.spaceBeforeEm ? { marginLeft: r2(p.spaceBeforeEm * S) } : {}),
-                ...(p.stretch ? { transform: `scale(${p.stretch.x}, ${p.stretch.y})` } : {}),
-              },
-              children: p.text,
-            },
-          };
-        }),
-      },
-    };
-  }
+  const logoNode = carouselLogoNode(chrome.logo, px);
   const swipe = slide.role === 'cover'
     ? {
       type: 'div',
@@ -6622,6 +6651,286 @@ export function layoutBlocks(args: {
 function roundRect(r: PxRect): PxRect {
   return { x0: Math.round(r.x0), y0: Math.round(r.y0), x1: Math.round(r.x1), y1: Math.round(r.y1) };
 }
+// ── 1.25.0 · MARCO DE STORY ─────────────────────────────────────────────────────────────────────────────────────
+// Sam, 2026-11-21: «las [imágenes] que no cubran el formato 9:16 de las stories se montan sobre un fondo de la marca
+// que cubra el resto. Deberás diseñar al menos 5 modelos con el visual brand id de cada marca». Aprobados el mismo día:
+// sólido, degradado, tarjeta, desenfoque y franjas.
+//
+// EJE (código): QUÉ es cada CLASE de marco (`kind`) y cómo se dibuja; cómo se elige uno por pieza (estable por semilla).
+// INSTANCIA (dato): el CATÁLOGO de modelos —qué clase, qué función de color, qué medidas— vive en
+// `imagelab_overlay_tokens.tokens.story_frame` (fila global; una marca puede sobrescribirlo con la suya), y los COLORES
+// y el LOGOTIPO son los de la marca, resueltos por las mismas funciones de `tokens.palette` y el mismo `brand_logo` que
+// la lámina de carrusel. Ningún color, tamaño ni marca vive aquí.
+//
+// La story NO escribe texto: usa la imagen ya compuesta de la pieza, que trae su titular. El compositor no redacta.
+// El canal de tokens del marco: la fila global (y la de cada marca, si la tiene) que declara el catálogo.
+export const STORY_FRAME_CANAL = 'STORY_FRAME';
+export const STORY_FRAME_KINDS = new Set(['solid', 'gradient', 'card', 'blur', 'bands']);
+export const STORY_FRAME_LOGO_PLACES = new Set(['top', 'bottom', 'band_top']);
+
+export interface StoryFrameModel {
+  id: string; kind: 'solid' | 'gradient' | 'card' | 'blur' | 'bands';
+  // Funciones de color de `tokens.palette` (nunca un hex): fondo, segundo color del degradado, filete, franja, velo.
+  background: string; background_to?: string; accent?: string; veil?: { fn: string; alpha: number };
+  image_width_pct: number; logo: 'top' | 'bottom' | 'band_top';
+  radius_pct?: number; shadow?: { fn: string; alpha: number }; rule_width_pct?: number; rule_height_pct?: number;
+  blur_pct?: number; band_pct?: number;
+}
+export interface StoryFrameTokens {
+  canvas: { width: number; height: number }; margin_pct: number; logo_scale: number; logo_min_contrast: number;
+  identity_canal: string; models: StoryFrameModel[];
+}
+
+/** Valida la petición del modo. PURO. Ausente o mal formada ⇒ 400 con etiqueta estable. */
+export function parseStoryFrameRequest(raw: unknown): { model: string | null; seed: string | null } {
+  if (raw == null) return { model: null, seed: null };
+  if (!isPlain(raw)) throw new CompositorError('STORY_FRAME_BAD_REQUEST', 'story_frame debe ser un objeto { model?, seed? }', 400);
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown, k: string) => {
+    if (v == null) return null;
+    if (typeof v !== 'string' || !v.trim()) throw new CompositorError('STORY_FRAME_BAD_REQUEST', `story_frame.${k} debe ser texto no vacío`, 400);
+    return v.trim();
+  };
+  return { model: str(r.model, 'model'), seed: str(r.seed, 'seed') };
+}
+
+/**
+ * Lee y valida `tokens.story_frame`. PURO. FAIL-LOUD ACUMULATIVO: un catálogo a medias no se compone con huecos
+ * rellenados por el motor (`STORY_FRAME_TOKENS_INCOMPLETE`, 500: es dato, no error del llamador).
+ */
+export function resolveStoryFrameTokens(tokens: Record<string, any>): StoryFrameTokens {
+  const sf = (tokens ?? {}).story_frame;
+  const miss: string[] = [];
+  if (!isPlain(sf)) {
+    throw new CompositorError('STORY_FRAME_NOT_DECLARED',
+      'no hay tokens.story_frame (ni global ni de la marca): sin catálogo de modelos no se compone un marco de story', 500);
+  }
+  const s = sf as Record<string, any>;
+  const W = Number(s.canvas?.width); const H = Number(s.canvas?.height);
+  if (!Number.isInteger(W) || W <= 0 || !Number.isInteger(H) || H <= 0) miss.push('story_frame.canvas.width/height');
+  const margin = Number(s.margin_pct);
+  if (!Number.isFinite(margin) || margin < 0) miss.push('story_frame.margin_pct');
+  const logoScale = s.logo_scale == null ? 1 : Number(s.logo_scale);
+  if (!(logoScale > 0)) miss.push('story_frame.logo_scale (> 0)');
+  const logoMin = Number(s.logo_min_contrast);
+  if (!(logoMin >= 1 && logoMin <= 21)) miss.push('story_frame.logo_min_contrast (1..21, razón WCAG)');
+  const identityCanal = typeof s.identity_canal === 'string' ? s.identity_canal.trim().toUpperCase() : '';
+  if (!identityCanal) miss.push('story_frame.identity_canal (el canal cuyos tokens dan la paleta y el logotipo)');
+  const models: StoryFrameModel[] = [];
+  const raw = Array.isArray(s.models) ? s.models : [];
+  if (!raw.length) miss.push('story_frame.models (al menos uno)');
+  const ids = new Set<string>();
+  raw.forEach((m: any, k: number) => {
+    const at = `story_frame.models[${k}]`;
+    const id = typeof m?.id === 'string' ? m.id.trim() : '';
+    if (!id) miss.push(`${at}.id`); else if (ids.has(id)) miss.push(`${at}.id='${id}' repetido`); else ids.add(id);
+    const kind = String(m?.kind ?? '');
+    if (!STORY_FRAME_KINDS.has(kind)) miss.push(`${at}.kind='${kind || '∅'}' (válidos: ${[...STORY_FRAME_KINDS].join(', ')})`);
+    const fnName = (v: unknown, f: string) => { if (typeof v !== 'string' || !v.trim()) miss.push(`${at}.${f} (función de tokens.palette)`); };
+    fnName(m?.background, 'background');
+    if (kind === 'gradient') fnName(m?.background_to, 'background_to');
+    if (kind === 'card' || kind === 'bands') fnName(m?.accent, 'accent');
+    if (kind === 'blur') {
+      fnName(m?.veil?.fn, 'veil.fn');
+      const a = Number(m?.veil?.alpha);
+      if (!(a >= 0 && a <= 1)) miss.push(`${at}.veil.alpha (0..1)`);
+      if (!(Number(m?.blur_pct) > 0)) miss.push(`${at}.blur_pct (> 0, % del ancho)`);
+    }
+    if (m?.shadow != null) {
+      fnName(m?.shadow?.fn, 'shadow.fn');
+      const a = Number(m?.shadow?.alpha);
+      if (!(a > 0 && a <= 1)) miss.push(`${at}.shadow.alpha (0 < x ≤ 1)`);
+    }
+    if (kind === 'bands' && !(Number(m?.band_pct) > 0 && Number(m?.band_pct) < 50)) miss.push(`${at}.band_pct (0 < x < 50, % del alto)`);
+    const w = Number(m?.image_width_pct);
+    if (!(w > 0 && w <= 100)) miss.push(`${at}.image_width_pct (0 < x ≤ 100)`);
+    const logo = String(m?.logo ?? '');
+    if (!STORY_FRAME_LOGO_PLACES.has(logo)) miss.push(`${at}.logo='${logo || '∅'}' (válidos: ${[...STORY_FRAME_LOGO_PLACES].join(', ')})`);
+    if (logo === 'band_top' && kind !== 'bands') miss.push(`${at}.logo='band_top' sólo aplica a kind='bands'`);
+    models.push({ ...m, id, kind, logo, image_width_pct: w } as StoryFrameModel);
+  });
+  if (miss.length) {
+    throw new CompositorError('STORY_FRAME_TOKENS_INCOMPLETE', `tokens.story_frame incompleto: ${miss.join(' · ')}`, 500);
+  }
+  return { canvas: { width: W, height: H }, margin_pct: margin, logo_scale: logoScale, logo_min_contrast: logoMin, identity_canal: identityCanal, models };
+}
+
+/** Hash FNV-1a de 32 bits. PURO. Sólo para repartir modelos de forma estable; no es seguridad. */
+export function storyFrameHash(text: string): number {
+  let h = 0x811c9dc5;
+  for (let k = 0; k < text.length; k++) { h ^= text.charCodeAt(k); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h >>> 0;
+}
+
+/**
+ * Qué modelo lleva la story. PURO. Pedido ⇒ ese (desconocido ⇒ 400). Sin pedido ⇒ el de la semilla (la pieza):
+ * la misma pieza sale siempre igual, y piezas distintas rotan por el catálogo. Sin pedido ni semilla ⇒ el primero.
+ */
+export function pickStoryFrameModel(models: StoryFrameModel[], req: { model: string | null; seed: string | null }): { model: StoryFrameModel; chosen_by: 'request' | 'seed' | 'first' } {
+  if (req.model) {
+    const m = models.find((x) => x.id === req.model);
+    if (!m) throw new CompositorError('STORY_FRAME_MODEL_UNKNOWN', `story_frame.model='${req.model}' no está en el catálogo (${models.map((x) => x.id).join(', ')})`, 400);
+    return { model: m, chosen_by: 'request' };
+  }
+  if (req.seed) return { model: models[storyFrameHash(req.seed) % models.length], chosen_by: 'seed' };
+  return { model: models[0], chosen_by: 'first' };
+}
+
+/** Los colores del modelo, por función de la paleta de la marca. PURO. Una función que no resuelve ⇒ fail-loud. */
+export function resolveStoryFrameColors(model: StoryFrameModel, palTok: Record<string, unknown>, palBy: Map<string, { role: string; hex: string }>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const miss: string[] = [];
+  const need = (slot: string, fn: string | undefined, alpha?: number) => {
+    if (!fn) return;
+    const spec = palTok[fn];
+    const role = typeof spec === 'string' ? spec : isPlain(spec) ? String(spec.role ?? '') : '';
+    const baseAlpha = isPlain(spec) && spec.alpha != null ? Number(spec.alpha) : 1;
+    const c = role ? carouselColor(role, palBy, { allowHex: false, alpha: alpha ?? baseAlpha }) : null;
+    if (c) out[slot] = c;
+    else miss.push(spec == null ? `palette.${fn} (pedida por el modelo '${model.id}')` : `brand_palette.role='${role}' (palette.${fn})`);
+  };
+  need('background', model.background);
+  need('background_to', model.background_to);
+  need('accent', model.accent);
+  if (model.veil) need('veil', model.veil.fn, model.veil.alpha);
+  if (model.shadow) need('shadow', model.shadow.fn, model.shadow.alpha);
+  if (miss.length) throw new CompositorError('COMPOSITOR_TOKENS_INCOMPLETE', `faltan colores de marca para el marco de story: ${miss.join(' · ')}`);
+  return out;
+}
+
+/**
+ * La geometría del marco. PURA. Todo en px del lienzo, derivado de porcentajes del dato. La imagen se encaja ENTERA
+ * (nunca se recorta: trae el titular) dentro del ancho pedido y del alto que dejan libre el margen y el logotipo, y
+ * queda centrada en el lienzo. En `bands`, el alto libre es el que queda entre las dos franjas.
+ */
+export function storyFramePlan(args: {
+  model: StoryFrameModel; canvas: { width: number; height: number }; marginPct: number;
+  image: { width: number; height: number }; logoHeightPx: number; logoPlace?: StoryFrameLogoPlace;
+}): { image: { x: number; y: number; w: number; h: number }; logo: { y: number; h: number } | null; band: number; margin: number } {
+  const { model, canvas } = args;
+  const W = canvas.width; const H = canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const M = r2((args.marginPct / 100) * W);
+  const L = args.logoHeightPx;
+  const band = model.kind === 'bands' ? r2(((model.band_pct ?? 0) / 100) * H) : 0;
+  // Reserva vertical por lado: franja, o margen + logotipo + margen (el logotipo vive en el lado que pide el modelo,
+  // pero se reserva en los dos para que la imagen quede centrada en el lienzo).
+  const place: StoryFrameLogoPlace = args.logoPlace ?? model.logo;
+  const reserve = model.kind === 'bands' ? band + M + (place === 'below_band' && L > 0 ? L + M : 0) : M + (L > 0 ? L + M : 0);
+  const maxW = r2((model.image_width_pct / 100) * W);
+  const maxH = Math.max(1, H - 2 * reserve);
+  const ar = args.image.width / args.image.height;
+  let w = maxW; let h = r2(w / ar);
+  if (h > maxH) { h = maxH; w = r2(h * ar); }
+  const x = r2((W - w) / 2); const y = r2((H - h) / 2);
+  let logo: { y: number; h: number } | null = null;
+  if (L > 0) {
+    if (place === 'band_top') logo = { y: r2((band - L) / 2), h: L };
+    else if (place === 'below_band') logo = { y: r2(band + M), h: L };
+    else if (place === 'top') logo = { y: M, h: L };
+    else logo = { y: r2(H - M - L), h: L };
+  }
+  return { image: { x, y, w, h }, logo, band, margin: M };
+}
+
+/** La escena de satori del marco. PURA. `blurSrc` es el fondo ya desenfocado (sólo `blur`; lo prepara el handler). */
+export function buildStoryFrameScene(args: {
+  model: StoryFrameModel; canvas: { width: number; height: number }; colors: Record<string, string>;
+  plan: ReturnType<typeof storyFramePlan>; imageSrc: string; blurSrc: string | null;
+  logo: CarouselLogo | null; logoScale: number;
+}): Record<string, any> {
+  const { model, canvas, colors, plan } = args;
+  const W = canvas.width; const H = canvas.height;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const px = (pct: number) => r2((pct / 100) * W * args.logoScale);
+  const abs = (style: Record<string, unknown>) => ({ position: 'absolute', display: 'flex', ...style });
+  const children: any[] = [];
+  if (model.kind === 'blur' && args.blurSrc) {
+    children.push({ type: 'img', props: { src: args.blurSrc, width: W, height: H, style: abs({ left: 0, top: 0, width: W, height: H }) } });
+    children.push({ type: 'div', props: { style: abs({ left: 0, top: 0, width: W, height: H, backgroundColor: colors.veil }) } });
+  }
+  if (model.kind === 'bands') {
+    children.push({ type: 'div', props: { style: abs({ left: 0, top: 0, width: W, height: plan.band, backgroundColor: colors.accent }) } });
+    children.push({ type: 'div', props: { style: abs({ left: 0, top: r2(H - plan.band), width: W, height: plan.band, backgroundColor: colors.accent }) } });
+  }
+  const im = plan.image;
+  const card = model.kind === 'card';
+  const radius = card ? r2(((model.radius_pct ?? 0) / 100) * W) : 0;
+  // La sombra de la tarjeta: color y alfa de la marca (dato); caída y desenfoque, geometría (% del ancho).
+  const shadow = card && colors.shadow ? `0px ${r2(W * 0.012)}px ${r2(W * 0.04)}px ${colors.shadow}` : null;
+  children.push({ type: 'img', props: { src: args.imageSrc, width: im.w, height: im.h,
+    style: abs({ left: im.x, top: im.y, width: im.w, height: im.h, objectFit: 'contain',
+      ...(radius ? { borderRadius: radius } : {}), ...(shadow ? { boxShadow: shadow } : {}) }) } });
+  if (card && colors.accent) {
+    // El filete de acento: bajo la tarjeta, centrado. Sus medidas son dato (% del ancho y del alto del lienzo).
+    const rw = r2(((model.rule_width_pct ?? 0) / 100) * W);
+    const rh = Math.max(1, r2(((model.rule_height_pct ?? 0) / 100) * H));
+    if (rw > 0) children.push({ type: 'div', props: { style: abs({ left: r2((W - rw) / 2), top: r2(im.y + im.h + plan.margin / 2), width: rw, height: rh, backgroundColor: colors.accent }) } });
+  }
+  if (plan.logo && args.logo) {
+    children.push({ type: 'div', props: { style: abs({ left: 0, top: plan.logo.y, width: W, height: plan.logo.h, justifyContent: 'center', alignItems: 'center' }),
+      children: [carouselLogoNode(args.logo, px)] } });
+  }
+  const bg = model.kind === 'gradient'
+    ? { backgroundImage: `linear-gradient(180deg, ${colors.background}, ${colors.background_to})` }
+    : { backgroundColor: colors.background };
+  return { type: 'div', props: { style: { display: 'flex', position: 'relative', width: W, height: H, ...bg }, children } };
+}
+
+// EL LOGOTIPO NO SE PIERDE (medido en la hoja de muestra, 2026-11-21): los logotipos de marca usan sus propios acentos
+// (una parte del nombre en el mismo acento que pinta el fondo), y un modelo que pone el logotipo SOBRE el acento lo borra.
+// Regla del eje: se mide la tinta del logotipo contra el color que tiene debajo; si una parte con peso no alcanza
+// `story_frame.logo_min_contrast` (dato), el logotipo pasa a la superficie y se dice. Nunca se recolorea un logotipo.
+export type StoryFrameLogoPlace = 'top' | 'bottom' | 'band_top' | 'below_band';
+export interface StoryFrameInk { lum: number; weight: number }
+
+/** La tinta de un wordmark: un color por parte, con el peso de sus letras. PURO. La de una imagen la mide el handler. */
+export function storyFrameWordmarkInk(logo: CarouselLogo | null): StoryFrameInk[] {
+  if (!logo || logo.kind !== 'wordmark') return [];
+  return logo.parts.map((p) => ({ lum: relLuminanceHex(p.color), weight: Math.max(1, p.text.trim().length) * p.scale }));
+}
+
+/** ¿Se lee la tinta sobre ese fondo? PURO. Ilegible si más del 15 % del peso queda bajo el contraste mínimo. */
+export function storyFrameInkReadable(ink: StoryFrameInk[], underColor: string, minContrast: number): { readable: boolean; worst: number; low_share: number } {
+  if (!ink.length) return { readable: true, worst: 21, low_share: 0 };
+  const bg = relLuminanceHex(underColor);
+  const total = ink.reduce((a, i) => a + i.weight, 0);
+  let low = 0; let worst = 21;
+  for (const i of ink) {
+    const c = contrastRatio(i.lum, bg);
+    worst = Math.min(worst, c);
+    if (c < minContrast) low += i.weight;
+  }
+  const share = total > 0 ? low / total : 0;
+  return { readable: share <= 0.15, worst: Math.round(worst * 100) / 100, low_share: Math.round(share * 1000) / 1000 };
+}
+
+/**
+ * Dónde va el logotipo. PURO. El sitio del modelo si se lee; si no, la superficie (`top`, o `below_band` en franjas).
+ * En `blur` el fondo es la foto bajo un velo: no hay un color que medir y se respeta el modelo.
+ */
+export function storyFrameLogoPlacement(args: { model: StoryFrameModel; colors: Record<string, string>; ink: StoryFrameInk[]; minContrast: number }):
+  { place: StoryFrameLogoPlace; moved: boolean; reason: string | null } {
+  const { model, colors, ink, minContrast } = args;
+  if (!ink.length || model.kind === 'blur') return { place: model.logo, moved: false, reason: null };
+  const under = (p: StoryFrameLogoPlace) => p === 'band_top' ? colors.accent : (p === 'bottom' && model.kind === 'gradient' ? colors.background_to : colors.background);
+  const first = storyFrameInkReadable(ink, under(model.logo), minContrast);
+  if (first.readable) return { place: model.logo, moved: false, reason: null };
+  const alt: StoryFrameLogoPlace = model.kind === 'bands' ? 'below_band' : 'top';
+  const second = storyFrameInkReadable(ink, under(alt), minContrast);
+  if (!second.readable) {
+    return { place: model.logo, moved: false, reason: `STORY_FRAME_LOGO_LOW_CONTRAST: el logotipo no alcanza ${minContrast}:1 ni en '${model.logo}' (${first.worst}) ni en '${alt}' (${second.worst}); queda donde pide el modelo` };
+  }
+  return { place: alt, moved: true, reason: `STORY_FRAME_LOGO_MOVED: en '${model.logo}' el ${Math.round(first.low_share * 100)} % del logotipo queda bajo ${minContrast}:1 (peor ${first.worst}); va a '${alt}', sobre la superficie` };
+}
+
+/** El alto del logotipo en el marco, en px (para reservar su sitio). PURO. Wordmark ⇒ su tamaño de letra. */
+export function storyFrameLogoHeight(logo: CarouselLogo | null, width: number, logoScale: number): number {
+  if (!logo) return 0;
+  const pct = logo.kind === 'image' ? logo.heightPct : logo.sizePct * Math.max(1, ...logo.parts.map((p) => p.scale));
+  return Math.round(((pct / 100) * width * logoScale) * 100) / 100;
+}
+
 // ── COMPOSITOR:END ──
 
 // ── Transporte (impuro) ────────────────────────────────────────────────────
@@ -7453,6 +7762,22 @@ async function detectFaces(
   return out;
 }
 
+/** 1.25.0 — la tinta de un logotipo en imagen: luminancias de sus píxeles opacos, agrupadas. Sólo para medir contraste. */
+async function measureLogoInk(src: string): Promise<StoryFrameInk[]> {
+  const comma = src.indexOf(',');
+  const bytes = /;base64,/.test(src.slice(0, comma + 1)) ? Buffer.from(src.slice(comma + 1), 'base64') : Buffer.from(decodeURIComponent(src.slice(comma + 1)));
+  const { data, info } = await sharp(bytes, { density: 144 }).resize({ width: 240, withoutEnlargement: false }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const buckets = new Map<number, number>();
+  for (let k = 0; k < info.width * info.height; k++) {
+    const o = k * info.channels;
+    if (data[o + 3] < 160) continue;
+    const lum = relLuminanceRgb(data[o], data[o + 1], data[o + 2]);
+    const key = Math.round(lum * 50) / 50;
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  }
+  return [...buckets.entries()].map(([lum, weight]) => ({ lum, weight }));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v);
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
@@ -7501,6 +7826,77 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
       res.status(200).json({ status: 'ok', mode: 'faces', faces: facesOut, image: { width: dims.width, height: dims.height },
         model: fc.model, model_source: fc.model_source ?? null, usage: fc.usage, duration_ms: Date.now() - t0 });
+    } catch (err) {
+      const e = err instanceof CompositorError ? err : null;
+      res.status(e?.status ?? 500).json({ status: 'error', error_label: e?.label ?? 'COMPOSITOR_FAILED', error: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
+  // 1.25.0 — MODO `story_frame`: la imagen ya compuesta de la pieza, montada en el lienzo de story sobre un fondo de la
+  // marca. No llama a ningún proveedor (no hay gasto que asentar) y no escribe texto.
+  if (body.mode === 'story_frame') {
+    try {
+      const brandId = String(body.brand_id ?? '').trim();
+      if (!brandId) throw new CompositorError('COMPOSITOR_BRAND_MISSING', 'brand_id es obligatorio: el fondo y el logotipo son de la marca', 400);
+      const sfReq = parseStoryFrameRequest(body.story_frame);
+      if (!(body.image_data_url || body.image_url)) {
+        throw new CompositorError('COMPOSITOR_IMAGE_MISSING', 'falta image_data_url o image_url (la imagen compuesta de la pieza)', 400);
+      }
+      const [sfRows, sfTypography, sfPalette] = await Promise.all([
+        sbSelect(`imagelab_overlay_tokens?or=(brand_id.eq.${encodeURIComponent(brandId)},brand_id.is.null)&select=id,brand_id,canal,tokens,active`),
+        sbSelect(`brand_typography?brand_id=eq.${encodeURIComponent(brandId)}&select=role,font_family,css_import,fallback`),
+        sbSelect(`brand_palette?brand_id=eq.${encodeURIComponent(brandId)}&select=role,hex`),
+      ]);
+      const sfPicked = pickOverlayTokens(sfRows as any[], brandId, STORY_FRAME_CANAL);
+      const sft = resolveStoryFrameTokens(sfPicked.tokens);
+      const idPicked = pickOverlayTokens(sfRows as any[], brandId, sft.identity_canal);
+      const palBy = new Map((sfPalette as any[]).map((r) => [String(r.role), r]));
+      const typoBy = new Map((sfTypography as any[]).map((r) => [String(r.role), r]));
+      const { model, chosen_by } = pickStoryFrameModel(sft.models, sfReq);
+      const colors = resolveStoryFrameColors(model, (idPicked.tokens.palette ?? {}) as Record<string, unknown>, palBy);
+      const warnings: string[] = [];
+      const logoFonts: Array<{ role: string; family: string; cssImport: string | null; weight: number; italic: boolean }> = [];
+      const logo = resolveCarouselLogo(await loadSignatureLogo(brandId, warnings), ((idPicked.tokens.carousel ?? {}).logo ?? {}) as Record<string, any>,
+        typoBy, palBy, (f) => { if (!logoFonts.some((x) => x.family === f.family && x.weight === f.weight && x.italic === f.italic)) logoFonts.push(f); }, warnings);
+      const bytes = body.image_data_url ? dataUrlToBytes(String(body.image_data_url)) : await fetchBytes(String(body.image_url), 'COMPOSITOR_IMAGE_FETCH_FAILED');
+      const dims = imageDimensions(bytes);
+      const { width: W, height: H } = sft.canvas;
+      // La tinta del logotipo: la del wordmark es dato; la de una imagen se mide sobre sus píxeles opacos.
+      let ink = storyFrameWordmarkInk(logo);
+      if (logo?.kind === 'image') {
+        try { ink = await measureLogoInk(logo.src); }
+        catch (e) { warnings.push(`STORY_FRAME_LOGO_INK_UNMEASURED: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}; el logotipo queda donde pide el modelo`); }
+      }
+      const placement = storyFrameLogoPlacement({ model, colors, ink, minContrast: sft.logo_min_contrast });
+      if (placement.reason) warnings.push(placement.reason);
+      const plan = storyFramePlan({ model, canvas: sft.canvas, marginPct: sft.margin_pct, image: dims,
+        logoHeightPx: storyFrameLogoHeight(logo, W, sft.logo_scale), logoPlace: placement.place });
+      let blurSrc: string | null = null;
+      if (model.kind === 'blur') {
+        // Se reduce antes de desenfocar: el resultado es el mismo a la vista y cuesta una fracción.
+        const k = 4;
+        const sigma = Math.max(0.3, (((model.blur_pct ?? 0) / 100) * W) / k);
+        const blurred = await sharp(Buffer.from(bytes)).resize(Math.round(W / k), Math.round(H / k), { fit: 'cover' })
+          .blur(sigma).resize(W, H).jpeg({ quality: 86 }).toBuffer();
+        blurSrc = `data:image/jpeg;base64,${b64(new Uint8Array(blurred))}`;
+      }
+      const fonts = await Promise.all(logoFonts.map((f) => loadFont(`story_frame:${f.role}`, { ...f, fontUrl: null })));
+      const scene = buildStoryFrameScene({ model, canvas: sft.canvas, colors, plan, imageSrc: `data:${dims.mime};base64,${b64(bytes)}`,
+        blurSrc, logo, logoScale: sft.logo_scale });
+      const svg = await satori(scene as any, { width: W, height: H,
+        fonts: fonts.map((f) => ({ name: f.name, data: Buffer.from(f.data), weight: f.weight as any, style: f.style })) });
+      const png = new Resvg(svg, { fitTo: { mode: 'original' } }).render().asPng();
+      console.log(`[Compositor][STORY] brand=${brandId} piece=${body.piece_id ?? '∅'} modelo=${model.id} (${chosen_by}) ` +
+        `imagen=${dims.width}x${dims.height} logotipo=${logo ? logo.kind : 'ninguno'} avisos=${warnings.length} ${Date.now() - t0}ms`);
+      res.status(200).json({
+        status: 'ok', mode: 'story_frame',
+        image_data_url: `data:image/png;base64,${b64(new Uint8Array(png))}`,
+        compositor_version: COMPOSITOR_VERSION, width: W, height: H,
+        tokens_layers: { story_frame: sfPicked.layers, identity: idPicked.layers },
+        meta: { story_frame: { model: model.id, kind: model.kind, chosen_by, image: { width: dims.width, height: dims.height },
+          placed: plan.image, logo: logo ? logo.kind : null, logo_place: logo ? placement.place : null, logo_moved: placement.moved }, warnings },
+        duration_ms: Date.now() - t0,
+      });
     } catch (err) {
       const e = err instanceof CompositorError ? err : null;
       res.status(e?.status ?? 500).json({ status: 'error', error_label: e?.label ?? 'COMPOSITOR_FAILED', error: err instanceof Error ? err.message : String(err) });
