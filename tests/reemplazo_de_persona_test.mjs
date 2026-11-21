@@ -126,6 +126,32 @@ await test('5 · handler: sin hueco, persona desconocida o sin foto de identidad
   } finally { restore(); }
 });
 
+await test('6a · una FIGURA sin identidad entra en el hueco sin imagen; la persona no lleva la ropa de su tarjeta', () => {
+  const r = M.normalizeReplace([{ figure: 'a garden maintenance worker in work clothes', box: [0.1, 0.1, 0.5, 0.9] }], [], 3);
+  assert.equal(r.error, null); assert.deepEqual([r.entries[0].persona, r.entries[0].figure], ['', 'a garden maintenance worker in work clothes']);
+  assert.match(M.normalizeReplace([{ persona: 'Ana', figure: 'x', box: [0, 0, 1, 1] }], ['Ana'], 3).error, /una persona o una figura/);
+  const p = M.replacePersonPrompt({ people: [
+    { name: '', description: '', side: 'left', figure: 'a garden maintenance worker' },
+    { name: 'Ana', description: 'D.', side: 'right', avoid_outfit: 'the plain black crew-neck T-shirt of her reference set' },
+  ] });
+  assert.match(p, /grey area on the left, paint a new, unnamed person: a garden maintenance worker/);
+  assert.match(p, /paint Ana, the person in image 2/, 'la figura no consume imagen: Ana es la 2');
+  assert.match(p, /Ana must NOT wear the plain black crew-neck T-shirt of her reference set/);
+  assert.match(p, /Image 2 is only identity reference/);
+});
+
+await test('6b · handler: sólo una figura (quitar a alguien y poner a otra persona sin identidad): sin tarjetas, el hueco solo', async () => {
+  const restore = silence(); let r;
+  try {
+    r = await run(handler, req({ personas: [], generation_mode: 'replace_person', source_image_url: HUECO,
+      replace: [{ figure: 'a garden maintenance worker', box: [0.3, 0.2, 0.7, 0.95] }] }), { db: DB });
+  } finally { restore(); }
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const imgs = r.vertexImage.contents[0].parts.filter((x) => x.inlineData);
+  assert.equal(imgs.length, 1, 'sólo la imagen con el hueco');
+  assert.equal(r.json.persona_used, false);
+});
+
 await test('6 · el bloque no nombra marcas ni personas', () => {
   assert.ok(!/ForumPHs|NeuroneSCF|Unrealville|Irja|Itzel|Ivette|Patricia|Sam Moreno/i.test(bloque));
 });
