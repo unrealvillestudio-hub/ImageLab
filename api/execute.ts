@@ -1298,6 +1298,9 @@ export interface PromptPersona {
   // 2026-10-11 — la ropa que lleva en sus fotos de referencia (`wardrobe_catalog.reference_outfit`). Con
   // ella, el motor repone que no la lleve (`personaReferenceOutfitClause`). Sin ella, nada cambia.
   wardrobe_reference_outfit?: string | null;
+  // 2026-11-21 — ROL: quién es esta persona en la marca (dato del carril, `brand_persons`; p. ej. un cargo). Con dato, el
+  // motor repone que nunca se la pinte con otro oficio (`personaRoleClause`). Sin dato, nada cambia.
+  role?: string | null;
   // 2026-10-04 — POR QUÉ la manda el carril. Sólo `PERSONA_ENTRY_AUTHOR_VOICE` cambia algo (la exime
   // del filtro de mención); cualquier otro valor, o ninguno, es la regla de mención de siempre.
   // 2026-10-09 — `PERSONA_ENTRY_SCENE_PROTAGONIST` también la exime, y además repone la cláusula de
@@ -1771,6 +1774,23 @@ export function wardrobeChoicesFor(persona: PromptPersona | null | undefined, mo
     if (c) out.push({ when: w.when.trim(), ...c });
   });
   return out;
+}
+
+/** La cláusula del motor: la persona es quien es en la marca y no hace otro oficio en la escena. En inglés, como el resto.
+ *  Medido el 2026-11-20 (pieza e82dea93): con su cara y sin su rol, el generador puso a una persona de la marca en el
+ *  único papel de la escena, el de jardinero. Otra persona del mismo set llevaba su cargo en la descripción y nunca pasó. */
+export function personaRoleClause(name: string, role: string): string {
+  const n = String(name ?? '').trim();
+  return `${n} is ${String(role ?? '').trim()}: show ${n} only as that, dressed and acting as that role; never depict ${n} ` +
+    'in another occupation, uniform, trade or job, never doing manual or service work that is not that role. If the scene ' +
+    `needs someone in another occupation, that is a different, unnamed person, never ${n}`;
+}
+
+/** Las personas en escena con su rol declarado. */
+export function personaRolesOf(personas: PromptPersona[]): Array<{ name: string; role: string }> {
+  return personas
+    .filter((p) => !!p?.name?.trim() && !!String(p.role ?? '').trim())
+    .map((p) => ({ name: p.name.trim(), role: String(p.role).trim() }));
 }
 
 /** La cláusula del motor: la persona no lleva la ropa de sus fotos. En inglés, como el resto. */
@@ -2471,6 +2491,8 @@ export function engineClausesFor(args: {
   outfitAvoid?: Array<{ name: string; outfit: string }> | null;
   /** 2026-10-22 — el lugar evocado (`locationEvokeClause`). Ausente: la lista de antes. */
   locationEvoke?: { name: string; refs: number; avoid?: string[] | null } | null;
+  /** 2026-11-21 — el rol de cada persona en escena (`personaRolesOf`). Ausente o vacío: la lista de antes. */
+  roles?: Array<{ name: string; role: string }> | null;
 }): string[] {
   const n = args.personaCount;
   const edit = args.mode === 'edit_from_current';
@@ -2489,6 +2511,9 @@ export function engineClausesFor(args: {
     // Al editar no: la ropa de la imagen actual se conserva.
     ...(edit ? [] : (args.outfitAvoid ?? []).filter((o) => o?.name?.trim() && o?.outfit?.trim())
       .map((o) => personaReferenceOutfitClause(o.name, o.outfit))),
+    // 2026-11-21 — también al editar: el oficio de una persona de la marca no cambia con la escena (Sam, 2026-11-20: la voz
+    // de marca, socio de la empresa, salió de jardinero porque la escena pedía un jardinero y su rol no viajaba).
+    ...(args.roles ?? []).filter((r) => r?.name?.trim() && r?.role?.trim()).map((r) => personaRoleClause(r.name, r.role)),
     ...(n > 0 && !same ? [gazeClause(args.gaze, n)] : []),
     ...(args.productInScene && !edit ? [productAngleClause(args.angleSeed)] : []),
     ...(args.productComposited && !args.productInScene ? [PRODUCT_COMPOSITED_CLAUSE] : []),
@@ -3667,7 +3692,8 @@ const REPLACE_SIDE_WORDS: Record<ReplaceEntry['side'], string> = { left: 'on the
 
 /** La instrucción. `people[i]` va en la imagen i + 2 (la 1 es la del hueco). `outfit` y `expression`, si hay. */
 export function replacePersonPrompt(args: {
-  people: Array<{ name: string; description: string; side: ReplaceEntry['side']; outfit?: string | null; expression?: string | null }>;
+  people: Array<{ name: string; description: string; side: ReplaceEntry['side']; outfit?: string | null; expression?: string | null;
+    role?: string | null }>;
   gaze?: string | null;
 }): string {
   const many = args.people.length > 1;
@@ -3686,6 +3712,7 @@ export function replacePersonPrompt(args: {
       'The head is turned at least three-quarters toward the camera, so the whole face and both eyes are visible.',
       args.gaze === 'camera' ? 'The eyes look into the lens.' : 'The eyes look at the other person or at what the scene is about, never into the lens.',
     ];
+    if (p.role) parts.push(`${p.name} is ${p.role}: dressed and acting as that role, never in another occupation or uniform.`);
     if (p.outfit) parts.push(`${p.name} wears ${p.outfit}, never the clothes of image ${img}.`);
     else parts.push(`Never copy the clothes of image ${img}.`);
     if (p.expression) parts.push(`Expression: ${p.expression}.`);
@@ -4132,7 +4159,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
       const gazeR = resolveGaze(params.gaze, people.length + 1);
       const finalPrompt = replacePersonPrompt({
-        people: people.map(({ e, p }) => ({ name: p.name, description: String(p.description ?? ''), side: e.side, outfit: e.outfit })),
+        people: people.map(({ e, p }) => ({ name: p.name, description: String(p.description ?? ''), side: e.side, outfit: e.outfit,
+          role: typeof p.role === 'string' && p.role.trim() ? p.role.trim() : null })),
         gaze: gazeR.error ? null : gazeR.gaze,
       });
       fallo.promptFull = finalPrompt;
@@ -4307,6 +4335,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         protagonist: sceneProtagonistOf(usedPersonas)?.name ?? null,
         anchored: faceAnchoredNames(usedPersonas, alloc.persona),
         outfitAvoid: referenceOutfitsOf(usedPersonas),
+        roles: personaRolesOf(usedPersonas),
         ...(locationEvoke ? { locationEvoke: { name: location!.name, refs: alloc.location.length, avoid: normalizeLocationAvoid(location!.avoid) } } : {}),
       }));
       builder = { version: v.version, model: v.model_id, usage: synth.usage };
@@ -4318,6 +4347,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // Sin síntesis, la protagonista de la marca también viaja: es la cláusula que evita el parecido.
     const protagonistSinSintesis = !builder ? sceneProtagonistOf(usedPersonas) : null;
     if (protagonistSinSintesis) finalPrompt = enforceEngineClauses(finalPrompt, [sceneProtagonistClause(protagonistSinSintesis.name)]);
+    // 2026-11-21 — sin síntesis, el rol también viaja: es la cláusula que evita que la escena le dé otro oficio.
+    if (!builder && personaRolesOf(usedPersonas).length) {
+      finalPrompt = enforceEngineClauses(finalPrompt, personaRolesOf(usedPersonas).map((r) => personaRoleClause(r.name, r.role)));
+    }
 
     // Medición en seco: el prompt y su coste, sin pagar una imagen.
     if (params.prompt_only === true) {

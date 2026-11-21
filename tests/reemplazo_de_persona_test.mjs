@@ -62,7 +62,7 @@ await test('2 · replace mal formado falla con nombre; bien formado conserva ord
 
 await test('3 · la instrucción: sólo el hueco, cada persona con SU imagen, su ropa, cara visible y nunca un collage', () => {
   const p = M.replacePersonPrompt({ people: [
-    { name: 'Ana', description: 'DESC-ANA.', side: 'right', outfit: 'a navy knit top', expression: 'calm half-smile' },
+    { name: 'Ana', description: 'DESC-ANA.', side: 'right', outfit: 'a navy knit top', expression: 'calm half-smile', role: 'the head of operations' },
     { name: 'Beto', description: 'DESC-BETO.', side: 'left' },
   ], gaze: 'each_other' });
   assert.match(p, /Paint into the grey area ONLY/);
@@ -71,6 +71,8 @@ await test('3 · la instrucción: sólo el hueco, cada persona con SU imagen, su
   assert.match(p, /DESC-ANA\./); assert.match(p, /DESC-BETO\./);
   assert.match(p, /Ana wears a navy knit top, never the clothes of image 2/);
   assert.match(p, /Never copy the clothes of image 3/);
+  assert.match(p, /Ana is the head of operations: dressed and acting as that role/);
+  assert.ok(!/Beto is /.test(p), 'sin rol, no se inventa uno');
   assert.match(p, /both eyes are visible/);
   assert.match(p, /never into the lens/);
   assert.match(p, /never a collage/);
