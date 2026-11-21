@@ -165,6 +165,35 @@ def t7():
     assert M.scene_alignment(escena, np.zeros((64, 64), dtype=bool), [(1.0, escena, bg)])['issues'] == ['TOO_LITTLE_BACKGROUND']
 
 
+def t8():
+    # Dos personas: la de la derecha (índice 1 de izquierda a derecha) se tapa; su caja y la dilatación se respetan.
+    H, W = 200, 300
+    izq, der = np.zeros((H, W), bool), np.zeros((H, W), bool)
+    izq[40:180, 40:110] = True
+    der[40:180, 190:260] = True
+    faces = [(face(cx=225, cy=60, fw=40, fh=50), 0.0), (face(cx=75, cy=60, fw=40, fh=50), 0.0)]   # desordenadas
+    poses = [pose(cx=75, cy=60), pose(cx=225, cy=60)]
+    m, boxes, issues = M.hole_mask([izq, der], faces, poses, [1], 5)
+    assert not issues and boxes == [[round(190 / W, 4), round(40 / H, 4), round(259 / W, 4), round(179 / H, 4)]], boxes
+    assert m[100, 225] and not m[100, 75] and m[100, 188] and not m[100, 150], 'la derecha, dilatada, sin tocar a la izquierda'
+    # Una cara sin cuerpo: no hay máscara y se dice.
+    m2, _, issues2 = M.hole_mask([izq], [(face(cx=75, cy=60, fw=40, fh=50), 0.0)], [pose(cx=600, cy=60)], [0], 5)
+    assert m2 is None and issues2 == ['HOLE_NO_PERSON_MASK:0']
+    for raw in ['x', {'persons': []}, {'persons': [0, 0]}, {'persons': [0], 'dilate_px': 0}, {'otra': 1}]:
+        try:
+            M.parse_hole(raw)
+        except M.MeasureError as e:
+            assert e.label == 'MEASURE_BAD_REQUEST'
+            continue
+        raise AssertionError(f'no falló: {raw!r}')
+    assert M.parse_hole({'persons': [1]}) == {'persons': [1], 'dilate_px': M.HOLE_DILATE_DEFAULT}
+    try:
+        M.hole_mask([izq, der], faces, poses, [5], 5)
+        raise AssertionError('índice fuera de rango sin fallar')
+    except M.MeasureError as e:
+        assert e.label == 'MEASURE_BAD_REQUEST'
+
+
 test('1 · measure: ausente mide todo; mal formado, 400 con nombre', t1)
 test('2 · hombros / cara y sus casos no válidos', t2)
 test('3 · cada cara con su pose', t3)
@@ -172,5 +201,6 @@ test('4 · el pelo cuenta sólo la persona: fondo oscuro o claro, la misma medid
 test('5 · identidad: reparto uno a uno por coseno, el resto es complemento', t5)
 test('6 · la alineación a la plantilla ArcFace es una semejanza exacta', t6)
 test('7 · escena: cambiar sólo a la persona no la cambia; un desplazamiento se encuentra; otra escena no pasa', t7)
-print(f'\n{7 - len(fails)} ok, {len(fails)} fallan')
+test('8 · hueco: la persona pedida, dilatada, sin tocar a la vecina; sin cuerpo lo dice; índices validados', t8)
+print(f'\n{8 - len(fails)} ok, {len(fails)} fallan')
 sys.exit(1 if fails else 0)

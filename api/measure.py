@@ -25,7 +25,11 @@ no eran las de la marca, y la edición «misma escena» devolvió otra escena (m
         correlación del gradiente del FONDO —lo que no es persona en ninguna de las dos— contra la imagen de referencia,
         buscando la escala y el desplazamiento del reencuadre. Medido: la misma escena 0,86; otra, ≤ 0,29.
 
-Pedido:  { image_url | image_data_url, measure?: { body?: true, hair?: true | { dark_threshold },
+  hole (2026-11-21, no es una medida: prepara el reemplazo): con `hole: { persons: [i], dilate_px? }` devuelve la imagen
+        con esas personas tapadas en gris plano (su máscara de PoseLandmarker, dilatada) y sus cajas. ImageLab
+        `generation_mode: 'replace_person'` pinta a quien entra sólo en ese hueco.
+
+Pedido:  { image_url | image_data_url, hole?: { persons: [índice], dilate_px? }, measure?: { body?: true, hair?: true | { dark_threshold },
                                                  identity?: true | { references: [{ id, embeddings: [[128]] }], threshold?, embed? },
                                                  scene?: { reference_image_url | reference_image_data_url } } }
          GET /api/measure?image_url=https://…  (sólo para diagnóstico; mismas reglas)
@@ -84,7 +88,12 @@ MAX_ID_YAW = 35.0
 ID_THRESHOLD_DEFAULT = 0.363   # coseno de SFace en el que OpenCV fija «misma persona» (umbral publicado del modelo)
 SCENE_WIDTH = 64                # ancho al que se reducen las dos imágenes para comparar su escena
 SCENE_SCALES = tuple(round(0.75 + 0.05 * i, 2) for i in range(13))   # 0,75 … 1,35: el reencuadre que se tolera
-SCENE_BG_MIN_SHARE = 0.3        # con menos fondo común que este tanto de la imagen, la escena no se puede comparar
+SCENE_BG_MIN_SHARE = 0.3
+# 2026-11-21 — el HUECO de la persona que sale, en gris plano: el generador pinta a la que entra sólo ahí (medido el
+# 2026-11-21 en 8cde215d: escena conservada 0,814 y la persona nueva medida como la pedida, 0,873). La dilatación por
+# defecto se midió sobre una imagen de 1080 px de ancho: 41 px tapa el borde sin comerse a la vecina.
+HOLE_DILATE_DEFAULT = 41
+HOLE_GREY = (128, 128, 128)        # con menos fondo común que este tanto de la imagen, la escena no se puede comparar
 # La plantilla de ArcFace (5 puntos en 112 × 112): ojos, nariz y comisuras. SFace espera la cara alineada a ella.
 ARCFACE_112 = ((38.2946, 51.6963), (73.5318, 51.5014), (56.0252, 71.7366), (41.5493, 92.3655), (70.7299, 92.2041))
 FETCH_TIMEOUT_S = 20
@@ -253,6 +262,49 @@ def scene_alignment(ref_g, ref_bg, cands):
         out['similarity'] = round(out['similarity'], 3)
     out['valid'] = not out['issues']
     return out
+
+
+def hole_mask(masks, faces, poses, targets, dilate_px):
+    """La máscara del hueco: la unión de las máscaras de persona de las caras `targets` (índices de la lista de personas
+    ordenada de izquierda a derecha), dilatada `dilate_px` para que el borde no deje restos de la persona que sale.
+    Devuelve (máscara, cajas en 0..1, issues). Una cara sin cuerpo asociado no tiene máscara: HOLE_NO_PERSON_MASK."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+    orden = sorted(range(len(faces)), key=lambda k: faces[k][0][:, 0].min())
+    H, W = masks[0].shape if masks else (0, 0)
+    issues, union, boxes = [], None, []
+    for t in targets:
+        if not isinstance(t, int) or isinstance(t, bool) or not 0 <= t < len(orden):
+            raise MeasureError('MEASURE_BAD_REQUEST', f'hole.persons: {t!r} no es una persona de la imagen (hay {len(orden)})', 400)
+        F = faces[orden[t]][0]
+        j = pair_pose(F[1], float(np.linalg.norm(F[234] - F[454])), poses)
+        if j < 0 or j >= len(masks):
+            issues.append(f'HOLE_NO_PERSON_MASK:{t}')
+            continue
+        m = masks[j]
+        union = m.copy() if union is None else (union | m)
+        ys, xs = np.where(m)
+        boxes.append([round(float(xs.min() / W), 4), round(float(ys.min() / H), 4), round(float(xs.max() / W), 4), round(float(ys.max() / H), 4)])
+    if union is None:
+        return None, boxes, issues
+    k = max(3, int(dilate_px) | 1)
+    union = np.asarray(Image.fromarray(union.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(k))) > 127
+    return union, boxes, issues
+
+
+def parse_hole(raw):
+    """`hole`: `{ persons: [índice, …], dilate_px? }` (índices de `persons`, de izquierda a derecha)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {'persons', 'dilate_px'}:
+        raise MeasureError('MEASURE_BAD_REQUEST', 'hole debe ser { persons: [índices], dilate_px? }', 400)
+    ps = raw.get('persons')
+    if not isinstance(ps, list) or not 1 <= len(ps) <= MAX_FACES or len(set(map(str, ps))) != len(ps):
+        raise MeasureError('MEASURE_BAD_REQUEST', f'hole.persons: de 1 a {MAX_FACES} índices distintos', 400)
+    d = raw.get('dilate_px', HOLE_DILATE_DEFAULT)
+    if not isinstance(d, int) or isinstance(d, bool) or not 1 <= d <= 201:
+        raise MeasureError('MEASURE_BAD_REQUEST', 'hole.dilate_px: entero entre 1 y 201', 400)
+    return {'persons': ps, 'dilate_px': d}
 
 
 def parse_measure(raw):
@@ -513,6 +565,18 @@ def run(body):
     if want.get('scene'):
         ref = load_image(want['scene'])
         out['scene'] = measure_scene(ref, rgb, analyze(ref), found)
+    hole = parse_hole(body.get('hole'))
+    if hole:
+        m, boxes, issues = hole_mask(found[2], found[0], found[1], hole['persons'], hole['dilate_px'])
+        if m is None:
+            raise MeasureError('HOLE_NO_PERSON_MASK', f'ninguna de las personas pedidas tiene máscara: {", ".join(issues)}', 422)
+        from PIL import Image
+        img = rgb.copy()
+        img[m] = HOLE_GREY
+        buf = io.BytesIO()
+        Image.fromarray(img).save(buf, format='JPEG', quality=90)
+        out['hole'] = {'image_data_url': 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode(),
+                       'boxes': boxes, 'share': round(float(m.mean()), 4), 'issues': issues}
     out['models'] = {k: v[1][:12] for k, v in MODELS.items() if k in _DET or k != 'sface'}
     out['duration_ms'] = int((time.time() - t0) * 1000)
     return out
