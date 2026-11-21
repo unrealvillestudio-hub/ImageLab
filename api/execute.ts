@@ -3652,6 +3652,14 @@ export function normalizeReplace(raw: unknown, personaNames: readonly string[], 
     }
     out.push({ persona: name, box: box as [number, number, number, number], side: replaceSideOf(box), outfit: typeof outfit === 'string' && outfit.trim() ? outfit.trim() : null });
   }
+  // Con dos o más huecos, el lado es RELATIVO (el de más a la izquierda, el de más a la derecha): una persona sentada con
+  // las piernas hacia el otro lado tiene la caja corrida al centro (medido el 2026-11-21 en 8cde215d) y el lado absoluto
+  // confundiría los huecos. Con uno solo, el lado no hace falta para encontrarlo.
+  if (out.length >= 2) {
+    const cx = (e: ReplaceEntry) => (e.box[0] + e.box[2]) / 2;
+    const orden = [...out].sort((a, b) => cx(a) - cx(b));
+    orden.forEach((e, k) => { e.side = k === 0 ? 'left' : k === orden.length - 1 ? 'right' : 'center'; });
+  }
   return { entries: out, error: null };
 }
 
@@ -3672,7 +3680,7 @@ export function replacePersonPrompt(args: {
   args.people.forEach((p, i) => {
     const img = i + 2;
     const parts = [
-      `Into the grey area ${REPLACE_SIDE_WORDS[p.side]}, paint ${p.name}, the person in image ${img}, ` +
+      `Into the grey area${many ? ` ${REPLACE_SIDE_WORDS[p.side]}` : ''}, paint ${p.name}, the person in image ${img}, ` +
       'in the same position, size and posture as the grey silhouette, doing what the scene around shows (seated where a seat is, at the table, at the microphone, holding what is there).',
       `${p.name} must be exactly the person in image ${img}: same face, same hair, same skin and build. ${p.description}`,
       'The head is turned at least three-quarters toward the camera, so the whole face and both eyes are visible.',

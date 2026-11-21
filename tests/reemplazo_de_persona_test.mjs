@@ -75,7 +75,12 @@ await test('3 · la instrucción: sólo el hueco, cada persona con SU imagen, su
   assert.match(p, /never into the lens/);
   assert.match(p, /never a collage/);
   assert.match(p, /2 people were removed/);
-  assert.match(M.replacePersonPrompt({ people: [{ name: 'Ana', description: 'D.', side: 'center' }], gaze: 'camera' }), /look into the lens/);
+  const una = M.replacePersonPrompt({ people: [{ name: 'Ana', description: 'D.', side: 'center' }], gaze: 'camera' });
+  assert.match(una, /look into the lens/);
+  assert.match(una, /Into the grey area, paint Ana/, 'con un solo hueco no se nombra el lado');
+  // Dos huecos: el lado es relativo. Una caja corrida al centro sigue siendo «la de la derecha» si está más a la derecha.
+  const rel = M.normalizeReplace([{ persona: 'Ana', box: [0.17, 0.29, 0.74, 0.98] }, { persona: 'Beto', box: [0.05, 0.3, 0.45, 0.98] }], ['Ana', 'Beto'], 3);
+  assert.deepEqual(rel.entries.map((e) => e.side), ['right', 'left']);
 });
 
 const handler = await loadHandler();
@@ -95,7 +100,7 @@ await test('4 · handler: imagen con hueco primero, una tarjeta por persona, sin
   const imgs = parts.filter((p) => p.inlineData).map((p) => Buffer.from(p.inlineData.data, 'base64').toString('utf8'));
   assert.deepEqual(imgs, ['IMG:hueco', 'IMG:https://cdn.example.invalid/tarjeta-a.jpg']);
   const texto = parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join(' ');
-  assert.match(texto, new RegExp(`grey area on the right, paint ${A.name}, the person in image 2`));
+  assert.match(texto, new RegExp(`Into the grey area, paint ${A.name}, the person in image 2`));
   assert.equal(r.json.generation_mode, 'replace_person');
   assert.deepEqual(r.json.personas_used, [A.name]);
   assert.equal(r.json.prompt_builder_version, null);
