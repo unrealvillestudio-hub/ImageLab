@@ -29,7 +29,9 @@ assert.ok(i >= 0 && j > i, 'bloque REEMPLAZO no encontrado');
 const bloque = source.slice(i, j + E.length);
 const dir = mkdtempSync(join(tmpdir(), 'reemplazo-'));
 const ruta = join(dir, 'reemplazo.mts');
-writeFileSync(ruta, bloque + '\n', 'utf8');
+// 2026-11-21 — el reemplazo usa el papel en la conversación (bloque SCENE-PART).
+const SP = source.slice(source.indexOf('// ── SCENE-PART:BEGIN ──'), source.indexOf('// ── SCENE-PART:END ──'));
+writeFileSync(ruta, SP + '\n' + bloque + '\n', 'utf8');
 const M = await import(pathToFileURL(ruta).href);
 
 let pass = 0; const fails = [];
